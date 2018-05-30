@@ -942,7 +942,7 @@ enum ovs_action_attr {
 	OVS_ACTION_ATTR_CLONE,         /* Nested OVS_CLONE_ATTR_*.  */
 	OVS_ACTION_ATTR_METER,         /* u32 meter number. */
 #endif
-	OVS_ACTION_ATTR_PROBDROP=22,     /* unit32_t, probability in [0,2^32 -1] */
+	OVS_ACTION_ATTR_PROBDROP=23,     /* unit32_t, probability in [0,2^32 -1] */
 
 	__OVS_ACTION_ATTR_MAX,	      /* Nothing past this will be accepted
 				       * from userspace. */

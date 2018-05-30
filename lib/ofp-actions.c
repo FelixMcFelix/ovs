@@ -6880,21 +6880,17 @@ parse_prob(char *arg, struct ofpbuf *ofpacts)
 
 /* Go from string-formatted args into an action struct. */
 static char * OVS_WARN_UNUSED_RESULT
-parse_PROBDROP(char *arg,
-                    const struct ofputil_port_map *port_map OVS_UNUSED,
-                    struct ofpbuf *ofpacts,
-                    enum ofputil_protocol *usable_protocols OVS_UNUSED)
+parse_PROBDROP(char *arg, const struct ofpact_parse_params *pp)
 {
-    return parse_prob(arg, ofpacts);
+    return parse_prob(arg, pp->ofpacts);
 }
 
 /* Used when printing info to console. */
 static void
 format_PROBDROP(const struct ofpact_probdrop *a,
-                    const struct ofputil_port_map *port_map OVS_UNUSED,
-                    struct ds *s)
+                const struct ofpact_format_params *fp)
 {
-    ds_put_format(s, "probdrop:%"PRIu32, a->prob);
+    ds_put_format(fp->s, "probdrop:%"PRIu32, a->prob);
 }
 
 static void

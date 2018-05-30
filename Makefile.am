@@ -91,7 +91,10 @@ EXTRA_DIST = \
 	$(MAN_ROOTS) \
 	Vagrantfile \
 	Vagrantfile-FreeBSD \
-	.mailmap
+	.mailmap \
+	README.md \
+	premake.sh \
+	kernupdate.sh
 bin_PROGRAMS =
 sbin_PROGRAMS =
 bin_SCRIPTS =

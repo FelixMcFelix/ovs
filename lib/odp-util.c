@@ -122,8 +122,6 @@ odp_action_len(uint16_t type)
     case OVS_ACTION_ATTR_PUSH_ETH: return sizeof(struct ovs_action_push_eth);
     case OVS_ACTION_ATTR_POP_ETH: return 0;
     case OVS_ACTION_ATTR_CLONE: return ATTR_LEN_VARIABLE;
-    case OVS_ACTION_ATTR_ENCAP_NSH: return ATTR_LEN_VARIABLE;
-    case OVS_ACTION_ATTR_DECAP_NSH: return 0;
     case OVS_ACTION_ATTR_PROBDROP: return sizeof(uint32_t);
     case OVS_ACTION_ATTR_PUSH_NSH: return ATTR_LEN_VARIABLE;
     case OVS_ACTION_ATTR_POP_NSH: return 0;

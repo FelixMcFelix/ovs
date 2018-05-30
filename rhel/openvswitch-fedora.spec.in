@@ -92,13 +92,8 @@ Requires: openssl hostname iproute module-init-tools
 #Upstream kernel commit 4f647e0a3c37b8d5086214128614a136064110c3
 #Requires: kernel >= 3.15.0-0
 
-Requires(post): /usr/bin/getent
-Requires(post): /usr/sbin/useradd
-Requires(post): /usr/bin/sed
-%if %{with dpdk}
-Requires(post): /usr/sbin/usermod
-Requires(post): /usr/sbin/groupadd
-%endif
+Requires(pre): shadow-utils
+Requires(post): /bin/sed
 Requires(post): systemd-units
 Requires(preun): systemd-units
 Requires(postun): systemd-units
@@ -227,9 +222,15 @@ Docker network plugins for OVN.
 	--with-dpdk=$(dirname %{_datadir}/dpdk/*/.config) \
 %endif
 	--enable-ssl \
-	--with-pkidir=%{_sharedstatedir}/openvswitch/pki
+	--with-pkidir=%{_sharedstatedir}/openvswitch/pki \
+%if 0%{?fedora} > 22 || %{with build_python3}
+	PYTHON3=%{__python3} \
+	PYTHON=%{__python2}
+%else
+	PYTHON=%{__python}
+%endif
 
-/usr/bin/perl build-aux/dpdkstrip.pl \
+build-aux/dpdkstrip.py \
 %if %{with dpdk}
 	--dpdk \
 %else
@@ -239,9 +240,7 @@ Docker network plugins for OVN.
 	> rhel/usr_lib_systemd_system_ovs-vswitchd.service
 
 make %{?_smp_mflags}
-make selinux/openvswitch-custom.te
-cd selinux
-make -f %{_datadir}/selinux/devel/Makefile
+make selinux-policy
 
 %install
 rm -rf $RPM_BUILD_ROOT
@@ -386,17 +385,23 @@ rm -rf $RPM_BUILD_ROOT
     fi
 %endif
 
+%pre
+getent group openvswitch >/dev/null || groupadd -r openvswitch
+getent passwd openvswitch >/dev/null || \
+    useradd -r -g openvswitch -d / -s /sbin/nologin \
+    -c "Open vSwitch Daemons" openvswitch
+
+%if %{with dpdk}
+    getent group hugetlbfs >/dev/null || groupadd hugetlbfs
+    usermod -a -G hugetlbfs openvswitch
+%endif
+exit 0
+
 %post
 if [ $1 -eq 1 ]; then
-    getent passwd openvswitch >/dev/null || \
-        useradd -r -d / -s /sbin/nologin -c "Open vSwitch Daemons" openvswitch
-
     sed -i 's:^#OVS_USER_ID=:OVS_USER_ID=:' /etc/sysconfig/openvswitch
 
 %if %{with dpdk}
-    getent group hugetlbfs >/dev/null || \
-        groupadd hugetlbfs
-    usermod -a -G hugetlbfs openvswitch
     sed -i \
         's@OVS_USER_ID="openvswitch:openvswitch"@OVS_USER_ID="openvswitch:hugetlbfs"@'\
         /etc/sysconfig/openvswitch
@@ -487,12 +492,10 @@ fi
 
 %files -n %{_py2}-openvswitch
 %{python2_sitelib}/ovs
-%doc COPYING
 
 %if 0%{?fedora} > 22 || %{with build_python3}
 %files -n python3-openvswitch
 %{python3_sitelib}/ovs
-%doc COPYING
 %endif
 
 %files test
@@ -519,15 +522,16 @@ fi
 %{_includedir}/ovn/*
 
 %files
-%defattr(-,root,root)
-%{_sysconfdir}/bash_completion.d/ovs-appctl-bashcomp.bash
-%{_sysconfdir}/bash_completion.d/ovs-vsctl-bashcomp.bash
+%defattr(-,openvswitch,openvswitch)
 %dir %{_sysconfdir}/openvswitch
 %{_sysconfdir}/openvswitch/default.conf
 %config %ghost %{_sysconfdir}/openvswitch/conf.db
 %ghost %{_sysconfdir}/openvswitch/.conf.db.~lock~
 %config %ghost %{_sysconfdir}/openvswitch/system-id.conf
 %config(noreplace) %{_sysconfdir}/sysconfig/openvswitch
+%defattr(-,root,root)
+%{_sysconfdir}/bash_completion.d/ovs-appctl-bashcomp.bash
+%{_sysconfdir}/bash_completion.d/ovs-vsctl-bashcomp.bash
 %config(noreplace) %{_sysconfdir}/logrotate.d/openvswitch
 %{_unitdir}/openvswitch.service
 %{_unitdir}/ovsdb-server.service
@@ -563,9 +567,13 @@ fi
 %{_mandir}/man1/ovsdb-client.1*
 %{_mandir}/man1/ovsdb-server.1*
 %{_mandir}/man1/ovsdb-tool.1*
+%{_mandir}/man5/ovsdb-server.5*
 %{_mandir}/man5/ovs-vswitchd.conf.db.5*
+%{_mandir}/man5/ovsdb.5*
 %{_mandir}/man5/vtep.5*
 %{_mandir}/man7/ovs-fields.7*
+%{_mandir}/man7/ovsdb.7*
+%{_mandir}/man7/ovsdb-server.7*
 %{_mandir}/man8/vtep-ctl.8*
 %{_mandir}/man8/ovs-appctl.8*
 %{_mandir}/man8/ovs-bugtool.8*
@@ -581,9 +589,9 @@ fi
 %if %{with dpdk}
 %{_prefix}/lib/udev/rules.d/91-vfio.rules
 %endif
-%doc COPYING NOTICE README.rst NEWS rhel/README.RHEL.rst
+%doc NOTICE README.rst NEWS rhel/README.RHEL.rst
 /var/lib/openvswitch
-%attr(755,-,-) /var/log/openvswitch
+%attr(750,openvswitch,openvswitch) /var/log/openvswitch
 %ghost %attr(755,root,root) %{_rundir}/openvswitch
 
 %files ovn-docker

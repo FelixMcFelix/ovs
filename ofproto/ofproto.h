@@ -290,7 +290,7 @@ int ofproto_port_dump_done(struct ofproto_port_dump *);
 #define OFPROTO_FLOW_LIMIT_DEFAULT 200000
 #define OFPROTO_MAX_IDLE_DEFAULT 10000 /* ms */
 
-const char *ofproto_port_open_type(const char *datapath_type,
+const char *ofproto_port_open_type(const struct ofproto *,
                                    const char *port_type);
 int ofproto_port_add(struct ofproto *, struct netdev *, ofp_port_t *ofp_portp);
 int ofproto_port_del(struct ofproto *, ofp_port_t ofp_port);
@@ -312,6 +312,7 @@ void ofproto_reconnect_controllers(struct ofproto *);
 void ofproto_set_extra_in_band_remotes(struct ofproto *,
                                        const struct sockaddr_in *, size_t n);
 void ofproto_set_in_band_queue(struct ofproto *, int queue_id);
+void ofproto_set_bundle_idle_timeout(unsigned timeout);
 void ofproto_set_flow_limit(unsigned limit);
 void ofproto_set_max_idle(unsigned max_idle);
 void ofproto_set_forward_bpdu(struct ofproto *, bool forward_bpdu);

@@ -32,8 +32,6 @@ VLOG_DEFINE_THIS_MODULE(netlink_notifier);
 
 COVERAGE_DEFINE(nln_changed);
 
-static void nln_report(const struct nln *nln, void *change, int group);
-
 struct nln {
     struct nl_sock *notify_sock; /* Netlink socket. */
     struct ovs_list all_notifiers;   /* All nln notifiers. */
@@ -187,7 +185,7 @@ nln_run(struct nln *nln)
         int error;
 
         ofpbuf_use_stub(&buf, buf_stub, sizeof buf_stub);
-        error = nl_sock_recv(nln->notify_sock, &buf, false);
+        error = nl_sock_recv(nln->notify_sock, &buf, NULL, false);
         if (!error) {
             int group = nln->parse(&buf, nln->change);
 
@@ -225,7 +223,7 @@ nln_wait(struct nln *nln)
     }
 }
 
-static void
+void
 nln_report(const struct nln *nln, void *change, int group)
 {
     struct nln_notifier *notifier;

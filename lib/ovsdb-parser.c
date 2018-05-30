@@ -1,4 +1,4 @@
-/* Copyright (c) 2009, 2011, 2013, 2015 Nicira, Inc.
+/* Copyright (c) 2009, 2011, 2013, 2015, 2016 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -83,7 +83,7 @@ ovsdb_parser_member(struct ovsdb_parser *parser, const char *name,
     if (((int) value->type >= 0 && value->type < JSON_N_TYPES
          && types & (1u << value->type))
         || (types & OP_ID && value->type == JSON_STRING
-            && ovsdb_parser_is_id(value->u.string)))
+            && ovsdb_parser_is_id(value->string)))
     {
         sset_add(&parser->used, name);
         return value;
@@ -111,6 +111,18 @@ ovsdb_parser_raise_error(struct ovsdb_parser *parser, const char *format, ...)
         free(message);
 
         parser->error = error;
+    }
+}
+
+/* If 'parser' isn't already in an error state, sets its error to 'error'.
+ * Always takes ownership of 'error'. */
+void
+ovsdb_parser_put_error(struct ovsdb_parser *parser, struct ovsdb_error *error)
+{
+    if (!parser->error) {
+        parser->error = error;
+    } else {
+        ovsdb_error_destroy(error);
     }
 }
 

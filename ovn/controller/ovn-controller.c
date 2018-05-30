@@ -42,6 +42,7 @@
 #include "openvswitch/vlog.h"
 #include "ovn/actions.h"
 #include "ovn/lib/chassis-index.h"
+#include "ovn/lib/extend-table.h"
 #include "ovn/lib/ovn-sb-idl.h"
 #include "ovn/lib/ovn-util.h"
 #include "patch.h"
@@ -56,6 +57,9 @@
 #include "stream.h"
 #include "unixctl.h"
 #include "util.h"
+#include "timeval.h"
+#include "timer.h"
+#include "stopwatch.h"
 
 VLOG_DEFINE_THIS_MODULE(main);
 
@@ -66,9 +70,11 @@ static unixctl_cb_func inject_pkt;
 #define DEFAULT_BRIDGE_NAME "br-int"
 #define DEFAULT_PROBE_INTERVAL_MSEC 5000
 
+#define CONTROLLER_LOOP_STOPWATCH_NAME "ovn-controller-flow-generation"
+
 static void update_probe_interval(struct controller_ctx *,
                                   const char *ovnsb_remote);
-static void parse_options(int argc, char *argv[]);
+static char *parse_options(int argc, char *argv[]);
 OVS_NO_RETURN static void usage(void);
 
 /* Pending packet to be injected into connected OVS. */
@@ -77,8 +83,6 @@ struct pending_pkt {
     struct unixctl_conn *conn;
     char *flow_s;
 };
-
-static char *ovs_remote;
 
 struct local_datapath *
 get_local_datapath(const struct hmap *local_datapaths, uint32_t tunnel_key)
@@ -287,9 +291,22 @@ addr_sets_init(struct controller_ctx *ctx, struct shash *addr_sets)
 {
     const struct sbrec_address_set *as;
     SBREC_ADDRESS_SET_FOR_EACH (as, ctx->ovnsb_idl) {
-        expr_addr_sets_add(addr_sets, as->name,
-                           (const char *const *) as->addresses,
-                           as->n_addresses);
+        expr_const_sets_add(addr_sets, as->name,
+                            (const char *const *) as->addresses,
+                            as->n_addresses, true);
+    }
+}
+
+/* Iterate port groups in the southbound database.  Create and update the
+ * corresponding symtab entries as necessary. */
+static void
+port_groups_init(struct controller_ctx *ctx, struct shash *port_groups)
+{
+    const struct sbrec_port_group *pg;
+    SBREC_PORT_GROUP_FOR_EACH (pg, ctx->ovnsb_idl) {
+        expr_const_sets_add(port_groups, pg->name,
+                            (const char *const *) pg->ports,
+                            pg->n_ports, false);
     }
 }
 
@@ -581,7 +598,7 @@ main(int argc, char *argv[])
     ovs_cmdl_proctitle_init(argc, argv);
     set_program_name(argv[0]);
     service_start(&argc, &argv);
-    parse_options(argc, argv);
+    char *ovs_remote = parse_options(argc, argv);
     fatal_ignore_sigpipe();
 
     daemonize_start(false);
@@ -593,15 +610,16 @@ main(int argc, char *argv[])
     unixctl_command_register("exit", "", 0, 0, ovn_controller_exit, &exiting);
 
     /* Initialize group ids for loadbalancing. */
-    struct group_table group_table;
-    group_table.group_ids = bitmap_allocate(MAX_OVN_GROUPS);
-    bitmap_set1(group_table.group_ids, 0); /* Group id 0 is invalid. */
-    hmap_init(&group_table.desired_groups);
-    hmap_init(&group_table.existing_groups);
+    struct ovn_extend_table group_table;
+    ovn_extend_table_init(&group_table);
+
+    /* Initialize meter ids for QoS. */
+    struct ovn_extend_table meter_table;
+    ovn_extend_table_init(&meter_table);
 
     daemonize_complete();
 
-    ofctrl_init(&group_table);
+    ofctrl_init(&group_table, &meter_table);
     pinctrl_init();
     lflow_init();
 
@@ -615,6 +633,7 @@ main(int argc, char *argv[])
     char *ovnsb_remote = get_ovnsb_remote(ovs_idl_loop.idl);
     struct ovsdb_idl_loop ovnsb_idl_loop = OVSDB_IDL_LOOP_INITIALIZER(
         ovsdb_idl_create(ovnsb_remote, &sbrec_idl_class, true, true));
+    ovsdb_idl_set_leader_only(ovnsb_idl_loop.idl, false);
 
     create_ovnsb_indexes(ovnsb_idl_loop.idl);
     lport_init(ovnsb_idl_loop.idl);
@@ -637,6 +656,7 @@ main(int argc, char *argv[])
     unixctl_command_register("inject-pkt", "MICROFLOW", 1, 1, inject_pkt,
                              &pending_pkt);
 
+    stopwatch_create(CONTROLLER_LOOP_STOPWATCH_NAME, SW_MS);
     /* Main loop. */
     exiting = false;
     while (!exiting) {
@@ -694,6 +714,8 @@ main(int argc, char *argv[])
         if (br_int && chassis) {
             struct shash addr_sets = SHASH_INITIALIZER(&addr_sets);
             addr_sets_init(&ctx, &addr_sets);
+            struct shash port_groups = SHASH_INITIALIZER(&port_groups);
+            port_groups_init(&ctx, &port_groups);
 
             patch_run(&ctx, br_int, chassis);
 
@@ -706,13 +728,16 @@ main(int argc, char *argv[])
                             ct_zone_bitmap, &pending_ct_zones);
             if (ctx.ovs_idl_txn) {
                 if (ofctrl_can_put()) {
+                    stopwatch_start(CONTROLLER_LOOP_STOPWATCH_NAME,
+                                    time_msec());
+
                     commit_ct_zones(br_int, &pending_ct_zones);
 
                     struct hmap flow_table = HMAP_INITIALIZER(&flow_table);
                     lflow_run(&ctx, chassis,
                               &chassis_index, &local_datapaths, &group_table,
-                              &addr_sets, &flow_table, &active_tunnels,
-                              &local_lport_ids);
+                              &meter_table, &addr_sets, &port_groups,
+                              &flow_table, &active_tunnels, &local_lport_ids);
 
                     if (chassis_id) {
                         bfd_run(&ctx, br_int, chassis, &local_datapaths,
@@ -722,6 +747,9 @@ main(int argc, char *argv[])
                                  br_int, chassis, &ct_zones,
                                  &flow_table, &local_datapaths, &local_lports,
                                  &chassis_index, &active_tunnels);
+
+                    stopwatch_stop(CONTROLLER_LOOP_STOPWATCH_NAME,
+                                   time_msec());
 
                     ofctrl_put(&flow_table, &pending_ct_zones,
                                get_nb_cfg(ctx.ovnsb_idl));
@@ -738,7 +766,7 @@ main(int argc, char *argv[])
 
             if (pending_pkt.conn) {
                 char *error = ofctrl_inject_pkt(br_int, pending_pkt.flow_s,
-                                                &addr_sets);
+                                                &port_groups, &addr_sets);
                 if (error) {
                     unixctl_command_reply_error(pending_pkt.conn, error);
                     free(error);
@@ -752,8 +780,10 @@ main(int argc, char *argv[])
             update_sb_monitors(ctx.ovnsb_idl, chassis,
                                &local_lports, &local_datapaths);
 
-            expr_addr_sets_destroy(&addr_sets);
+            expr_const_sets_destroy(&addr_sets);
             shash_destroy(&addr_sets);
+            expr_const_sets_destroy(&port_groups);
+            shash_destroy(&port_groups);
         }
 
         /* If we haven't handled the pending packet insertion
@@ -790,6 +820,7 @@ main(int argc, char *argv[])
             ofctrl_wait();
             pinctrl_wait(&ctx);
         }
+
         ovsdb_idl_loop_commit_and_wait(&ovnsb_idl_loop);
 
         if (ovsdb_idl_loop_commit_and_wait(&ovs_idl_loop) == 1) {
@@ -845,17 +876,8 @@ main(int argc, char *argv[])
     simap_destroy(&ct_zones);
     shash_destroy(&pending_ct_zones);
 
-    bitmap_free(group_table.group_ids);
-    hmap_destroy(&group_table.desired_groups);
-
-    struct group_info *installed, *next_group;
-    HMAP_FOR_EACH_SAFE(installed, next_group, hmap_node,
-                       &group_table.existing_groups) {
-        hmap_remove(&group_table.existing_groups, &installed->hmap_node);
-        ds_destroy(&installed->group);
-        free(installed);
-    }
-    hmap_destroy(&group_table.existing_groups);
+    ovn_extend_table_destroy(&group_table);
+    ovn_extend_table_destroy(&meter_table);
 
     ovsdb_idl_loop_destroy(&ovs_idl_loop);
     ovsdb_idl_loop_destroy(&ovnsb_idl_loop);
@@ -867,7 +889,7 @@ main(int argc, char *argv[])
     exit(retval);
 }
 
-static void
+static char *
 parse_options(int argc, char *argv[])
 {
     enum {
@@ -930,6 +952,7 @@ parse_options(int argc, char *argv[])
     argc -= optind;
     argv += optind;
 
+    char *ovs_remote;
     if (argc == 0) {
         ovs_remote = xasprintf("unix:%s/db.sock", ovs_rundir());
     } else if (argc == 1) {
@@ -938,6 +961,7 @@ parse_options(int argc, char *argv[])
         VLOG_FATAL("exactly zero or one non-option argument required; "
                    "use --help for usage");
     }
+    return ovs_remote;
 }
 
 static void
@@ -947,7 +971,7 @@ usage(void)
            "usage %s [OPTIONS] [OVS-DATABASE]\n"
            "where OVS-DATABASE is a socket on which the OVS OVSDB server is listening.\n",
                program_name, program_name);
-    stream_usage("OVS-DATABASE", true, false, false);
+    stream_usage("OVS-DATABASE", true, false, true);
     daemon_usage();
     vlog_usage();
     printf("\nOther options:\n"

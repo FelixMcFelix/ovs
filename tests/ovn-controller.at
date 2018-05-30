@@ -51,10 +51,7 @@ patch
 check_bridge_mappings () {
     local_mappings=$1
     sysid=$(ovs-vsctl get Open_vSwitch . external_ids:system-id)
-    chassis_mappings=$(ovn-sbctl get Chassis ${sysid} external_ids:ovn-bridge-mappings | sed -e 's/\"//g')
-    echo $local_mappings
-    echo $chassis_mappings
-    AT_CHECK([test "${local_mappings}" = "${chassis_mappings}"])
+    OVS_WAIT_UNTIL([test x"${local_mappings}" = x$(ovn-sbctl get Chassis ${sysid} external_ids:ovn-bridge-mappings | sed -e 's/\"//g')])
 }
 
 # Initially there should be no patch ports.
@@ -96,7 +93,7 @@ AT_CHECK([ovn-sbctl \
     -- create Port_Binding datapath=@dp1 logical_port=foo tunnel_key=1 type=patch options:peer=bar \
     -- create Port_Binding datapath=@dp2 logical_port=bar tunnel_key=2 type=patch options:peer=foo \
     -- create Port_Binding datapath=@dp1 logical_port=dp1vif tunnel_key=3 \
-| ${PERL} $srcdir/uuidfilt.pl], [0], [<0>
+| uuidfilt], [0], [<0>
 <1>
 <2>
 <3>
@@ -161,7 +158,8 @@ OVS_WAIT_UNTIL([check_datapath_type bar])
 ovs-vsctl set Bridge br-int datapath-type=\"\"
 OVS_WAIT_UNTIL([check_datapath_type ""])
 
-expected_iface_types=$(ovs-vsctl get Open_vSwitch . iface_types|sed 's/[[]][[ ]]//g')
+expected_iface_types=$(ovs-vsctl get Open_vSwitch . iface_types | tr -d '[[]] ""')
+echo "expected_iface_types = ${expected_iface_types}"
 chassis_iface_types=$(ovn-sbctl get Chassis ${sysid} external_ids:iface-types | sed -e 's/\"//g')
 echo "chassis_iface_types = ${chassis_iface_types}"
 AT_CHECK([test "${expected_iface_types}" = "${chassis_iface_types}"])

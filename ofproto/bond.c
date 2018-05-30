@@ -38,7 +38,6 @@
 #include "openvswitch/list.h"
 #include "openvswitch/match.h"
 #include "openvswitch/ofp-actions.h"
-#include "openvswitch/ofp-util.h"
 #include "openvswitch/ofpbuf.h"
 #include "openvswitch/vlog.h"
 #include "packets.h"
@@ -389,7 +388,9 @@ update_recirc_rules__(struct bond *bond)
             }
 
             hmap_remove(&bond->pr_rule_ops, &pr_op->hmap_node);
-            *pr_op->pr_rule = NULL;
+            if (bond->hash) {
+                *pr_op->pr_rule = NULL;
+            }
             free(pr_op);
             break;
         }

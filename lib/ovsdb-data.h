@@ -21,6 +21,10 @@
 #include "ovsdb-types.h"
 #include "openvswitch/shash.h"
 
+#ifdef  __cplusplus
+extern "C" {
+#endif
+
 #define MAX_OVSDB_ATOM_RANGE_SIZE 4096
 
 struct ds;
@@ -169,6 +173,11 @@ struct ovsdb_error *ovsdb_transient_datum_from_json(
                                           const struct ovsdb_type *,
                                           const struct json *)
     OVS_WARN_UNUSED_RESULT;
+struct ovsdb_error *
+ovsdb_unconstrained_datum_from_json(struct ovsdb_datum *,
+                                    const struct ovsdb_type *,
+                                    const struct json *)
+    OVS_WARN_UNUSED_RESULT;
 struct json *ovsdb_datum_to_json(const struct ovsdb_datum *,
                                  const struct ovsdb_type *);
 
@@ -182,6 +191,12 @@ void ovsdb_datum_to_bare(const struct ovsdb_datum *,
                          const struct ovsdb_type *, struct ds *);
 
 void ovsdb_datum_from_smap(struct ovsdb_datum *, const struct smap *);
+
+struct ovsdb_error *ovsdb_datum_convert(struct ovsdb_datum *dst,
+                                        const struct ovsdb_type *dst_type,
+                                        const struct ovsdb_datum *src,
+                                        const struct ovsdb_type *src_type)
+    OVS_WARN_UNUSED_RESULT;
 
 /* Comparison. */
 uint32_t ovsdb_datum_hash(const struct ovsdb_datum *,
@@ -240,6 +255,11 @@ void ovsdb_datum_add_unsafe(struct ovsdb_datum *,
                             const struct ovsdb_type *,
                             const union ovsdb_atom *range_end_atom);
 
+/* Transactions with named-uuid row names. */
+struct json *ovsdb_datum_to_json_with_row_names(const struct ovsdb_datum *,
+                                                const struct ovsdb_type *);
+char *ovsdb_data_row_name(const struct uuid *);
+
 /* Type checking. */
 static inline bool
 ovsdb_datum_conforms_to_type(const struct ovsdb_datum *datum,
@@ -281,5 +301,9 @@ bool ovsdb_token_is_delim(unsigned char);
 
 struct ovsdb_error *ovsdb_atom_range_check_size(int64_t range_start,
                                                 int64_t range_end);
+
+#ifdef  __cplusplus
+}
+#endif
 
 #endif /* ovsdb-data.h */

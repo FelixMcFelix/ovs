@@ -52,6 +52,7 @@
 #include <net/ip6_route.h>
 #endif
 
+#include <net/tun_proto.h>
 #include <net/vxlan.h>
 #include "gso.h"
 #include "vport-netdev.h"
@@ -607,19 +608,9 @@ static bool vxlan_parse_gpe_hdr(struct vxlanhdr *unparsed,
 	if (gpe->oam_flag)
 		return false;
 
-	switch (gpe->next_protocol) {
-	case VXLAN_GPE_NP_IPV4:
-		*protocol = htons(ETH_P_IP);
-		break;
-	case VXLAN_GPE_NP_IPV6:
-		*protocol = htons(ETH_P_IPV6);
-		break;
-	case VXLAN_GPE_NP_ETHERNET:
-		*protocol = htons(ETH_P_TEB);
-		break;
-	default:
+	*protocol = tun_p_to_eth_p(gpe->next_protocol);
+	if (!*protocol)
 		return false;
-	}
 
 	unparsed->vx_flags &= ~VXLAN_GPE_USED_BITS;
 	return true;
@@ -815,19 +806,10 @@ static int vxlan_build_gpe_hdr(struct vxlanhdr *vxh, u32 vxflags,
 	struct vxlanhdr_gpe *gpe = (struct vxlanhdr_gpe *)vxh;
 
 	gpe->np_applied = 1;
-
-	switch (protocol) {
-	case htons(ETH_P_IP):
-		gpe->next_protocol = VXLAN_GPE_NP_IPV4;
-		return 0;
-	case htons(ETH_P_IPV6):
-		gpe->next_protocol = VXLAN_GPE_NP_IPV6;
-		return 0;
-	case htons(ETH_P_TEB):
-		gpe->next_protocol = VXLAN_GPE_NP_ETHERNET;
-		return 0;
-	}
-	return -EPFNOSUPPORT;
+	gpe->next_protocol = tun_p_from_eth_p(protocol);
+	if (!gpe->next_protocol)
+		return -EPFNOSUPPORT;
+	return 0;
 }
 
 static int vxlan_build_skb(struct sk_buff *skb, struct dst_entry *dst,
@@ -1499,7 +1481,12 @@ static const struct net_device_ops vxlan_netdev_ether_ops = {
 	.ndo_start_xmit		= vxlan_dev_xmit,
 	.ndo_get_stats64	= ip_tunnel_get_stats64,
 	.ndo_set_rx_mode	= vxlan_set_multicast_list,
+#ifdef	HAVE_RHEL7_MAX_MTU
+	.ndo_size		= sizeof(struct net_device_ops),
+	.extended.ndo_change_mtu = vxlan_change_mtu,
+#else
 	.ndo_change_mtu		= vxlan_change_mtu,
+#endif
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_set_mac_address	= eth_mac_addr,
 #ifdef HAVE_NDO_FILL_METADATA_DST
@@ -1514,7 +1501,12 @@ static const struct net_device_ops vxlan_netdev_raw_ops = {
 	.ndo_stop		= vxlan_stop,
 	.ndo_start_xmit		= vxlan_dev_xmit,
 	.ndo_get_stats64	= ip_tunnel_get_stats64,
+#ifdef	HAVE_RHEL7_MAX_MTU
+	.ndo_size		= sizeof(struct net_device_ops),
+	.extended.ndo_change_mtu = vxlan_change_mtu,
+#else
 	.ndo_change_mtu		= vxlan_change_mtu,
+#endif
 #ifdef HAVE_NDO_FILL_METADATA_DST
 	.ndo_fill_metadata_dst	= ovs_vxlan_fill_metadata_dst,
 #endif

@@ -289,10 +289,7 @@ def idltest_find_simple2(idl, i):
 
 
 def idltest_find_simple3(idl, i):
-    for row in six.itervalues(idl.tables["simple3"].rows):
-        if row.name == i:
-            return row
-    return None
+    return next(idl.index_equal("simple3", "simple3_by_name", i), None)
 
 
 def idl_set(idl, commands, step):
@@ -555,6 +552,11 @@ def do_idl(schema_file, remote, *commands):
     track_notify = False
 
     if remote.startswith("ssl:"):
+        if len(commands) < 3:
+            sys.stderr.write("SSL connection requires private key, "
+                             "certificate for private key, and peer CA "
+                             "certificate as arguments\n")
+            sys.exit(1)
         ovs.stream.Stream.ssl_set_private_key_file(commands[0])
         ovs.stream.Stream.ssl_set_certificate_file(commands[1])
         ovs.stream.Stream.ssl_set_ca_cert_file(commands[2])
@@ -579,6 +581,8 @@ def do_idl(schema_file, remote, *commands):
     else:
         schema_helper.register_all()
     idl = ovs.db.idl.Idl(remote, schema_helper)
+    if "simple3" in idl.tables:
+        idl.index_create("simple3", "simple3_by_name")
 
     if commands:
         error, stream = ovs.stream.Stream.open_block(
@@ -849,7 +853,7 @@ def main(argv):
             sys.stderr.write("%s: \"%s\" requires at least %d arguments but "
                              "only %d provided\n"
                              % (ovs.util.PROGRAM_NAME, command_name,
-                                n_args, len(args)))
+                                n_args[0], len(args)))
             sys.exit(1)
     elif type(n_args) == int:
         if len(args) != n_args:

@@ -18,10 +18,11 @@
 #include <errno.h>
 #include "byte-order.h"
 #include "openflow/openflow.h"
+#include "openflow/nicira-ext.h"
 #include "openvswitch/dynamic-string.h"
 #include "openvswitch/ofp-errors.h"
 #include "openvswitch/ofp-msgs.h"
-#include "openvswitch/ofp-util.h"
+#include "openvswitch/ofp-print.h"
 #include "openvswitch/ofpbuf.h"
 #include "openvswitch/vlog.h"
 #include "util.h"
@@ -203,7 +204,7 @@ ofperr_encode_msg__(enum ofperr error, enum ofp_version ofp_version,
         ofpbuf_put(buf, &vendor, sizeof vendor);
     }
 
-    ofpbuf_put(buf, data, data_len);
+    ofpbuf_put(buf, data, MIN(data_len, UINT16_MAX - buf->size));
     ofpmsg_update_length(buf);
 
     return buf;
@@ -215,16 +216,15 @@ ofperr_encode_msg__(enum ofperr error, enum ofp_version ofp_version,
  * 'oh->version' determines the OpenFlow version of the error reply.
  * 'oh->xid' determines the xid of the error reply.
  * The error reply will contain an initial subsequence of 'oh', up to
- * 'oh->length' or 64 bytes, whichever is shorter.
+ * 'oh->length' (or however much fits).
  *
  * This function isn't appropriate for encoding OFPET_HELLO_FAILED error
  * messages.  Use ofperr_encode_hello() instead. */
 struct ofpbuf *
 ofperr_encode_reply(enum ofperr error, const struct ofp_header *oh)
 {
-    uint16_t len = ntohs(oh->length);
-
-    return ofperr_encode_msg__(error, oh->version, oh->xid, oh, MIN(len, 64));
+    return ofperr_encode_msg__(error, oh->version, oh->xid,
+                               oh, ntohs(oh->length));
 }
 
 /* Creates and returns an OpenFlow message of type OFPT_ERROR that conveys the
@@ -239,6 +239,24 @@ ofperr_encode_hello(enum ofperr error, enum ofp_version ofp_version,
                     const char *s)
 {
     return ofperr_encode_msg__(error, ofp_version, htonl(0), s, strlen(s));
+}
+
+void
+ofperr_msg_format(struct ds *string, enum ofperr error,
+                  const struct ofpbuf *payload,
+                  const struct ofputil_port_map *port_map,
+                  const struct ofputil_table_map *table_map)
+{
+    ds_put_format(string, " %s\n", ofperr_get_name(error));
+
+    if (error == OFPERR_OFPHFC_INCOMPATIBLE || error == OFPERR_OFPHFC_EPERM) {
+        ds_put_printable(string, payload->data, payload->size);
+    } else {
+        char *s = ofp_to_string(payload->data, payload->size,
+                                port_map, table_map, 1);
+        ds_put_cstr(string, s);
+        free(s);
+    }
 }
 
 int

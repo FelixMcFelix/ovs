@@ -62,8 +62,8 @@ struct tc_pedit_key_ex {
 
 struct flower_key_to_pedit {
     enum pedit_header_type htype;
-    int flower_offset;
     int offset;
+    int flower_offset;
     int size;
 };
 
@@ -130,6 +130,10 @@ static struct flower_key_to_pedit flower_pedit_map[] = {
         MEMBER_SIZEOF(struct tc_flower_key, udp_dst)
     },
 };
+
+static inline int
+csum_update_flag(struct tc_flower *flower,
+                 enum pedit_header_type htype);
 
 struct tcmsg *
 tc_make_request(int ifindex, int type, unsigned int flags,
@@ -277,6 +281,8 @@ static const struct nl_policy tca_flower_policy[] = {
                                            .optional = true, },
     [TCA_FLOWER_KEY_ENC_UDP_DST_PORT] = { .type = NL_A_U16,
                                           .optional = true, },
+    [TCA_FLOWER_KEY_FLAGS] = { .type = NL_A_BE32, .optional = true, },
+    [TCA_FLOWER_KEY_FLAGS_MASK] = { .type = NL_A_BE32, .optional = true, },
     [TCA_FLOWER_KEY_IP_TTL] = { .type = NL_A_U8,
                                 .optional = true, },
     [TCA_FLOWER_KEY_IP_TTL_MASK] = { .type = NL_A_U8,
@@ -370,6 +376,12 @@ nl_parse_flower_ip(struct nlattr **attrs, struct tc_flower *flower) {
         mask->ip_proto = UINT8_MAX;
     }
 
+    if (attrs[TCA_FLOWER_KEY_FLAGS_MASK]) {
+        key->flags = ntohl(nl_attr_get_be32(attrs[TCA_FLOWER_KEY_FLAGS]));
+        mask->flags =
+                ntohl(nl_attr_get_be32(attrs[TCA_FLOWER_KEY_FLAGS_MASK]));
+    }
+
     if (attrs[TCA_FLOWER_KEY_IPV4_SRC_MASK]) {
         key->ipv4.ipv4_src =
             nl_attr_get_be32(attrs[TCA_FLOWER_KEY_IPV4_SRC]);
@@ -457,6 +469,7 @@ static const struct nl_policy pedit_policy[] = {
 static int
 nl_parse_act_pedit(struct nlattr *options, struct tc_flower *flower)
 {
+    struct tc_action *action;
     struct nlattr *pe_attrs[ARRAY_SIZE(pedit_policy)];
     const struct tc_pedit *pe;
     const struct tc_pedit_key *keys;
@@ -465,7 +478,7 @@ nl_parse_act_pedit(struct nlattr *options, struct tc_flower *flower)
     char *rewrite_key = (void *) &flower->rewrite.key;
     char *rewrite_mask = (void *) &flower->rewrite.mask;
     size_t keys_ex_size, left;
-    int type, i = 0;
+    int type, i = 0, err;
 
     if (!nl_parse_nested(options, pedit_policy, pe_attrs,
                          ARRAY_SIZE(pedit_policy))) {
@@ -484,7 +497,7 @@ nl_parse_act_pedit(struct nlattr *options, struct tc_flower *flower)
             break;
         }
 
-        if (nl_attr_type(nla) == TCA_PEDIT_KEY_EX) {
+        if (nl_attr_type(nla) != TCA_PEDIT_KEY_EX) {
             VLOG_ERR_RL(&error_rl, "unable to parse legacy pedit type: %d",
                         nl_attr_type(nla));
             return EOPNOTSUPP;
@@ -492,6 +505,11 @@ nl_parse_act_pedit(struct nlattr *options, struct tc_flower *flower)
 
         ex_type = nl_attr_find_nested(nla, TCA_PEDIT_KEY_EX_HTYPE);
         type = nl_attr_get_u16(ex_type);
+
+        err = csum_update_flag(flower, type);
+        if (err) {
+            return err;
+        }
 
         for (int j = 0; j < ARRAY_SIZE(flower_pedit_map); j++) {
             struct flower_key_to_pedit *m = &flower_pedit_map[j];
@@ -531,7 +549,8 @@ nl_parse_act_pedit(struct nlattr *options, struct tc_flower *flower)
         i++;
     }
 
-    flower->rewrite.rewrite = true;
+    action = &flower->actions[flower->action_count++];
+    action->type = TC_ACT_PEDIT;
 
     return 0;
 }
@@ -558,6 +577,7 @@ nl_parse_act_tunnel_key(struct nlattr *options, struct tc_flower *flower)
     struct nlattr *tun_attrs[ARRAY_SIZE(tunnel_key_policy)];
     const struct nlattr *tun_parms;
     const struct tc_tunnel_key *tun;
+    struct tc_action *action;
 
     if (!nl_parse_nested(options, tunnel_key_policy, tun_attrs,
                 ARRAY_SIZE(tunnel_key_policy))) {
@@ -575,17 +595,18 @@ nl_parse_act_tunnel_key(struct nlattr *options, struct tc_flower *flower)
         struct nlattr *ipv6_src = tun_attrs[TCA_TUNNEL_KEY_ENC_IPV6_SRC];
         struct nlattr *ipv6_dst = tun_attrs[TCA_TUNNEL_KEY_ENC_IPV6_DST];
 
-        flower->set.set = true;
-        flower->set.ipv4.ipv4_src = ipv4_src ? nl_attr_get_be32(ipv4_src) : 0;
-        flower->set.ipv4.ipv4_dst = ipv4_dst ? nl_attr_get_be32(ipv4_dst) : 0;
+        action = &flower->actions[flower->action_count++];
+        action->type = TC_ACT_ENCAP;
+        action->encap.ipv4.ipv4_src = ipv4_src ? nl_attr_get_be32(ipv4_src) : 0;
+        action->encap.ipv4.ipv4_dst = ipv4_dst ? nl_attr_get_be32(ipv4_dst) : 0;
         if (ipv6_src) {
-            flower->set.ipv6.ipv6_src = nl_attr_get_in6_addr(ipv6_src);
+            action->encap.ipv6.ipv6_src = nl_attr_get_in6_addr(ipv6_src);
         }
         if (ipv6_dst) {
-            flower->set.ipv6.ipv6_dst = nl_attr_get_in6_addr(ipv6_dst);
+            action->encap.ipv6.ipv6_dst = nl_attr_get_in6_addr(ipv6_dst);
         }
-        flower->set.id = id ? be32_to_be64(nl_attr_get_be32(id)) : 0;
-        flower->set.tp_dst = dst_port ? nl_attr_get_be16(dst_port) : 0;
+        action->encap.id = id ? be32_to_be64(nl_attr_get_be32(id)) : 0;
+        action->encap.tp_dst = dst_port ? nl_attr_get_be16(dst_port) : 0;
     } else if (tun->t_action == TCA_TUNNEL_KEY_ACT_RELEASE) {
         flower->tunnel.tunnel = true;
     } else {
@@ -671,6 +692,7 @@ nl_parse_act_mirred(struct nlattr *options, struct tc_flower *flower)
     const struct nlattr *mirred_parms;
     const struct tcf_t *tm;
     struct nlattr *mirred_tm;
+    struct tc_action *action;
 
     if (!nl_parse_nested(options, mirred_policy, mirred_attrs,
                          ARRAY_SIZE(mirred_policy))) {
@@ -681,13 +703,15 @@ nl_parse_act_mirred(struct nlattr *options, struct tc_flower *flower)
     mirred_parms = mirred_attrs[TCA_MIRRED_PARMS];
     m = nl_attr_get_unspec(mirred_parms, sizeof *m);
 
-    if (m->action != TC_ACT_STOLEN ||  m->eaction != TCA_EGRESS_REDIR) {
+    if (m->eaction != TCA_EGRESS_REDIR && m->eaction != TCA_EGRESS_MIRROR) {
         VLOG_ERR_RL(&error_rl, "unknown mirred action: %d, %d, %d",
-                 m->action, m->eaction, m->ifindex);
+                    m->action, m->eaction, m->ifindex);
         return EINVAL;
     }
 
-    flower->ifindex_out = m->ifindex;
+    action = &flower->actions[flower->action_count++];
+    action->ifindex_out = m->ifindex;
+    action->type = TC_ACT_OUTPUT;
 
     mirred_tm = mirred_attrs[TCA_MIRRED_TM];
     tm = nl_attr_get_unspec(mirred_tm, sizeof *tm);
@@ -711,6 +735,7 @@ nl_parse_act_vlan(struct nlattr *options, struct tc_flower *flower)
     struct nlattr *vlan_attrs[ARRAY_SIZE(vlan_policy)];
     const struct tc_vlan *v;
     const struct nlattr *vlan_parms;
+    struct tc_action *action;
 
     if (!nl_parse_nested(options, vlan_policy, vlan_attrs,
                          ARRAY_SIZE(vlan_policy))) {
@@ -718,21 +743,63 @@ nl_parse_act_vlan(struct nlattr *options, struct tc_flower *flower)
         return EPROTO;
     }
 
+    action = &flower->actions[flower->action_count++];
     vlan_parms = vlan_attrs[TCA_VLAN_PARMS];
     v = nl_attr_get_unspec(vlan_parms, sizeof *v);
     if (v->v_action == TCA_VLAN_ACT_PUSH) {
         struct nlattr *vlan_id = vlan_attrs[TCA_VLAN_PUSH_VLAN_ID];
         struct nlattr *vlan_prio = vlan_attrs[TCA_VLAN_PUSH_VLAN_PRIORITY];
 
-        flower->vlan_push_id = nl_attr_get_u16(vlan_id);
-        flower->vlan_push_prio = vlan_prio ? nl_attr_get_u8(vlan_prio) : 0;
+        action->vlan.vlan_push_id = nl_attr_get_u16(vlan_id);
+        action->vlan.vlan_push_prio = vlan_prio ? nl_attr_get_u8(vlan_prio) : 0;
+        action->type = TC_ACT_VLAN_PUSH;
     } else if (v->v_action == TCA_VLAN_ACT_POP) {
-        flower->vlan_pop = 1;
+        action->type = TC_ACT_VLAN_POP;
     } else {
         VLOG_ERR_RL(&error_rl, "unknown vlan action: %d, %d",
                     v->action, v->v_action);
         return EINVAL;
     }
+    return 0;
+}
+
+static const struct nl_policy csum_policy[] = {
+    [TCA_CSUM_PARMS] = { .type = NL_A_UNSPEC,
+                         .min_len = sizeof(struct tc_csum),
+                         .optional = false, },
+};
+
+static int
+nl_parse_act_csum(struct nlattr *options, struct tc_flower *flower)
+{
+    struct nlattr *csum_attrs[ARRAY_SIZE(csum_policy)];
+    const struct tc_csum *c;
+    const struct nlattr *csum_parms;
+
+    if (!nl_parse_nested(options, csum_policy, csum_attrs,
+                         ARRAY_SIZE(csum_policy))) {
+        VLOG_ERR_RL(&error_rl, "failed to parse csum action options");
+        return EPROTO;
+    }
+
+    csum_parms = csum_attrs[TCA_CSUM_PARMS];
+    c = nl_attr_get_unspec(csum_parms, sizeof *c);
+
+    /* sanity checks */
+    if (c->update_flags != flower->csum_update_flags) {
+        VLOG_WARN_RL(&error_rl,
+                     "expected different act csum flags: 0x%x != 0x%x",
+                     flower->csum_update_flags, c->update_flags);
+        return EINVAL;
+    }
+    flower->csum_update_flags = 0; /* so we know csum was handled */
+
+    if (flower->needs_full_ip_proto_mask
+        && flower->mask.ip_proto != UINT8_MAX) {
+        VLOG_WARN_RL(&error_rl, "expected full matching on flower ip_proto");
+        return EINVAL;
+    }
+
     return 0;
 }
 
@@ -760,6 +827,7 @@ nl_parse_single_action(struct nlattr *action, struct tc_flower *flower)
     struct nlattr *stats_attrs[ARRAY_SIZE(stats_policy)];
     struct ovs_flow_stats *stats = &flower->stats;
     const struct gnet_stats_basic *bs;
+    int err = 0;
 
     if (!nl_parse_nested(action, act_policy, action_attrs,
                          ARRAY_SIZE(act_policy))) {
@@ -772,21 +840,24 @@ nl_parse_single_action(struct nlattr *action, struct tc_flower *flower)
     act_cookie = action_attrs[TCA_ACT_COOKIE];
 
     if (!strcmp(act_kind, "gact")) {
-        nl_parse_act_drop(act_options, flower);
+        err = nl_parse_act_drop(act_options, flower);
     } else if (!strcmp(act_kind, "mirred")) {
-        nl_parse_act_mirred(act_options, flower);
+        err = nl_parse_act_mirred(act_options, flower);
     } else if (!strcmp(act_kind, "vlan")) {
-        nl_parse_act_vlan(act_options, flower);
+        err = nl_parse_act_vlan(act_options, flower);
     } else if (!strcmp(act_kind, "tunnel_key")) {
-        nl_parse_act_tunnel_key(act_options, flower);
+        err = nl_parse_act_tunnel_key(act_options, flower);
     } else if (!strcmp(act_kind, "pedit")) {
-        nl_parse_act_pedit(act_options, flower);
+        err = nl_parse_act_pedit(act_options, flower);
     } else if (!strcmp(act_kind, "csum")) {
-        /* not doing anything for now, ovs has an implicit csum recalculation
-         * with rewriting of packet headers (translating of pedit acts). */
+        nl_parse_act_csum(act_options, flower);
     } else {
         VLOG_ERR_RL(&error_rl, "unknown tc action kind: %s", act_kind);
-        return EINVAL;
+        err = EINVAL;
+    }
+
+    if (err) {
+        return err;
     }
 
     if (act_cookie) {
@@ -832,12 +903,25 @@ nl_parse_flower_actions(struct nlattr **attrs, struct tc_flower *flower)
 
     for (int i = TCA_ACT_MIN_PRIO; i < max_size; i++) {
         if (actions_orders[i]) {
-            int err = nl_parse_single_action(actions_orders[i], flower);
+            int err;
+
+            if (flower->action_count >= TCA_ACT_MAX_PRIO) {
+                VLOG_DBG_RL(&error_rl, "Can only support %d actions", flower->action_count);
+                return EOPNOTSUPP;
+            }
+            err = nl_parse_single_action(actions_orders[i], flower);
 
             if (err) {
                 return err;
             }
         }
+    }
+
+    if (flower->csum_update_flags) {
+        VLOG_WARN_RL(&error_rl,
+                     "expected act csum with flags: 0x%x",
+                     flower->csum_update_flags);
+        return EINVAL;
     }
 
     return 0;
@@ -892,7 +976,7 @@ parse_netlink_to_tc_flower(struct ofpbuf *reply, struct tc_flower *flower)
 
     kind = nl_attr_get_string(ta[TCA_KIND]);
     if (strcmp(kind, "flower")) {
-        VLOG_ERR_RL(&error_rl, "failed to parse filter: %s", kind);
+        VLOG_DBG_ONCE("Unsupported filter: %s", kind);
         return EPROTO;
     }
 
@@ -1004,7 +1088,7 @@ static void
 nl_msg_put_act_pedit(struct ofpbuf *request, struct tc_pedit *parm,
                      struct tc_pedit_key_ex *ex)
 {
-    size_t ksize = sizeof *parm + (parm->nkeys * sizeof(struct tc_pedit_key));
+    size_t ksize = sizeof *parm + parm->nkeys * sizeof(struct tc_pedit_key);
     size_t offset, offset_keys_ex, offset_key;
     int i;
 
@@ -1125,15 +1209,16 @@ nl_msg_put_act_drop(struct ofpbuf *request)
 }
 
 static void
-nl_msg_put_act_redirect(struct ofpbuf *request, int ifindex)
+nl_msg_put_act_mirred(struct ofpbuf *request, int ifindex, int action,
+                      int eaction)
 {
     size_t offset;
 
     nl_msg_put_string(request, TCA_ACT_KIND, "mirred");
     offset = nl_msg_start_nested(request, TCA_ACT_OPTIONS);
     {
-        struct tc_mirred m = { .action = TC_ACT_STOLEN,
-                               .eaction = TCA_EGRESS_REDIR,
+        struct tc_mirred m = { .action = action,
+                               .eaction = eaction,
                                .ifindex = ifindex };
 
         nl_msg_put_unspec(request, TCA_MIRRED_PARMS, &m, sizeof m);
@@ -1181,28 +1266,52 @@ calc_offsets(struct tc_flower *flower, struct flower_key_to_pedit *m,
     *mask = (void *) (rewrite_mask + m->flower_offset - diff);
 }
 
-static inline void
+static inline int
 csum_update_flag(struct tc_flower *flower,
                  enum pedit_header_type htype) {
-    if (htype == TCA_PEDIT_KEY_EX_HDR_TYPE_IP4) {
+    /* Explictily specifiy the csum flags so HW can return EOPNOTSUPP
+     * if it doesn't support a checksum recalculation of some headers.
+     * And since OVS allows a flow such as
+     * eth(dst=<mac>),eth_type(0x0800) actions=set(ipv4(src=<new_ip>))
+     * we need to force a more specific flow as this can, for example,
+     * need a recalculation of icmp checksum if the packet that passes
+     * is ICMPv6 and tcp checksum if its tcp. */
+
+    switch (htype) {
+    case TCA_PEDIT_KEY_EX_HDR_TYPE_IP4:
         flower->csum_update_flags |= TCA_CSUM_UPDATE_FLAG_IPV4HDR;
-    }
-    if (htype == TCA_PEDIT_KEY_EX_HDR_TYPE_IP4
-        || htype == TCA_PEDIT_KEY_EX_HDR_TYPE_IP6
-        || htype == TCA_PEDIT_KEY_EX_HDR_TYPE_TCP
-        || htype == TCA_PEDIT_KEY_EX_HDR_TYPE_UDP) {
+        /* Fall through. */
+    case TCA_PEDIT_KEY_EX_HDR_TYPE_IP6:
+    case TCA_PEDIT_KEY_EX_HDR_TYPE_TCP:
+    case TCA_PEDIT_KEY_EX_HDR_TYPE_UDP:
         if (flower->key.ip_proto == IPPROTO_TCP) {
-            flower->mask.ip_proto = UINT8_MAX;
+            flower->needs_full_ip_proto_mask = true;
             flower->csum_update_flags |= TCA_CSUM_UPDATE_FLAG_TCP;
         } else if (flower->key.ip_proto == IPPROTO_UDP) {
-            flower->mask.ip_proto = UINT8_MAX;
+            flower->needs_full_ip_proto_mask = true;
             flower->csum_update_flags |= TCA_CSUM_UPDATE_FLAG_UDP;
-        } else if (flower->key.ip_proto == IPPROTO_ICMP
-                   || flower->key.ip_proto == IPPROTO_ICMPV6) {
-            flower->mask.ip_proto = UINT8_MAX;
+        } else if (flower->key.ip_proto == IPPROTO_ICMP) {
+            flower->needs_full_ip_proto_mask = true;
+        } else if (flower->key.ip_proto == IPPROTO_ICMPV6) {
+            flower->needs_full_ip_proto_mask = true;
             flower->csum_update_flags |= TCA_CSUM_UPDATE_FLAG_ICMP;
+        } else {
+            VLOG_WARN_RL(&error_rl,
+                         "can't offload rewrite of IP/IPV6 with ip_proto: %d",
+                         flower->key.ip_proto);
+            break;
         }
+        /* Fall through. */
+    case TCA_PEDIT_KEY_EX_HDR_TYPE_ETH:
+        return 0; /* success */
+
+    case TCA_PEDIT_KEY_EX_HDR_TYPE_NETWORK:
+    case __PEDIT_HDR_TYPE_MAX:
+    default:
+        break;
     }
+
+    return EOPNOTSUPP;
 }
 
 static int
@@ -1218,7 +1327,7 @@ nl_msg_put_flower_rewrite_pedits(struct ofpbuf *request,
             .nkeys = 0
         }
     };
-    int i, j;
+    int i, j, err;
 
     for (i = 0; i < ARRAY_SIZE(flower_pedit_map); i++) {
         struct flower_key_to_pedit *m = &flower_pedit_map[i];
@@ -1260,7 +1369,15 @@ nl_msg_put_flower_rewrite_pedits(struct ofpbuf *request,
             pedit_key->mask = ~mask_word;
             pedit_key->val = *data & mask_word;
             sel.sel.nkeys++;
-            csum_update_flag(flower, m->htype);
+
+            err = csum_update_flag(flower, m->htype);
+            if (err) {
+                return err;
+            }
+
+            if (flower->needs_full_ip_proto_mask) {
+                flower->mask.ip_proto = UINT8_MAX;
+            }
         }
     }
     nl_msg_put_act_pedit(request, &sel.sel, sel.keys_ex);
@@ -1273,62 +1390,90 @@ nl_msg_put_flower_acts(struct ofpbuf *request, struct tc_flower *flower)
 {
     size_t offset;
     size_t act_offset;
+    uint16_t act_index = 1;
+    struct tc_action *action;
+    int i, ifindex = 0;
 
     offset = nl_msg_start_nested(request, TCA_FLOWER_ACT);
     {
-        uint16_t act_index = 1;
         int error;
 
-        if (flower->rewrite.rewrite) {
-            act_offset = nl_msg_start_nested(request, act_index++);
-            error = nl_msg_put_flower_rewrite_pedits(request, flower);
-            if (error) {
-                return error;
-            }
-            nl_msg_end_nested(request, act_offset);
-
-            act_offset = nl_msg_start_nested(request, act_index++);
-            nl_msg_put_act_csum(request, flower->csum_update_flags);
-            nl_msg_end_nested(request, act_offset);
-        }
-        if (flower->set.set) {
-            act_offset = nl_msg_start_nested(request, act_index++);
-            nl_msg_put_act_tunnel_key_set(request, flower->set.id,
-                                          flower->set.ipv4.ipv4_src,
-                                          flower->set.ipv4.ipv4_dst,
-                                          &flower->set.ipv6.ipv6_src,
-                                          &flower->set.ipv6.ipv6_dst,
-                                          flower->set.tp_dst);
-            nl_msg_end_nested(request, act_offset);
-        }
         if (flower->tunnel.tunnel) {
             act_offset = nl_msg_start_nested(request, act_index++);
             nl_msg_put_act_tunnel_key_release(request);
             nl_msg_end_nested(request, act_offset);
         }
-        if (flower->vlan_pop) {
-            act_offset = nl_msg_start_nested(request, act_index++);
-            nl_msg_put_act_pop_vlan(request);
-            nl_msg_end_nested(request, act_offset);
+
+        action = flower->actions;
+        for (i = 0; i < flower->action_count; i++, action++) {
+            switch (action->type) {
+            case TC_ACT_PEDIT: {
+                act_offset = nl_msg_start_nested(request, act_index++);
+                error = nl_msg_put_flower_rewrite_pedits(request, flower);
+                if (error) {
+                    return error;
+                }
+                nl_msg_end_nested(request, act_offset);
+
+                if (flower->csum_update_flags) {
+                    act_offset = nl_msg_start_nested(request, act_index++);
+                    nl_msg_put_act_csum(request, flower->csum_update_flags);
+                    nl_msg_end_nested(request, act_offset);
+                }
+            }
+            break;
+            case TC_ACT_ENCAP: {
+                act_offset = nl_msg_start_nested(request, act_index++);
+                nl_msg_put_act_tunnel_key_set(request, action->encap.id,
+                                              action->encap.ipv4.ipv4_src,
+                                              action->encap.ipv4.ipv4_dst,
+                                              &action->encap.ipv6.ipv6_src,
+                                              &action->encap.ipv6.ipv6_dst,
+                                              action->encap.tp_dst);
+                nl_msg_end_nested(request, act_offset);
+            }
+            break;
+            case TC_ACT_VLAN_POP: {
+                act_offset = nl_msg_start_nested(request, act_index++);
+                nl_msg_put_act_pop_vlan(request);
+                nl_msg_end_nested(request, act_offset);
+            }
+            break;
+            case TC_ACT_VLAN_PUSH: {
+                act_offset = nl_msg_start_nested(request, act_index++);
+                nl_msg_put_act_push_vlan(request,
+                                         action->vlan.vlan_push_id,
+                                         action->vlan.vlan_push_prio);
+                nl_msg_end_nested(request, act_offset);
+            }
+            break;
+            case TC_ACT_OUTPUT: {
+                ifindex = action->ifindex_out;
+                if (ifindex < 1) {
+                    VLOG_ERR_RL(&error_rl, "%s: invalid ifindex: %d, type: %d",
+                                __func__, ifindex, action->type);
+                    return EINVAL;
+                }
+                act_offset = nl_msg_start_nested(request, act_index++);
+                if (i == flower->action_count - 1) {
+                    nl_msg_put_act_mirred(request, ifindex, TC_ACT_STOLEN,
+                                          TCA_EGRESS_REDIR);
+                } else {
+                    nl_msg_put_act_mirred(request, ifindex, TC_ACT_PIPE,
+                                          TCA_EGRESS_MIRROR);
+                }
+                nl_msg_put_act_cookie(request, &flower->act_cookie);
+                nl_msg_end_nested(request, act_offset);
+            }
+            break;
+            }
         }
-        if (flower->vlan_push_id) {
-            act_offset = nl_msg_start_nested(request, act_index++);
-            nl_msg_put_act_push_vlan(request,
-                                     flower->vlan_push_id,
-                                     flower->vlan_push_prio);
-            nl_msg_end_nested(request, act_offset);
-        }
-        if (flower->ifindex_out) {
-            act_offset = nl_msg_start_nested(request, act_index++);
-            nl_msg_put_act_redirect(request, flower->ifindex_out);
-            nl_msg_put_act_cookie(request, &flower->act_cookie);
-            nl_msg_end_nested(request, act_offset);
-        } else {
-            act_offset = nl_msg_start_nested(request, act_index++);
-            nl_msg_put_act_drop(request);
-            nl_msg_put_act_cookie(request, &flower->act_cookie);
-            nl_msg_end_nested(request, act_offset);
-        }
+    }
+    if (!ifindex) {
+        act_offset = nl_msg_start_nested(request, act_index++);
+        nl_msg_put_act_drop(request);
+        nl_msg_put_act_cookie(request, &flower->act_cookie);
+        nl_msg_end_nested(request, act_offset);
     }
     nl_msg_end_nested(request, offset);
 
@@ -1382,7 +1527,8 @@ nl_msg_put_flower_options(struct ofpbuf *request, struct tc_flower *flower)
     bool is_vlan = (host_eth_type == ETH_TYPE_VLAN);
     int err;
 
-    /* need to parse acts first as some acts require changing the matching */
+    /* need to parse acts first as some acts require changing the matching
+     * see csum_update_flag()  */
     err  = nl_msg_put_flower_acts(request, flower);
     if (err) {
         return err;
@@ -1399,6 +1545,13 @@ nl_msg_put_flower_options(struct ofpbuf *request, struct tc_flower *flower)
         if (flower->mask.ip_proto && flower->key.ip_proto) {
             nl_msg_put_u8(request, TCA_FLOWER_KEY_IP_PROTO,
                           flower->key.ip_proto);
+        }
+
+        if (flower->mask.flags) {
+            nl_msg_put_be32(request, TCA_FLOWER_KEY_FLAGS,
+                           htonl(flower->key.flags));
+            nl_msg_put_be32(request, TCA_FLOWER_KEY_FLAGS_MASK,
+                           htonl(flower->mask.flags));
         }
 
         if (flower->key.ip_proto == IPPROTO_UDP) {

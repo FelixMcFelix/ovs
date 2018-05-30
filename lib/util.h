@@ -17,6 +17,8 @@
 #ifndef UTIL_H
 #define UTIL_H 1
 
+#include <sys/types.h>
+#include <netinet/in.h>
 #include <arpa/inet.h>
 #include <inttypes.h>
 #include <limits.h>
@@ -157,6 +159,8 @@ void free_cacheline(void *);
 void ovs_strlcpy(char *dst, const char *src, size_t size);
 void ovs_strzcpy(char *dst, const char *src, size_t size);
 
+int string_ends_with(const char *str, const char *suffix);
+
 /* The C standards say that neither the 'dst' nor 'src' argument to
  * memcpy() may be null, even if 'n' is zero.  This wrapper tolerates
  * the null case. */
@@ -205,6 +209,7 @@ bool str_to_long(const char *, int base, long *);
 bool str_to_llong(const char *, int base, long long *);
 bool str_to_llong_with_tail(const char *, char **, int base, long long *);
 bool str_to_uint(const char *, int base, unsigned int *);
+bool str_to_ullong(const char *, int base, unsigned long long *);
 bool str_to_llong_range(const char *, int base, long long *, long long *);
 
 bool ovs_scan(const char *s, const char *format, ...) OVS_SCANF_FORMAT(2, 3);
@@ -212,7 +217,7 @@ bool ovs_scan_len(const char *s, int *n, const char *format, ...);
 
 bool str_to_double(const char *, double *);
 
-int hexit_value(int c);
+int hexit_value(unsigned char c);
 uintmax_t hexits_value(const char *s, size_t n, bool *ok);
 
 int parse_int_string(const char *s, uint8_t *valuep, int field_width,
@@ -502,6 +507,7 @@ ovs_u128_and(const ovs_u128 a, const ovs_u128 b)
 }
 
 void xsleep(unsigned int seconds);
+void xnanosleep(uint64_t nanoseconds);
 
 bool is_stdout_a_tty(void);
 

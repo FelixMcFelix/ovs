@@ -37,7 +37,7 @@ m4_define([OVSDB_CHECK_IDL_C],
      [AT_CHECK([ovsdb-client transact unix:socket $2], [0], [ignore], [ignore])])
    AT_CHECK([test-ovsdb '-vPATTERN:console:test-ovsdb|%c|%m' -vjsonrpc -t10 idl unix:socket $3],
             [0], [stdout], [ignore])
-   AT_CHECK([sort stdout | ${PERL} $srcdir/uuidfilt.pl]m4_if([$6],,, [[| $6]]),
+   AT_CHECK([sort stdout | uuidfilt]m4_if([$6],,, [[| $6]]),
             [0], [$4])
    OVSDB_SERVER_SHUTDOWN
    AT_CLEANUP])
@@ -52,7 +52,7 @@ m4_define([OVSDB_CHECK_IDL_PYN],
      [AT_CHECK([ovsdb-client transact unix:socket $2], [0], [ignore], [ignore])])
    AT_CHECK([$8 $srcdir/test-ovsdb.py  -t10 idl $srcdir/idltest.ovsschema unix:socket $3],
             [0], [stdout], [ignore])
-   AT_CHECK([sort stdout | ${PERL} $srcdir/uuidfilt.pl]m4_if([$6],,, [[| $6]]),
+   AT_CHECK([sort stdout | uuidfilt]m4_if([$6],,, [[| $6]]),
             [0], [$4])
    OVSDB_SERVER_SHUTDOWN
    AT_CLEANUP])
@@ -72,7 +72,7 @@ m4_define([OVSDB_CHECK_IDL_REGISTER_COLUMNS_PYN],
      [AT_CHECK([ovsdb-client transact unix:socket $2], [0], [ignore], [ignore])])
    AT_CHECK([$8 $srcdir/test-ovsdb.py  -t10 idl $srcdir/idltest.ovsschema unix:socket ?simple:b,ba,i,ia,r,ra,s,sa,u,ua?link1:i,k,ka,l2?link2:i,l1 $3],
             [0], [stdout], [ignore])
-   AT_CHECK([sort stdout | ${PERL} $srcdir/uuidfilt.pl]m4_if([$6],,, [[| $6]]),
+   AT_CHECK([sort stdout | uuidfilt]m4_if([$6],,, [[| $6]]),
             [0], [$4])
    OVSDB_SERVER_SHUTDOWN
    AT_CLEANUP])
@@ -95,7 +95,7 @@ m4_define([OVSDB_CHECK_IDL_TCP_PYN],
      [AT_CHECK([ovsdb-client transact tcp:127.0.0.1:$TCP_PORT $2], [0], [ignore], [ignore])])
    AT_CHECK([$8 $srcdir/test-ovsdb.py  -t10 idl $srcdir/idltest.ovsschema tcp:127.0.0.1:$TCP_PORT $3],
             [0], [stdout], [ignore])
-   AT_CHECK([sort stdout | ${PERL} $srcdir/uuidfilt.pl]m4_if([$6],,, [[| $6]]),
+   AT_CHECK([sort stdout | uuidfilt]m4_if([$6],,, [[| $6]]),
             [0], [$4])
    OVSDB_SERVER_SHUTDOWN
    AT_CLEANUP])
@@ -121,7 +121,7 @@ m4_define([OVSDB_CHECK_IDL_TCP6_PYN],
      [AT_CHECK([ovsdb-client transact "tcp:[[::1]]:$TCP_PORT" $2], [0], [ignore], [ignore])])
    AT_CHECK([$8 $srcdir/test-ovsdb.py  -t10 idl $srcdir/idltest.ovsschema tcp:[[::1]]:$TCP_PORT $3],
             [0], [stdout], [ignore])
-   AT_CHECK([sort stdout | ${PERL} $srcdir/uuidfilt.pl]m4_if([$6],,, [[| $6]]),
+   AT_CHECK([sort stdout | uuidfilt]m4_if([$6],,, [[| $6]]),
             [0], [$4])
    OVSDB_SERVER_SHUTDOWN
    AT_CLEANUP])
@@ -132,17 +132,59 @@ m4_define([OVSDB_CHECK_IDL_TCP6_PY],
     OVSDB_CHECK_IDL_TCP6_PYN([$1 - Python3], [$2], [$3], [$4], [$5], [$6],
                         [$HAVE_PYTHON3], [$PYTHON3])])
 
+# same as OVSDB_CHECK_IDL but uses the Python IDL implementation with SSL
+m4_define([OVSDB_CHECK_IDL_SSL_PYN],
+  [AT_SETUP([$1 - SSL])
+   AT_SKIP_IF([test "$HAVE_OPENSSL" = no])
+   AT_SKIP_IF([test $7 = no])
+   $8 -c "import OpenSSL.SSL"
+   SSL_PRESENT=$?
+   AT_SKIP_IF([test $SSL_PRESENT != 0])
+   AT_KEYWORDS([ovsdb server idl positive Python with ssl socket $5])
+   AT_CHECK([ovsdb-tool create db $abs_srcdir/idltest.ovsschema],
+             [0], [stdout], [ignore])
+   PKIDIR=$abs_top_builddir/tests
+   AT_CHECK([ovsdb-server -vconsole:warn --log-file --detach --no-chdir \
+             --pidfile \
+             --private-key=$PKIDIR/testpki-privkey2.pem \
+             --certificate=$PKIDIR/testpki-cert2.pem \
+             --ca-cert=$PKIDIR/testpki-cacert.pem \
+             --remote=pssl:0:127.0.0.1 db])
+   on_exit 'kill `cat ovsdb-server.pid`'
+   PARSE_LISTENING_PORT([ovsdb-server.log], [TCP_PORT])
+   m4_if([$2], [], [],
+     [AT_CHECK([ovsdb-client \
+                --private-key=$PKIDIR/testpki-privkey2.pem \
+                --certificate=$PKIDIR/testpki-cert2.pem \
+                --ca-cert=$PKIDIR/testpki-cacert.pem \
+                transact "ssl:127.0.0.1:$TCP_PORT" $2], [0], [ignore], [ignore])])
+   AT_CHECK([$8 $srcdir/test-ovsdb.py  -t10 idl $srcdir/idltest.ovsschema \
+             ssl:127.0.0.1:$TCP_PORT $PKIDIR/testpki-privkey.pem \
+             $PKIDIR/testpki-cert.pem $PKIDIR/testpki-cacert.pem $3],
+            [0], [stdout], [ignore])
+   AT_CHECK([sort stdout | uuidfilt]m4_if([$6],,, [[| $6]]),
+            [0], [$4])
+   OVSDB_SERVER_SHUTDOWN
+   AT_CLEANUP])
+
+m4_define([OVSDB_CHECK_IDL_SSL_PY],
+   [OVSDB_CHECK_IDL_SSL_PYN([$1 - Python2], [$2], [$3], [$4], [$5], [$6],
+                        [$HAVE_PYTHON], [$PYTHON])
+    OVSDB_CHECK_IDL_SSL_PYN([$1 - Python3], [$2], [$3], [$4], [$5], [$6],
+                        [$HAVE_PYTHON3], [$PYTHON3])])
+
 m4_define([OVSDB_CHECK_IDL],
   [OVSDB_CHECK_IDL_C($@)
    OVSDB_CHECK_IDL_PY($@)
    OVSDB_CHECK_IDL_REGISTER_COLUMNS_PY($@)
    OVSDB_CHECK_IDL_TCP_PY($@)
-   OVSDB_CHECK_IDL_TCP6_PY($@)])
+   OVSDB_CHECK_IDL_TCP6_PY($@)
+   OVSDB_CHECK_IDL_SSL_PY($@)])
 
 # This test uses the Python IDL implementation with passive tcp
-m4_define([OVSDB_CHECK_IDL_PASSIVE_TCP_PY],
-  [AT_SETUP([$1 - Python ptcp])
-   AT_SKIP_IF([test $HAVE_PYTHON = no])
+m4_define([OVSDB_CHECK_IDL_PASSIVE_TCP_PYN],
+  [AT_SETUP([$1 ptcp])
+   AT_SKIP_IF([test $7 = no])
    AT_KEYWORDS([ovsdb server idl positive Python with tcp socket $5])
    # find free TCP port
    AT_CHECK([ovsdb_start_idltest "ptcp:0:127.0.0.1"])
@@ -152,13 +194,19 @@ m4_define([OVSDB_CHECK_IDL_PASSIVE_TCP_PY],
 
    # start OVSDB server in passive mode
    AT_CHECK([ovsdb_start_idltest "tcp:127.0.0.1:$TCP_PORT"])
-   AT_CHECK([$PYTHON $srcdir/test-ovsdb.py -t10 idl_passive $srcdir/idltest.ovsschema ptcp:127.0.0.1:$TCP_PORT $3],
+   AT_CHECK([$8 $srcdir/test-ovsdb.py -t10 idl_passive $srcdir/idltest.ovsschema ptcp:127.0.0.1:$TCP_PORT $3],
       [0], [stdout], [ignore])
-   AT_CHECK([sort stdout | ${PERL} $srcdir/uuidfilt.pl]m4_if([$6],,, [[| $6]]),
+   AT_CHECK([sort stdout | uuidfilt]m4_if([$6],,, [[| $6]]),
             [0], [$4])
    OVSDB_SERVER_SHUTDOWN
    AT_CLEANUP
    ])
+
+m4_define([OVSDB_CHECK_IDL_PASSIVE_TCP_PY],
+    [OVSDB_CHECK_IDL_PASSIVE_TCP_PYN([$1 - Python2], [$2], [$3], [$4], [$5], [$6],
+                        [$HAVE_PYTHON], [$PYTHON])
+    OVSDB_CHECK_IDL_PASSIVE_TCP_PYN([$1 - Python3], [$2], [$3], [$4], [$5], [$6],
+                        [$HAVE_PYTHON3], [$PYTHON3])])
 
 OVSDB_CHECK_IDL_PASSIVE_TCP_PY([simple passive idl, initially empty, select empty],
   [],
@@ -327,6 +375,39 @@ OVSDB_CHECK_IDL([simple idl, writing via IDL with unicode],
 002: i=1 r=0 b=false s="¯\_(ツ)_/¯" u=<0> ia=[] ra=[] ba=[] sa=[] ua=[] uuid=<2>
 003: done
 ]])
+
+m4_define([OVSDB_CHECK_IDL_PYN_WITH_EXPOUT],
+  [AT_SETUP([$1])
+   AT_SKIP_IF([test $7 = no])
+   AT_KEYWORDS([ovsdb server idl positive Python $5])
+   AT_CHECK([ovsdb_start_idltest])
+   m4_if([$2], [], [],
+     [AT_CHECK([ovsdb-client transact unix:socket $2], [0], [ignore], [ignore])])
+   AT_CHECK([$8 $srcdir/test-ovsdb.py  -t10 idl $srcdir/idltest.ovsschema unix:socket $3],
+            [0], [stdout], [ignore])
+   echo "$4" > expout
+   AT_CHECK([sort stdout | uuidfilt]m4_if([$6],,, [[| $6]]),
+            [0], [expout])
+   OVSDB_SERVER_SHUTDOWN
+   AT_CLEANUP])
+
+m4_define([OVSDB_CHECK_IDL_PY_WITH_EXPOUT],
+   [OVSDB_CHECK_IDL_PYN_WITH_EXPOUT([$1 - Python2], [$2], [$3], [$4], [$5], [$6],
+                                    [$HAVE_PYTHON], [$PYTHON])
+    OVSDB_CHECK_IDL_PYN_WITH_EXPOUT([$1 - Python3], [$2], [$3], [$4], [$5], [$6],
+                                    [$HAVE_PYTHON3], [$PYTHON3])])
+
+OVSDB_CHECK_IDL_PY_WITH_EXPOUT([simple idl, writing large data via IDL with unicode],
+  [['["idltest",
+      {"op": "insert",
+       "table": "simple",
+       "row": {"s": "'$(printf "测试超过四千零九十六个字节的中文字符串以使解码出现问题。%.0s" {1..50})'"}}]']],
+  [['set 0 b 1, insert 1, set 1 s '$(printf "测试超过四千零九十六个字节的中文字符串以使解码出现问题。%.0s" {1..100})'']],
+  [[000: i=0 r=0 b=false s=$(printf "测试超过四千零九十六个字节的中文字符串以使解码出现问题。%.0s" {1..50}) u=<0> ia=[] ra=[] ba=[] sa=[] ua=[] uuid=<1>
+001: commit, status=success
+002: i=0 r=0 b=true s=$(printf "测试超过四千零九十六个字节的中文字符串以使解码出现问题。%.0s" {1..50}) u=<0> ia=[] ra=[] ba=[] sa=[] ua=[] uuid=<1>
+002: i=1 r=0 b=false s=$(printf "测试超过四千零九十六个字节的中文字符串以使解码出现问题。%.0s" {1..100}) u=<0> ia=[] ra=[] ba=[] sa=[] ua=[] uuid=<2>
+003: done]])
 
 OVSDB_CHECK_IDL([simple idl, handling verification failure],
   [['["idltest",
@@ -764,7 +845,7 @@ AT_CHECK([test-ovsdb '-vPATTERN:console:test-ovsdb|%c|%m' -vjsonrpc -t10 idl uni
        "where": [],
        "row": {"k": ["uuid", "#0#"]}}]']],
 	 [0], [stdout], [stderr])
-AT_CHECK([sort stdout | ${PERL} $srcdir/uuidfilt.pl], [0],
+AT_CHECK([sort stdout | uuidfilt], [0],
     [[000: empty
 001: {"error":null,"result":[{"uuid":["uuid","<0>"]}]}
 002: i=0 k=0 ka=[] l2= uuid=<0>
@@ -792,7 +873,7 @@ test-ovsdb|ovsdb_idl|link1 table in idltest database lacks l2 column (database n
 # Check that ovsdb-idl sent on "monitor" request and that it didn't
 # mention that table or column, and (for paranoia) that it did mention another
 # table and column.
-AT_CHECK([grep -c '"monitor\|monitor_cond"' stderr], [0], [1
+AT_CHECK([grep -c '"monitor\|monitor_cond"' stderr], [0], [2
 ])
 AT_CHECK([grep '"monitor\|monitor_cond"' stderr | grep link2], [1])
 AT_CHECK([grep '"monitor\|monitor_cond"' stderr | grep l2], [1])
@@ -803,19 +884,25 @@ AT_CHECK([grep '"monitor\|monitor_cond"' stderr | grep -c '"ua"'], [0], [1
 OVSDB_SERVER_SHUTDOWN
 AT_CLEANUP
 
-m4_define([OVSDB_CHECK_IDL_FETCH_COLUMNS_PY],
-  [AT_SETUP([$1 - Python fetch])
-   AT_SKIP_IF([test $HAVE_PYTHON = no])
+m4_define([OVSDB_CHECK_IDL_FETCH_COLUMNS_PYN],
+  [AT_SETUP([$1 fetch])
+   AT_SKIP_IF([test $8 = no])
    AT_KEYWORDS([ovsdb server idl positive Python increment fetch $6])
    AT_CHECK([ovsdb_start_idltest])
    m4_if([$2], [], [],
      [AT_CHECK([ovsdb-client transact unix:socket $2], [0], [ignore], [ignore])])
-   AT_CHECK([$PYTHON $srcdir/test-ovsdb.py  -t10 idl $srcdir/idltest.ovsschema unix:socket [$3] $4],
+   AT_CHECK([$9 $srcdir/test-ovsdb.py  -t10 idl $srcdir/idltest.ovsschema unix:socket [$3] $4],
             [0], [stdout], [ignore])
-   AT_CHECK([sort stdout | ${PERL} $srcdir/uuidfilt.pl]m4_if([$7],,, [[| $7]]),
+   AT_CHECK([sort stdout | uuidfilt]m4_if([$7],,, [[| $7]]),
             [0], [$5])
    OVSDB_SERVER_SHUTDOWN
    AT_CLEANUP])
+
+m4_define([OVSDB_CHECK_IDL_FETCH_COLUMNS_PY],
+    [OVSDB_CHECK_IDL_FETCH_COLUMNS_PYN([$1 - Python2], [$2], [$3], [$4], [$5], [$6], [$7],
+                        [$HAVE_PYTHON], [$PYTHON])
+    OVSDB_CHECK_IDL_FETCH_COLUMNS_PYN([$1 - Python3], [$2], [$3], [$4], [$5], [$6], [$7],
+                        [$HAVE_PYTHON3], [$PYTHON3])])
 
 m4_define([OVSDB_CHECK_IDL_FETCH_COLUMNS],
    [OVSDB_CHECK_IDL_FETCH_COLUMNS_PY($@)])
@@ -848,18 +935,24 @@ OVSDB_CHECK_IDL_FETCH_COLUMNS([simple idl, initially populated],
 003: done
 ]])
 
-m4_define([OVSDB_CHECK_IDL_WO_MONITOR_COND_PY],
-  [AT_SETUP([$1 - Python])
-   AT_SKIP_IF([test $HAVE_PYTHON = no])
+m4_define([OVSDB_CHECK_IDL_WO_MONITOR_COND_PYN],
+  [AT_SETUP([$1])
+   AT_SKIP_IF([test $6 = no])
    AT_KEYWORDS([ovsdb server idl Python monitor $4])
    AT_CHECK([ovsdb_start_idltest])
    AT_CHECK([ovs-appctl -t ovsdb-server ovsdb-server/disable-monitor-cond])
-   AT_CHECK([$PYTHON $srcdir/test-ovsdb.py  -t10 idl $srcdir/idltest.ovsschema unix:socket $2],
-            [0], [stdout], [ignore], [kill `cat pid`])
-   AT_CHECK([sort stdout | ${PERL} $srcdir/uuidfilt.pl]m4_if([$5],,, [[| $5]]),
-            [0], [$3], [], [kill `cat pid`])
+   AT_CHECK([$7 $srcdir/test-ovsdb.py  -t10 idl $srcdir/idltest.ovsschema unix:socket $2],
+            [0], [stdout], [ignore])
+   AT_CHECK([sort stdout | uuidfilt]m4_if([$5],,, [[| $5]]),
+            [0], [$3])
    OVSDB_SERVER_SHUTDOWN
    AT_CLEANUP])
+
+m4_define([OVSDB_CHECK_IDL_WO_MONITOR_COND_PY],
+    [OVSDB_CHECK_IDL_WO_MONITOR_COND_PYN([$1 - Python2], [$2], [$3], [$4], [$5],
+                        [$HAVE_PYTHON], [$PYTHON])
+    OVSDB_CHECK_IDL_WO_MONITOR_COND_PYN([$1 - Python3], [$2], [$3], [$4], [$5],
+                        [$HAVE_PYTHON3], [$PYTHON3])])
 
 
 m4_define([OVSDB_CHECK_IDL_WO_MONITOR_COND],
@@ -951,7 +1044,7 @@ m4_define([OVSDB_CHECK_IDL_TRACK_C],
      [AT_CHECK([ovsdb-client transact unix:socket $2], [0], [ignore], [ignore])])
    AT_CHECK([test-ovsdb '-vPATTERN:console:test-ovsdb|%c|%m' -vjsonrpc -t10 -c idl unix:socket $3],
             [0], [stdout], [ignore])
-   AT_CHECK([sort stdout | ${PERL} $srcdir/uuidfilt.pl]m4_if([$6],,, [[| $6]]),
+   AT_CHECK([sort stdout | uuidfilt]m4_if([$6],,, [[| $6]]),
             [0], [$4])
    OVSDB_SERVER_SHUTDOWN
    AT_CLEANUP])
@@ -1080,7 +1173,7 @@ m4_define([OVSDB_CHECK_IDL_PARTIAL_UPDATE_MAP_COLUMN],
      [AT_CHECK([ovsdb-client transact unix:socket $2], [0], [ignore], [ignore])])
    AT_CHECK([test-ovsdb '-vPATTERN:console:test-ovsdb|%c|%m' -vjsonrpc -t10 -c idl-partial-update-map-column unix:socket $3],
             [0], [stdout], [ignore])
-   AT_CHECK([sort stdout | ${PERL} $srcdir/uuidfilt.pl]m4_if([$6],,, [[| $6]]),
+   AT_CHECK([sort stdout | uuidfilt]m4_if([$6],,, [[| $6]]),
             [0], [$4])
    OVSDB_SERVER_SHUTDOWN
    AT_CLEANUP])
@@ -1129,7 +1222,7 @@ m4_define([OVSDB_CHECK_IDL_PARTIAL_UPDATE_SET_COLUMN],
      [AT_CHECK([ovsdb-client transact unix:socket $2], [0], [ignore], [ignore])])
    AT_CHECK([test-ovsdb '-vPATTERN:console:test-ovsdb|%c|%m' -vjsonrpc -t10 -c idl-partial-update-set-column unix:socket $3],
             [0], [stdout], [ignore])
-   AT_CHECK([sort stdout | ${PERL} $srcdir/uuidfilt.pl]m4_if([$6],,, [[| $6]]),
+   AT_CHECK([sort stdout | uuidfilt]m4_if([$6],,, [[| $6]]),
             [0], [$4])
    OVSDB_SERVER_SHUTDOWN
    AT_CLEANUP])
@@ -1181,46 +1274,24 @@ OVSDB_CHECK_IDL_PY([partial-set idl],
 015: done
 ]])
 
+m4_define([OVSDB_CHECK_IDL_NOTIFY_PYN],
+  [OVSDB_CHECK_IDL_PYN([$1], [], [$2], [$3], [notify $4], [$5], [$6], [$7])])
+
 m4_define([OVSDB_CHECK_IDL_NOTIFY_PY],
-  [AT_SETUP([$1 - Python])
-   AT_SKIP_IF([test $HAVE_PYTHON = no])
-   AT_KEYWORDS([ovsdb server idl Python notify $4])
-   AT_CHECK([ovsdb_start_idltest])
-   AT_CHECK([$PYTHON $srcdir/test-ovsdb.py  -t10 idl $srcdir/idltest.ovsschema unix:socket $2],
-            [0], [stdout], [ignore], [kill `cat pid`])
-   AT_CHECK([sort stdout | ${PERL} $srcdir/uuidfilt.pl]m4_if([$5],,, [[| $5]]),
-            [0], [$3], [], [kill `cat pid`])
-   OVSDB_SERVER_SHUTDOWN
-   AT_CLEANUP])
+    [OVSDB_CHECK_IDL_NOTIFY_PYN([$1 - Python2], [$2], [$3], [$4], [$5],
+                        [$HAVE_PYTHON], [$PYTHON])
+    OVSDB_CHECK_IDL_NOTIFY_PYN([$1 - Python3], [$2], [$3], [$4], [$5],
+                        [$HAVE_PYTHON3], [$PYTHON3])])
 
 # This test uses the Python IDL implementation with ssl
+m4_define([OVSDB_CHECK_IDL_NOTIFY_SSL_PYN],
+  [OVSDB_CHECK_IDL_SSL_PYN([$1], [], [$2], [$3], [notify $4], [$5], [$6], [$7])])
+
 m4_define([OVSDB_CHECK_IDL_NOTIFY_SSL_PY],
-  [AT_SETUP([$1 - SSL])
-   AT_SKIP_IF([test "$HAVE_OPENSSL" = no])
-   AT_SKIP_IF([test $HAVE_PYTHON = no])
-   $PYTHON -c "import OpenSSL.SSL"
-   SSL_PRESENT=$?
-   AT_SKIP_IF([test $SSL_PRESENT != 0])
-   AT_KEYWORDS([ovsdb server idl Python notify - ssl socket])
-   AT_CHECK([ovsdb-tool create db $abs_srcdir/idltest.ovsschema],
-             [0], [stdout], [ignore])
-   PKIDIR=$abs_top_builddir/tests
-   AT_CHECK([ovsdb-server -vconsole:warn --log-file --detach --no-chdir \
-             --pidfile \
-             --private-key=$PKIDIR/testpki-privkey2.pem \
-             --certificate=$PKIDIR/testpki-cert2.pem \
-             --ca-cert=$PKIDIR/testpki-cacert.pem \
-             --remote=pssl:0:127.0.0.1 db])
-   on_exit 'kill `cat ovsdb-server.pid`'
-   PARSE_LISTENING_PORT([ovsdb-server.log], [TCP_PORT])
-   AT_CHECK([$PYTHON $srcdir/test-ovsdb.py  -t10 idl $srcdir/idltest.ovsschema \
-             ssl:127.0.0.1:$TCP_PORT $PKIDIR/testpki-privkey.pem \
-             $PKIDIR/testpki-cert.pem $PKIDIR/testpki-cacert.pem $2],
-            [0], [stdout], [ignore], [kill `cat pid`])
-   AT_CHECK([sort stdout | ${PERL} $srcdir/uuidfilt.pl]m4_if([$5],,, [[| $5]]),
-            [0], [$3], [], [kill `cat pid`])
-   OVSDB_SERVER_SHUTDOWN
-   AT_CLEANUP])
+    [OVSDB_CHECK_IDL_NOTIFY_SSL_PYN([$1 - Python2], [$2], [$3], [$4], [$5],
+                        [$HAVE_PYTHON], [$PYTHON])
+    OVSDB_CHECK_IDL_NOTIFY_SSL_PYN([$1 - Python3], [$2], [$3], [$4], [$5],
+                        [$HAVE_PYTHON3], [$PYTHON3])])
 
 m4_define([OVSDB_CHECK_IDL_NOTIFY],
    [OVSDB_CHECK_IDL_NOTIFY_PY($@)
@@ -1326,26 +1397,26 @@ m4_define([OVSDB_CHECK_IDL_COMPOUND_INDEX_SINGLE_COLUMN_C],
    AT_KEYWORDS([ovsdb server idl compound_index_single_column compound_index positive $5])
    AT_CHECK([ovsdb_start_idltest])
    m4_if([$2], [], [],
-     [AT_CHECK([ovsdb-client transact unix:socket $2], [0], [ignore], [ignore], [kill `cat pid`])])
+     [AT_CHECK([ovsdb-client transact unix:socket $2], [0], [ignore], [ignore])])
 # Generate the data to be tested.
    AT_CHECK([test-ovsdb '-vPATTERN:console:test-ovsdb|%c|%m' -vjsonrpc -t10 -c idl-compound-index unix:socket $3],
-            [0], [stdout], [ignore], [kill `cat pid`])
+            [0], [stdout], [ignore])
 # Filter the rows of data that corresponds to the string index eliminating the extra columns of data.
 # This is done to verifiy that the output data is in the correct and expected order.
    AT_CHECK([[cat stdout | grep -oh '[0-9]\{3\}: s=.*' | sed -e 's/ i=.*//g']],
-            [0], [$4], [], [kill `cat pid`])
+            [0], [$4])
 # Here, the data is filtered and sorted in order to have all the rows in the index and be
 # able to determined that all the involved rows are present.
    AT_CHECK([[cat stdout | grep -oh '[0-9]\{3\}: s=.*' | sort -k 1,1n -k 2,2 -k 3,3]],
-            [0], [$5], [], [kill `cat pid`])
+            [0], [$5])
 # Filter the rows of data that corresponds to the integer index eliminating the extra columns of data.
 # This is done to verifiy that the output data is in the correct and expected order.
    AT_CHECK([[cat stdout | grep -oh '[0-9]\{3\}: i=.*' | sed -e 's/ s=.*//g']],
-            [0], [$6], [], [kill `cat pid`])
+            [0], [$6])
 # Here again, the data is filtered and sorted in order to have all the rows in the index and be
 # able to determined that all the involved rows are present.
    AT_CHECK([[cat stdout | grep -oh '[0-9]\{3\}: i=.*' | sort -k 1,1n -k 2,2 -k 3,3]],
-            [0], [$7], [], [kill `cat pid`])
+            [0], [$7])
    OVSDB_SERVER_SHUTDOWN
    AT_CLEANUP])
 
@@ -1463,26 +1534,26 @@ m4_define([OVSDB_CHECK_IDL_COMPOUND_INDEX_DOUBLE_COLUMN_C],
    AT_KEYWORDS([ovsdb server idl compound_index_double_column compound_index positive $5])
    AT_CHECK([ovsdb_start_idltest])
    m4_if([$2], [], [],
-     [AT_CHECK([ovsdb-client transact unix:socket $2], [0], [ignore], [ignore], [kill `cat pid`])])
+     [AT_CHECK([ovsdb-client transact unix:socket $2], [0], [ignore], [ignore])])
 # Generate the data to be tested.
    AT_CHECK([test-ovsdb '-vPATTERN:console:test-ovsdb|%c|%m' -vjsonrpc -t10 -c idl-compound-index unix:socket $3],
-            [0], [stdout], [ignore], [kill `cat pid`])
+            [0], [stdout], [ignore])
 # Filter the rows of data that corresponds to the string-integer index eliminating the extra columns of data.
 # This is done to verifiy that the output data is in the correct and expected order.
    AT_CHECK([[cat stdout | grep -oh '[0-9]\{3\}: s=.*' | sed -e 's/ b=.*//g']],
-            [0], [$4], [], [kill `cat pid`])
+            [0], [$4])
 # Here, the data is filtered and sorted in order to have all the rows in the index and be
 # able to determined that all the involved rows are present.
    AT_CHECK([[cat stdout | grep -oh '[0-9]\{3\}: s=.*' | sort -k 1,1n -k 2,2 -k 3,3]],
-            [0], [$5], [], [kill `cat pid`])
+            [0], [$5])
 # Filter the rows of data that corresponds to the integer index eliminating the extra columns of data.
 # This is done to verifiy that the output data is in the correct and expected order.
    AT_CHECK([[cat stdout | grep -oh '[0-9]\{3\}: i=.*' | sed -e 's/ b=.*//g']],
-            [0], [$6], [], [kill `cat pid`])
+            [0], [$6])
 # Here again, the data is filtered and sorted in order to have all the rows in the index and be
 # able to determined that all the involved rows are present.
    AT_CHECK([[cat stdout | grep -oh '[0-9]\{3\}: i=.*' | sort -k 1,1n -k 2,2 -k 3,3]],
-            [0], [$7], [], [kill `cat pid`])
+            [0], [$7])
    OVSDB_SERVER_SHUTDOWN
    AT_CLEANUP])
 
@@ -1605,7 +1676,7 @@ m4_define([OVSDB_CHECK_IDL_COMPOUND_INDEX_WITH_REF],
      [AT_CHECK([ovsdb-client transact unix:socket $2], [0], [ignore], [ignore])])
    AT_CHECK([test-ovsdb '-vPATTERN:console:test-ovsdb|%c|%m' -vjsonrpc -t10 -c idl-compound-index-with-ref unix:socket $3],
             [0], [stdout], [ignore])
-   AT_CHECK([sort stdout | ${PERL} $srcdir/uuidfilt.pl]m4_if([$6],,, [[| $6]]),
+   AT_CHECK([sort stdout | uuidfilt]m4_if([$6],,, [[| $6]]),
             [0], [$4])
    OVSDB_SERVER_SHUTDOWN
    AT_CLEANUP])

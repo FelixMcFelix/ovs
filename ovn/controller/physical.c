@@ -466,6 +466,17 @@ consider_port_binding(struct controller_ctx *ctx,
     } else {
         ofport = u16_to_ofp(simap_get(&localvif_to_ofport,
                                       binding->logical_port));
+        const char *requested_chassis = smap_get(&binding->options,
+                                                 "requested-chassis");
+        if (ofport && requested_chassis && requested_chassis[0] &&
+            strcmp(requested_chassis, chassis->name) &&
+            strcmp(requested_chassis, chassis->hostname)) {
+            /* Even though there is an ofport for this port_binding, it is
+             * requested on a different chassis. So ignore this ofport.
+             */
+            ofport = 0;
+        }
+
         if ((!strcmp(binding->type, "localnet")
             || !strcmp(binding->type, "l2gateway"))
             && ofport && binding->tag) {
@@ -1087,6 +1098,20 @@ physical_run(struct controller_ctx *ctx, enum mf_field_id mff_ovn_geneve,
     match_set_reg_masked(&match, MFF_LOG_FLAGS - MFF_REG0,
                          MLF_RCV_FROM_VXLAN, MLF_RCV_FROM_VXLAN);
 
+    /* Resubmit to table 33. */
+    ofpbuf_clear(&ofpacts);
+    put_resubmit(OFTABLE_LOCAL_OUTPUT, &ofpacts);
+    ofctrl_add_flow(flow_table, OFTABLE_REMOTE_OUTPUT, 150, 0,
+                    &match, &ofpacts);
+
+    /* Table 32, priority 150.
+     * =======================
+     *
+     * Packets that should not be sent to other hypervisors.
+     */
+    match_init_catchall(&match);
+    match_set_reg_masked(&match, MFF_LOG_FLAGS - MFF_REG0,
+                         MLF_LOCAL_ONLY, MLF_LOCAL_ONLY);
     /* Resubmit to table 33. */
     ofpbuf_clear(&ofpacts);
     put_resubmit(OFTABLE_LOCAL_OUTPUT, &ofpacts);

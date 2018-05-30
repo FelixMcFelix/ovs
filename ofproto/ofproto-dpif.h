@@ -19,7 +19,7 @@
  *
  * ofproto-dpif provides an ofproto implementation for those platforms which
  * implement the netdev and dpif interface defined in netdev.h and dpif.h.  The
- * most important of which is the Linux Kernel Module (dpif-linux), but
+ * most important of which is the Linux Kernel Module (dpif-netlink), but
  * alternatives are supported such as a userspace only implementation
  * (dpif-netdev), and a dummy implementation used for unit testing.
  *
@@ -50,7 +50,6 @@
 #include "fail-open.h"
 #include "hmapx.h"
 #include "odp-util.h"
-#include "openvswitch/ofp-util.h"
 #include "id-pool.h"
 #include "ovs-thread.h"
 #include "ofproto-provider.h"
@@ -60,7 +59,9 @@
 struct dpif_flow_stats;
 struct ofproto_async_msg;
 struct ofproto_dpif;
+struct uuid;
 struct xlate_cache;
+struct xlate_ctx;
 
 /* Number of implemented OpenFlow tables. */
 enum { N_TABLES = 255 };
@@ -119,6 +120,12 @@ rule_dpif_is_internal(const struct rule_dpif *rule)
 
 /* Groups. */
 
+enum group_selection_method {
+    SEL_METHOD_DEFAULT,
+    SEL_METHOD_DP_HASH,
+    SEL_METHOD_HASH,
+};
+
 struct group_dpif {
     struct ofgroup up;
 
@@ -129,6 +136,12 @@ struct group_dpif {
     struct ovs_mutex stats_mutex;
     uint64_t packet_count OVS_GUARDED;  /* Number of packets received. */
     uint64_t byte_count OVS_GUARDED;    /* Number of bytes received. */
+
+    enum group_selection_method selection_method;
+    enum ovs_hash_alg hash_alg;         /* dp_hash algorithm to be applied. */
+    uint32_t hash_basis;                /* Basis for dp_hash. */
+    uint32_t hash_mask;                 /* Used to mask dp_hash (2^N - 1).*/
+    struct ofputil_bucket **hash_map;   /* Map hash values to buckets. */
 };
 
 void group_dpif_credit_stats(struct group_dpif *,
@@ -137,6 +150,7 @@ void group_dpif_credit_stats(struct group_dpif *,
 struct group_dpif *group_dpif_lookup(struct ofproto_dpif *,
                                      uint32_t group_id, ovs_version_t version,
                                      bool take_ref);
+
 
 /* Backers.
  *
@@ -152,12 +166,6 @@ struct group_dpif *group_dpif_lookup(struct ofproto_dpif *,
  * They are defined as macros to keep 'dpif_show_support()' in sync
  * as new fields are added.  */
 #define DPIF_SUPPORT_FIELDS                                                 \
-    /* True if the datapath supports variable-length                        \
-     * OVS_USERSPACE_ATTR_USERDATA in OVS_ACTION_ATTR_USERSPACE actions.    \
-     * False if the datapath supports only 8-byte (or shorter) userdata. */ \
-    DPIF_SUPPORT_FIELD(bool, variable_length_userdata,                      \
-                       "Variable length userdata")                          \
-                                                                            \
     /* True if the datapath supports masked data in OVS_ACTION_ATTR_SET     \
      * actions. */                                                          \
     DPIF_SUPPORT_FIELD(bool, masked_set_action, "Masked set action")        \
@@ -178,7 +186,13 @@ struct group_dpif *group_dpif_lookup(struct ofproto_dpif *,
     DPIF_SUPPORT_FIELD(size_t, sample_nesting, "Sample nesting")            \
                                                                             \
     /* OVS_CT_ATTR_EVENTMASK supported by OVS_ACTION_ATTR_CT action. */     \
-    DPIF_SUPPORT_FIELD(bool, ct_eventmask, "Conntrack eventmask")
+    DPIF_SUPPORT_FIELD(bool, ct_eventmask, "Conntrack eventmask")           \
+                                                                            \
+    /* True if the datapath supports OVS_ACTION_ATTR_CT_CLEAR action. */    \
+    DPIF_SUPPORT_FIELD(bool, ct_clear, "Conntrack clear")                   \
+                                                                            \
+    /* Highest supported dp_hash algorithm. */                              \
+    DPIF_SUPPORT_FIELD(size_t, max_hash_alg, "Max dp_hash algorithm")
 
 /* Stores the various features which the corresponding backer supports. */
 struct dpif_backer_support {
@@ -251,7 +265,12 @@ struct ofport_dpif *odp_port_to_ofport(const struct dpif_backer *, odp_port_t);
 /* A bridge based on a "dpif" datapath. */
 
 struct ofproto_dpif {
-    struct hmap_node all_ofproto_dpifs_node; /* In 'all_ofproto_dpifs'. */
+    /* In 'all_ofproto_dpifs_by_name'. */
+    struct hmap_node all_ofproto_dpifs_by_name_node;
+
+    /* In 'all_ofproto_dpifs_by_uuid'. */
+    struct hmap_node all_ofproto_dpifs_by_uuid_node;
+
     struct ofproto up;
     struct dpif_backer *backer;
 
@@ -304,10 +323,8 @@ struct ofproto_dpif {
     uint64_t ams_seqno;
 };
 
-/* All existing ofproto_dpif instances, indexed by ->up.name. */
-extern struct hmap all_ofproto_dpifs;
-
-struct ofproto_dpif *ofproto_dpif_lookup(const char *name);
+struct ofproto_dpif *ofproto_dpif_lookup_by_name(const char *name);
+struct ofproto_dpif *ofproto_dpif_lookup_by_uuid(const struct uuid *uuid);
 
 ovs_version_t ofproto_dpif_get_tables_version(struct ofproto_dpif *);
 
@@ -335,7 +352,7 @@ struct ofport_dpif *ofp_port_to_ofport(const struct ofproto_dpif *,
                                        ofp_port_t);
 
 int ofproto_dpif_add_internal_flow(struct ofproto_dpif *,
-                                   const struct match *, int priority,
+                                   struct match *, int priority,
                                    uint16_t idle_timeout,
                                    const struct ofpbuf *ofpacts,
                                    struct rule **rulep);

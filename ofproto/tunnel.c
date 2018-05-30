@@ -37,6 +37,7 @@
 #include "tunnel.h"
 #include "openvswitch/vlog.h"
 #include "unaligned.h"
+#include "unixctl.h"
 #include "ofproto-dpif.h"
 #include "netdev-vport.h"
 
@@ -121,12 +122,18 @@ static struct tnl_port *tnl_find_ofport(const struct ofport_dpif *)
 
 static uint32_t tnl_hash(struct tnl_match *);
 static void tnl_match_fmt(const struct tnl_match *, struct ds *);
-static char *tnl_port_fmt(const struct tnl_port *) OVS_REQ_RDLOCK(rwlock);
+static char *tnl_port_to_string(const struct tnl_port *)
+    OVS_REQ_RDLOCK(rwlock);
+static void tnl_port_format(const struct tnl_port *, struct ds *)
+    OVS_REQ_RDLOCK(rwlock);
 static void tnl_port_mod_log(const struct tnl_port *, const char *action)
     OVS_REQ_RDLOCK(rwlock);
 static const char *tnl_port_get_name(const struct tnl_port *)
     OVS_REQ_RDLOCK(rwlock);
-static void tnl_port_del__(const struct ofport_dpif *) OVS_REQ_WRLOCK(rwlock);
+static void tnl_port_del__(const struct ofport_dpif *, odp_port_t)
+    OVS_REQ_WRLOCK(rwlock);
+
+static unixctl_cb_func tnl_unixctl_list;
 
 void
 ofproto_tunnel_init(void)
@@ -135,6 +142,8 @@ ofproto_tunnel_init(void)
 
     if (ovsthread_once_start(&once)) {
         fat_rwlock_init(&rwlock);
+        unixctl_command_register("ofproto/list-tunnels", "", 0, 0,
+                                 tnl_unixctl_list, NULL);
         ovsthread_once_done(&once);
     }
 }
@@ -221,13 +230,15 @@ tnl_port_add(const struct ofport_dpif *ofport, const struct netdev *netdev,
 }
 
 /* Checks if the tunnel represented by 'ofport' reconfiguration due to changes
- * in its netdev_tunnel_config.  If it does, returns true. Otherwise, returns
- * false.  'ofport' and 'odp_port' should be the same as would be passed to
- * tnl_port_add(). */
+ * in its netdev_tunnel_config. If it does, returns true. Otherwise, returns
+ * false. 'new_odp_port' should be the port number coming from 'ofport' that
+ * is passed to tnl_port_add__(). 'old_odp_port' should be the port number
+ * that is passed to tnl_port_del__(). */
 bool
 tnl_port_reconfigure(const struct ofport_dpif *ofport,
-                     const struct netdev *netdev, odp_port_t odp_port,
-                     bool native_tnl, const char name[])
+                     const struct netdev *netdev, odp_port_t new_odp_port,
+                     odp_port_t old_odp_port, bool native_tnl,
+                     const char name[])
     OVS_EXCLUDED(rwlock)
 {
     struct tnl_port *tnl_port;
@@ -236,14 +247,14 @@ tnl_port_reconfigure(const struct ofport_dpif *ofport,
     fat_rwlock_wrlock(&rwlock);
     tnl_port = tnl_find_ofport(ofport);
     if (!tnl_port) {
-        changed = tnl_port_add__(ofport, netdev, odp_port, false, native_tnl,
-                                 name);
+        changed = tnl_port_add__(ofport, netdev, new_odp_port, false,
+                                 native_tnl, name);
     } else if (tnl_port->netdev != netdev
-               || tnl_port->match.odp_port != odp_port
+               || tnl_port->match.odp_port != new_odp_port
                || tnl_port->change_seq != netdev_get_change_seq(tnl_port->netdev)) {
         VLOG_DBG("reconfiguring %s", tnl_port_get_name(tnl_port));
-        tnl_port_del__(ofport);
-        tnl_port_add__(ofport, netdev, odp_port, true, native_tnl, name);
+        tnl_port_del__(ofport, old_odp_port);
+        tnl_port_add__(ofport, netdev, new_odp_port, true, native_tnl, name);
         changed = true;
     }
     fat_rwlock_unlock(&rwlock);
@@ -251,7 +262,8 @@ tnl_port_reconfigure(const struct ofport_dpif *ofport,
 }
 
 static void
-tnl_port_del__(const struct ofport_dpif *ofport) OVS_REQ_WRLOCK(rwlock)
+tnl_port_del__(const struct ofport_dpif *ofport, odp_port_t odp_port)
+    OVS_REQ_WRLOCK(rwlock)
 {
     struct tnl_port *tnl_port;
 
@@ -261,11 +273,9 @@ tnl_port_del__(const struct ofport_dpif *ofport) OVS_REQ_WRLOCK(rwlock)
 
     tnl_port = tnl_find_ofport(ofport);
     if (tnl_port) {
-        const struct netdev_tunnel_config *cfg =
-            netdev_get_tunnel_config(tnl_port->netdev);
         struct hmap **map;
 
-        tnl_port_map_delete(cfg->dst_port, netdev_get_type(tnl_port->netdev));
+        tnl_port_map_delete(odp_port, netdev_get_type(tnl_port->netdev));
         tnl_port_mod_log(tnl_port, "removing");
         map = tnl_match_map(&tnl_port->match);
         hmap_remove(*map, &tnl_port->match_node);
@@ -282,10 +292,11 @@ tnl_port_del__(const struct ofport_dpif *ofport) OVS_REQ_WRLOCK(rwlock)
 
 /* Removes 'ofport' from the module. */
 void
-tnl_port_del(const struct ofport_dpif *ofport) OVS_EXCLUDED(rwlock)
+tnl_port_del(const struct ofport_dpif *ofport, odp_port_t odp_port)
+    OVS_EXCLUDED(rwlock)
 {
     fat_rwlock_wrlock(&rwlock);
-    tnl_port_del__(ofport);
+    tnl_port_del__(ofport, odp_port);
     fat_rwlock_unlock(&rwlock);
 }
 
@@ -298,7 +309,6 @@ tnl_port_del(const struct ofport_dpif *ofport) OVS_EXCLUDED(rwlock)
 const struct ofport_dpif *
 tnl_port_receive(const struct flow *flow) OVS_EXCLUDED(rwlock)
 {
-    char *pre_flow_str = NULL;
     const struct ofport_dpif *ofport;
     struct tnl_port *tnl_port;
 
@@ -306,28 +316,20 @@ tnl_port_receive(const struct flow *flow) OVS_EXCLUDED(rwlock)
     tnl_port = tnl_find(flow);
     ofport = tnl_port ? tnl_port->ofport : NULL;
     if (!tnl_port) {
-        char *flow_str = flow_to_string(flow, NULL);
-
-        VLOG_WARN_RL(&rl, "receive tunnel port not found (%s)", flow_str);
-        free(flow_str);
+        if (!VLOG_DROP_WARN(&rl)) {
+            char *flow_str = flow_to_string(flow, NULL);
+            VLOG_WARN("receive tunnel port not found (%s)", flow_str);
+            free(flow_str);
+        }
         goto out;
     }
 
     if (!VLOG_DROP_DBG(&dbg_rl)) {
-        pre_flow_str = flow_to_string(flow, NULL);
-    }
-
-    if (pre_flow_str) {
-        char *post_flow_str = flow_to_string(flow, NULL);
-        char *tnl_str = tnl_port_fmt(tnl_port);
-        VLOG_DBG("flow received\n"
-                 "%s"
-                 " pre: %s\n"
-                 "post: %s",
-                 tnl_str, pre_flow_str, post_flow_str);
+        char *flow_str = flow_to_string(flow, NULL);
+        char *tnl_str = tnl_port_to_string(tnl_port);
+        VLOG_DBG("tunnel port %s receive from flow %s", tnl_str, flow_str);
         free(tnl_str);
-        free(pre_flow_str);
-        free(post_flow_str);
+        free(flow_str);
     }
 
 out:
@@ -462,6 +464,7 @@ tnl_port_send(const struct ofport_dpif *ofport, struct flow *flow,
         }
     }
 
+    flow->tunnel.flags &= ~(FLOW_TNL_F_MASK & ~FLOW_TNL_PUB_F_MASK);
     flow->tunnel.flags |= (cfg->dont_fragment ? FLOW_TNL_F_DONT_FRAGMENT : 0)
         | (cfg->csum ? FLOW_TNL_F_CSUM : 0)
         | (cfg->out_key_present ? FLOW_TNL_F_KEY : 0);
@@ -471,9 +474,25 @@ tnl_port_send(const struct ofport_dpif *ofport, struct flow *flow,
         wc->masks.pkt_mark = UINT32_MAX;
     }
 
+    if (!cfg->erspan_ver_flow) {
+        flow->tunnel.erspan_ver = cfg->erspan_ver;
+    }
+
+    if (!cfg->erspan_idx_flow) {
+        flow->tunnel.erspan_idx = cfg->erspan_idx;
+    }
+
+    if (!cfg->erspan_dir_flow) {
+        flow->tunnel.erspan_dir = cfg->erspan_dir;
+    }
+
+    if (!cfg->erspan_hwid_flow) {
+        flow->tunnel.erspan_hwid = cfg->erspan_hwid;
+    }
+
     if (pre_flow_str) {
         char *post_flow_str = flow_to_string(flow, NULL);
-        char *tnl_str = tnl_port_fmt(tnl_port);
+        char *tnl_str = tnl_port_to_string(tnl_port);
         VLOG_DBG("flow sent\n"
                  "%s"
                  " pre: %s\n"
@@ -648,53 +667,58 @@ tnl_port_mod_log(const struct tnl_port *tnl_port, const char *action)
     }
 }
 
-static char *
-tnl_port_fmt(const struct tnl_port *tnl_port) OVS_REQ_RDLOCK(rwlock)
+static void OVS_REQ_RDLOCK(rwlock)
+tnl_port_format(const struct tnl_port *tnl_port, struct ds *ds)
 {
     const struct netdev_tunnel_config *cfg =
         netdev_get_tunnel_config(tnl_port->netdev);
-    struct ds ds = DS_EMPTY_INITIALIZER;
 
-    ds_put_format(&ds, "port %"PRIu32": %s (%s: ", tnl_port->match.odp_port,
+    ds_put_format(ds, "port %"PRIu32": %s (%s: ", tnl_port->match.odp_port,
                   tnl_port_get_name(tnl_port),
                   netdev_get_type(tnl_port->netdev));
-    tnl_match_fmt(&tnl_port->match, &ds);
+    tnl_match_fmt(&tnl_port->match, ds);
 
     if (cfg->out_key != cfg->in_key ||
         cfg->out_key_present != cfg->in_key_present ||
         cfg->out_key_flow != cfg->in_key_flow) {
-        ds_put_cstr(&ds, ", out_key=");
+        ds_put_cstr(ds, ", out_key=");
         if (!cfg->out_key_present) {
-            ds_put_cstr(&ds, "none");
+            ds_put_cstr(ds, "none");
         } else if (cfg->out_key_flow) {
-            ds_put_cstr(&ds, "flow");
+            ds_put_cstr(ds, "flow");
         } else {
-            ds_put_format(&ds, "%#"PRIx64, ntohll(cfg->out_key));
+            ds_put_format(ds, "%#"PRIx64, ntohll(cfg->out_key));
         }
     }
 
     if (cfg->ttl_inherit) {
-        ds_put_cstr(&ds, ", ttl=inherit");
+        ds_put_cstr(ds, ", ttl=inherit");
     } else {
-        ds_put_format(&ds, ", ttl=%"PRIu8, cfg->ttl);
+        ds_put_format(ds, ", ttl=%"PRIu8, cfg->ttl);
     }
 
     if (cfg->tos_inherit) {
-        ds_put_cstr(&ds, ", tos=inherit");
+        ds_put_cstr(ds, ", tos=inherit");
     } else if (cfg->tos) {
-        ds_put_format(&ds, ", tos=%#"PRIx8, cfg->tos);
+        ds_put_format(ds, ", tos=%#"PRIx8, cfg->tos);
     }
 
     if (!cfg->dont_fragment) {
-        ds_put_cstr(&ds, ", df=false");
+        ds_put_cstr(ds, ", df=false");
     }
 
     if (cfg->csum) {
-        ds_put_cstr(&ds, ", csum=true");
+        ds_put_cstr(ds, ", csum=true");
     }
 
-    ds_put_cstr(&ds, ")\n");
+    ds_put_cstr(ds, ")\n");
+}
 
+static char * OVS_REQ_RDLOCK(rwlock)
+tnl_port_to_string(const struct tnl_port *tnl_port)
+{
+    struct ds ds = DS_EMPTY_INITIALIZER;
+    tnl_port_format(tnl_port, &ds);
     return ds_steal_cstr(&ds);
 }
 
@@ -702,6 +726,16 @@ static const char *
 tnl_port_get_name(const struct tnl_port *tnl_port) OVS_REQ_RDLOCK(rwlock)
 {
     return netdev_get_name(tnl_port->netdev);
+}
+
+const char *
+tnl_port_get_type(const struct ofport_dpif *ofport) OVS_REQ_RDLOCK(rwlock)
+{
+    struct tnl_port *tnl_port;
+
+    tnl_port = tnl_find_ofport(ofport);
+    return !tnl_port ? NULL :
+                       netdev_get_type(tnl_port->netdev);
 }
 
 int
@@ -719,4 +753,27 @@ tnl_port_build_header(const struct ofport_dpif *ofport,
     fat_rwlock_unlock(&rwlock);
 
     return res;
+}
+
+static void
+tnl_unixctl_list(struct unixctl_conn *conn,
+                 int argc OVS_UNUSED, const char *argv[] OVS_UNUSED,
+                 void *aux OVS_UNUSED)
+{
+    struct ds reply = DS_EMPTY_INITIALIZER;
+
+    fat_rwlock_rdlock(&rwlock);
+    for (int i = 0; i < N_MATCH_TYPES; i++) {
+        struct hmap *map = tnl_match_maps[i];
+        if (map) {
+            struct tnl_port *tnl_port;
+            HMAP_FOR_EACH (tnl_port, match_node, map) {
+                tnl_port_format(tnl_port, &reply);
+            }
+        }
+    }
+    fat_rwlock_unlock(&rwlock);
+
+    unixctl_command_reply(conn, ds_cstr(&reply));
+    ds_destroy(&reply);
 }

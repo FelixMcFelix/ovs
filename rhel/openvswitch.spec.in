@@ -36,6 +36,8 @@ Requires: logrotate, hostname, python >= 2.7, python-six
 BuildRequires: python-six
 BuildRequires: openssl-devel
 BuildRequires: checkpolicy, selinux-policy-devel
+BuildRequires: autoconf, automake, libtool
+BuildRequires: python-sphinx
 
 %bcond_without check
 %bcond_with check_datapath_kernel
@@ -68,9 +70,7 @@ Tailored Open vSwitch SELinux policy
 ./configure --prefix=/usr --sysconfdir=/etc --localstatedir=%{_localstatedir} \
     --libdir=%{_libdir} --enable-ssl --enable-shared
 make %{_smp_mflags}
-make selinux/openvswitch-custom.te
-cd selinux
-make -f %{_datadir}/selinux/devel/Makefile
+make selinux-policy
 
 %install
 rm -rf $RPM_BUILD_ROOT
@@ -225,9 +225,13 @@ exit 0
 /usr/share/man/man1/ovsdb-client.1.gz
 /usr/share/man/man1/ovsdb-server.1.gz
 /usr/share/man/man1/ovsdb-tool.1.gz
+/usr/share/man/man5/ovsdb-server.5.gz
 /usr/share/man/man5/ovs-vswitchd.conf.db.5.gz
+%{_mandir}/man5/ovsdb.5*
 /usr/share/man/man5/vtep.5.gz
 /usr/share/man/man7/ovs-fields.7.gz
+%{_mandir}/man7/ovsdb.7*
+%{_mandir}/man7/ovsdb-server.7*
 /usr/share/man/man8/ovs-appctl.8.gz
 /usr/share/man/man8/ovs-bugtool.8.gz
 /usr/share/man/man8/ovs-ctl.8.gz
@@ -252,7 +256,7 @@ exit 0
 /usr/share/openvswitch/scripts/sysconfig.template
 /usr/share/openvswitch/vswitch.ovsschema
 /usr/share/openvswitch/vtep.ovsschema
-%doc COPYING NOTICE README.rst NEWS rhel/README.RHEL.rst
+%doc NOTICE README.rst NEWS rhel/README.RHEL.rst
 /var/lib/openvswitch
 /var/log/openvswitch
 

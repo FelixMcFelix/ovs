@@ -24,7 +24,7 @@
 #include "openvswitch/match.h"
 #include "nx-match.h"
 #include "odp-netlink.h"
-#include "openvswitch/ofp-util.h"
+#include "openvswitch/ofp-match.h"
 #include "ovs-rcu.h"
 #include "packets.h"
 #include "tun-metadata.h"
@@ -922,5 +922,22 @@ tun_metadata_match_format(struct ds *s, const struct match *match)
             }
         }
         ds_put_char(s, ',');
+    }
+}
+
+struct tun_metadata_allocation *
+tun_metadata_allocation_clone(const struct tun_metadata_allocation *src)
+{
+    return src && src->valid ? xmemdup(src, sizeof *src) : NULL;
+}
+
+void
+tun_metadata_allocation_copy(struct tun_metadata_allocation *dst,
+                             const struct tun_metadata_allocation *src)
+{
+    if (src && src->valid) {
+        *dst = *src;
+    } else {
+        memset(dst, 0, sizeof *dst);
     }
 }

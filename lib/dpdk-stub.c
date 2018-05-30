@@ -21,6 +21,7 @@
 #include "smap.h"
 #include "ovs-thread.h"
 #include "openvswitch/vlog.h"
+#include "vswitch-idl.h"
 
 VLOG_DEFINE_THIS_MODULE(dpdk);
 
@@ -47,4 +48,24 @@ const char *
 dpdk_get_vhost_sock_dir(void)
 {
     return NULL;
+}
+
+bool
+dpdk_vhost_iommu_enabled(void)
+{
+    return false;
+}
+
+void
+print_dpdk_version(void)
+{
+}
+
+void
+dpdk_status(const struct ovsrec_open_vswitch *cfg)
+{
+    if (cfg) {
+        ovsrec_open_vswitch_set_dpdk_initialized(cfg, false);
+        ovsrec_open_vswitch_set_dpdk_version(cfg, "none");
+    }
 }

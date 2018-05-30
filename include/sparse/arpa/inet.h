@@ -18,4 +18,8 @@
 #error "Use this header only with sparse.  It is not a correct implementation."
 #endif
 
+#ifndef NETINET_IN_H_INCLUDED
+#error "Must include <netinet/in.h> before <arpa/inet.h> for FreeBSD support"
+#endif
+
 #include <netinet/in.h>

@@ -19,10 +19,9 @@ A daemon that manages and controls any number of Open vSwitch switches
 on the local machine.
 .PP
 The \fIdatabase\fR argument specifies how \fBovs\-vswitchd\fR connects
-to \fBovsdb\-server\fR.  The default is \fBunix:@RUNDIR@/db.sock\fR.
-The following forms are accepted:
-.so ovsdb/remote-active.man
-.so ovsdb/remote-passive.man
+to \fBovsdb\-server\fR.  \fIdatabase\fR may be an OVSDB active or
+passive connection method, as described in \fBovsdb\fR(7).  The
+default is \fBunix:@RUNDIR@/db.sock\fR.
 .PP
 \fBovs\-vswitchd\fR retrieves its configuration from \fIdatabase\fR at
 startup.  It sets up Open vSwitch datapaths and then operates
@@ -60,11 +59,12 @@ Only a single instance of \fBovs\-vswitchd\fR is intended to run at a time.
 A single \fBovs\-vswitchd\fR can manage any number of switch instances, up
 to the maximum number of supported Open vSwitch datapaths.
 .PP
-\fBovs\-vswitchd\fR does all the necessary management of Open vSwitch datapaths
-itself.  Thus, external tools, such \fBovs\-dpctl\fR(8), are not needed for
-managing datapaths in conjunction with \fBovs\-vswitchd\fR, and their use
-to modify datapaths when \fBovs\-vswitchd\fR is running can interfere with
-its operation.  (\fBovs\-dpctl\fR may still be useful for diagnostics.)
+\fBovs\-vswitchd\fR does all the necessary management of Open vSwitch
+datapaths itself.  Thus, \fBovs\-dpctl\fR(8) (and its userspace
+datapath counterparts accessible via \fBovs\-appctl
+dpctl/\fIcommand\fR) are not needed with \fBovs\-vswitchd\fR and should
+not be used because they can interfere with its operation.  These
+tools are still useful for diagnostics.
 .PP
 An Open vSwitch datapath kernel module must be loaded for \fBovs\-vswitchd\fR
 to be useful.  Refer to the documentation for instructions on how to build and
@@ -97,6 +97,7 @@ configuration.
 .SS "Public Key Infrastructure Options"
 .so lib/ssl.man
 .so lib/ssl-bootstrap.man
+.so lib/ssl-peer-ca-cert.man
 .SS "Logging Options"
 .so lib/vlog.man
 .SS "Other Options"
@@ -241,6 +242,12 @@ whether it is attached or detached, port id and priority, actor
 information, and partner information.  If \fIport\fR is not specified,
 then displays detailed information about all interfaces with CFM
 enabled.
+.
+.IP "\fBlacp/stats-show\fR [\fIport\fR]"
+Lists various stats about LACP PDUs (number of RX/TX PDUs, bad PDUs received)
+and slave state (number of time slave's state expired/defaulted and carrier
+status changed) for the given \fIport\fR.  If \fIport\fR is not specified,
+then displays stats of all interfaces with LACP enabled.
 .SS "DPCTL DATAPATH DEBUGGING COMMANDS"
 The primary way to configure \fBovs\-vswitchd\fR is through the Open
 vSwitch database, e.g. using \fBovs\-vsctl\fR(8).  These commands
@@ -257,32 +264,8 @@ type).
 ..
 .so lib/dpctl.man
 .
-.SS "DPIF-NETDEV COMMANDS"
-These commands are used to expose internal information (mostly statistics)
-about the ``dpif-netdev'' userspace datapath. If there is only one datapath
-(as is often the case, unless \fBdpctl/\fR commands are used), the \fIdp\fR
-argument can be omitted.
-.IP "\fBdpif-netdev/pmd-stats-show\fR [\fIdp\fR]"
-Shows performance statistics for each pmd thread of the datapath \fIdp\fR.
-The special thread ``main'' sums up the statistics of every non pmd thread.
-The sum of ``emc hits'', ``masked hits'' and ``miss'' is the number of
-packets received by the datapath.  Cycles are counted using the TSC or similar
-facilities (when available on the platform).  To reset these counters use
-\fBdpif-netdev/pmd-stats-clear\fR. The duration of one cycle depends on the
-measuring infrastructure. ``idle cycles'' refers to cycles spent polling
-devices but not receiving any packets. ``processing cycles'' refers to cycles
-spent polling devices and successfully receiving packets, plus the cycles
-spent processing said packets.
-.IP "\fBdpif-netdev/pmd-stats-clear\fR [\fIdp\fR]"
-Resets to zero the per pmd thread performance numbers shown by the
-\fBdpif-netdev/pmd-stats-show\fR command.  It will NOT reset datapath or
-bridge statistics, only the values shown by the above command.
-.IP "\fBdpif-netdev/pmd-rxq-show\fR [\fIdp\fR]"
-For each pmd thread of the datapath \fIdp\fR shows list of queue-ids with
-port names, which this thread polls.
-.IP "\fBdpif-netdev/pmd-rxq-rebalance\fR [\fIdp\fR]"
-Reassigns rxqs to pmds in the datapath \fIdp\fR based on their current usage.
-.
+.so lib/dpif-netdev-unixctl.man
+.so lib/netdev-dpdk-unixctl.man
 .so ofproto/ofproto-dpif-unixctl.man
 .so ofproto/ofproto-unixctl.man
 .so lib/vlog-unixctl.man
@@ -320,7 +303,10 @@ replies for a switch defined time greater than 1s, it may send an
 ofp_error_msg with OFPET_BUNDLE_FAILED type and OFPBFC_TIMEOUT code.
 .
 .PP
-Open vSwitch implements idle bundle lifetime of 10 seconds.
+Open vSwitch implements default idle bundle lifetime of 10 seconds.
+(This is configurable via \fBother-config:bundle-idle-timeout\fR in
+the \fBOpen_vSwitch\fR table. See \fBovs-vswitchd.conf.db\fR(5)
+for details.)
 .
 .SH "LIMITS"
 .

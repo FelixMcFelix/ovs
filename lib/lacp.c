@@ -127,9 +127,12 @@ struct slave {
     struct timer tx;              /* Next message transmission timer. */
     struct timer rx;              /* Expected message receive timer. */
 
-    uint32_t count_rx_pdus;       /* dot3adAggPortStatsLACPDUsRx */
-    uint32_t count_rx_pdus_bad;   /* dot3adAggPortStatsIllegalRx */
-    uint32_t count_tx_pdus;       /* dot3adAggPortStatsLACPDUsTx */
+    uint32_t count_rx_pdus;         /* dot3adAggPortStatsLACPDUsRx */
+    uint32_t count_rx_pdus_bad;     /* dot3adAggPortStatsIllegalRx */
+    uint32_t count_tx_pdus;         /* dot3adAggPortStatsLACPDUsTx */
+    uint32_t count_link_expired;    /* Num of times link expired */
+    uint32_t count_link_defaulted;  /* Num of times link defaulted */
+    uint32_t count_carrier_changed; /* Num of times link status changed */
 };
 
 static struct ovs_mutex mutex;
@@ -153,6 +156,7 @@ static bool info_tx_equal(struct lacp_info *, struct lacp_info *)
     OVS_REQUIRES(mutex);
 
 static unixctl_cb_func lacp_unixctl_show;
+static unixctl_cb_func lacp_unixctl_show_stats;
 
 /* Populates 'pdu' with a LACP PDU comprised of 'actor' and 'partner'. */
 static void
@@ -206,6 +210,8 @@ lacp_init(void)
 {
     unixctl_command_register("lacp/show", "[port]", 0, 1,
                              lacp_unixctl_show, NULL);
+    unixctl_command_register("lacp/show-stats", "[port]", 0, 1,
+                             lacp_unixctl_show_stats, NULL);
 }
 
 static void
@@ -459,6 +465,7 @@ lacp_slave_carrier_changed(const struct lacp *lacp, const void *slave_)
     if (slave->status == LACP_CURRENT || slave->lacp->active) {
         slave_set_expired(slave);
     }
+    slave->count_carrier_changed++;
 
 out:
     lacp_unlock();
@@ -525,8 +532,10 @@ lacp_run(struct lacp *lacp, lacp_send_pdu *send_pdu) OVS_EXCLUDED(mutex)
 
             if (slave->status == LACP_CURRENT) {
                 slave_set_expired(slave);
+                slave->count_link_expired++;
             } else if (slave->status == LACP_EXPIRED) {
                 slave_set_defaulted(slave);
+                slave->count_link_defaulted++;
             }
             if (slave->status != old_status) {
                 seq_change(connectivity_seq_get());
@@ -595,7 +604,7 @@ lacp_wait(struct lacp *lacp) OVS_EXCLUDED(mutex)
 static void
 lacp_update_attached(struct lacp *lacp) OVS_REQUIRES(mutex)
 {
-    struct slave *lead, *slave;
+    struct slave *lead, *lead_current, *slave;
     struct lacp_info lead_pri;
     bool lead_enable;
     static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 10);
@@ -603,7 +612,25 @@ lacp_update_attached(struct lacp *lacp) OVS_REQUIRES(mutex)
     lacp->update = false;
 
     lead = NULL;
+    lead_current = NULL;
     lead_enable = false;
+
+    /* Check if there is a working interface.
+     * Store as lead_current, if there is one. */
+    HMAP_FOR_EACH (slave, node, &lacp->slaves) {
+        if (slave->status == LACP_CURRENT && slave->attached) {
+            struct lacp_info pri;
+            slave_get_priority(slave, &pri);
+            if (!lead_current || memcmp(&pri, &lead_pri, sizeof pri) < 0) {
+                lead_current = slave;
+                lead = lead_current;
+                lead_pri = pri;
+                lead_enable = true;
+            }
+        }
+    }
+
+    /* Find interface with highest priority. */
     HMAP_FOR_EACH (slave, node, &lacp->slaves) {
         struct lacp_info pri;
 
@@ -624,14 +651,22 @@ lacp_update_attached(struct lacp *lacp) OVS_REQUIRES(mutex)
             continue;
         }
 
-        slave->attached = true;
         slave_get_priority(slave, &pri);
         bool enable = slave_may_enable__(slave);
 
-        if (!lead
-            || enable > lead_enable
-            || (enable == lead_enable
-                && memcmp(&pri, &lead_pri, sizeof pri) < 0)) {
+        /* Check if partner MAC address is the same as on the working
+         * interface. Activate slave only if the MAC is the same, or
+         * there is no working interface. */
+        if (!lead_current || (lead_current
+            && eth_addr_equals(slave->partner.sys_id,
+                               lead_current->partner.sys_id))) {
+            slave->attached = true;
+        }
+        if (slave->attached &&
+                (!lead
+                 || enable > lead_enable
+                 || (enable == lead_enable
+                     && memcmp(&pri, &lead_pri, sizeof pri) < 0))) {
             lead = slave;
             lead_enable = enable;
             lead_pri = pri;
@@ -968,6 +1003,40 @@ lacp_print_details(struct ds *ds, struct lacp *lacp) OVS_REQUIRES(mutex)
 }
 
 static void
+lacp_print_stats(struct ds *ds, struct lacp *lacp) OVS_REQUIRES(mutex)
+{
+    struct shash slave_shash = SHASH_INITIALIZER(&slave_shash);
+    const struct shash_node **sorted_slaves = NULL;
+
+    struct slave *slave;
+    int i;
+
+    ds_put_format(ds, "---- %s statistics ----\n", lacp->name);
+
+    HMAP_FOR_EACH (slave, node, &lacp->slaves) {
+        shash_add(&slave_shash, slave->name, slave);
+    }
+    sorted_slaves = shash_sort(&slave_shash);
+
+    for (i = 0; i < shash_count(&slave_shash); i++) {
+        slave = sorted_slaves[i]->data;
+        ds_put_format(ds, "\nslave: %s:\n", slave->name);
+        ds_put_format(ds, "\tRX PDUs: %u\n", slave->count_rx_pdus);
+        ds_put_format(ds, "\tRX Bad PDUs: %u\n", slave->count_rx_pdus_bad);
+        ds_put_format(ds, "\tTX PDUs: %u\n", slave->count_tx_pdus);
+        ds_put_format(ds, "\tLink Expired: %u\n",
+                      slave->count_link_expired);
+        ds_put_format(ds, "\tLink Defaulted: %u\n",
+                      slave->count_link_defaulted);
+        ds_put_format(ds, "\tCarrier Status Changed: %u\n",
+                      slave->count_carrier_changed);
+    }
+
+    shash_destroy(&slave_shash);
+    free(sorted_slaves);
+}
+
+static void
 lacp_unixctl_show(struct unixctl_conn *conn, int argc, const char *argv[],
                   void *aux OVS_UNUSED) OVS_EXCLUDED(mutex)
 {
@@ -985,6 +1054,36 @@ lacp_unixctl_show(struct unixctl_conn *conn, int argc, const char *argv[],
     } else {
         LIST_FOR_EACH (lacp, node, all_lacps) {
             lacp_print_details(&ds, lacp);
+        }
+    }
+
+    unixctl_command_reply(conn, ds_cstr(&ds));
+    ds_destroy(&ds);
+
+out:
+    lacp_unlock();
+}
+
+static void
+lacp_unixctl_show_stats(struct unixctl_conn *conn,
+                  int argc,
+                  const char *argv[],
+                  void *aux OVS_UNUSED) OVS_EXCLUDED(mutex)
+{
+    struct ds ds = DS_EMPTY_INITIALIZER;
+    struct lacp *lacp;
+
+    lacp_lock();
+    if (argc > 1) {
+        lacp = lacp_find(argv[1]);
+        if (!lacp) {
+            unixctl_command_reply_error(conn, "no such lacp object");
+            goto out;
+        }
+        lacp_print_stats(&ds, lacp);
+    } else {
+        LIST_FOR_EACH (lacp, node, all_lacps) {
+            lacp_print_stats(&ds, lacp);
         }
     }
 

@@ -28,14 +28,19 @@
 #include "openvswitch/list.h"
 #include "openvswitch/match.h"
 #include "openvswitch/ofp-actions.h"
+#include "openvswitch/ofp-flow.h"
+#include "openvswitch/ofp-group.h"
+#include "openvswitch/ofp-match.h"
 #include "openvswitch/ofp-msgs.h"
-#include "openvswitch/ofp-parse.h"
+#include "openvswitch/ofp-meter.h"
+#include "openvswitch/ofp-packet.h"
 #include "openvswitch/ofp-print.h"
 #include "openvswitch/ofp-util.h"
 #include "openvswitch/ofpbuf.h"
 #include "openvswitch/vlog.h"
 #include "ovn-controller.h"
 #include "ovn/actions.h"
+#include "ovn/lib/extend-table.h"
 #include "openvswitch/poll-loop.h"
 #include "physical.h"
 #include "openvswitch/rconn.h"
@@ -53,7 +58,7 @@ struct ovn_flow {
     /* Key. */
     uint8_t table_id;
     uint16_t priority;
-    struct match match;
+    struct minimatch match;
 
     /* Data. */
     struct ofpact *ofpacts;
@@ -131,7 +136,10 @@ static struct rconn_packet_counter *tx_counter;
 static struct hmap installed_flows;
 
 /* A reference to the group_table. */
-static struct group_table *groups;
+static struct ovn_extend_table *groups;
+
+/* A reference to the meter_table. */
+static struct ovn_extend_table *meters;
 
 /* MFF_* field ID for our Geneve option.  In S_TLV_TABLE_MOD_SENT, this is
  * the option we requested (we don't know whether we obtained it yet).  In
@@ -144,13 +152,16 @@ static struct ofpbuf *encode_flow_mod(struct ofputil_flow_mod *);
 
 static struct ofpbuf *encode_group_mod(const struct ofputil_group_mod *);
 
+static struct ofpbuf *encode_meter_mod(const struct ofputil_meter_mod *);
+
 static void ovn_flow_table_clear(struct hmap *flow_table);
 static void ovn_flow_table_destroy(struct hmap *flow_table);
 
 static void ofctrl_recv(const struct ofp_header *, enum ofptype);
 
 void
-ofctrl_init(struct group_table *group_table)
+ofctrl_init(struct ovn_extend_table *group_table,
+            struct ovn_extend_table *meter_table)
 {
     swconn = rconn_create(5, 0, DSCP_DEFAULT, 1 << OFP13_VERSION);
     tx_counter = rconn_packet_counter_create();
@@ -158,6 +169,7 @@ ofctrl_init(struct group_table *group_table)
     ovs_list_init(&flow_updates);
     ovn_init_symtab(&symtab);
     groups = group_table;
+    meters = meter_table;
 }
 
 /* S_NEW, for a new connection.
@@ -286,7 +298,7 @@ recv_S_TLV_TABLE_REQUESTED(const struct ofp_header *oh, enum ofptype type,
         VLOG_ERR("switch refused to allocate Geneve option (%s)",
                  ofperr_to_string(ofperr_decode_msg(oh, NULL)));
     } else {
-        char *s = ofp_to_string(oh, ntohs(oh->length), NULL, 1);
+        char *s = ofp_to_string(oh, ntohs(oh->length), NULL, NULL, 1);
         VLOG_ERR("unexpected reply to TLV table request (%s)", s);
         free(s);
     }
@@ -340,7 +352,7 @@ recv_S_TLV_TABLE_MOD_SENT(const struct ofp_header *oh, enum ofptype type,
             goto error;
         }
     } else {
-        char *s = ofp_to_string(oh, ntohs(oh->length), NULL, 1);
+        char *s = ofp_to_string(oh, ntohs(oh->length), NULL, NULL, 1);
         VLOG_ERR("unexpected reply to Geneve option allocation request (%s)",
                  s);
         free(s);
@@ -361,14 +373,16 @@ error:
 static void
 run_S_CLEAR_FLOWS(void)
 {
+    VLOG_DBG("clearing all flows");
+
     /* Send a flow_mod to delete all flows. */
     struct ofputil_flow_mod fm = {
-        .match = MATCH_CATCHALL_INITIALIZER,
         .table_id = OFPTT_ALL,
         .command = OFPFC_DELETE,
     };
+    minimatch_init_catchall(&fm.match);
     queue_msg(encode_flow_mod(&fm));
-    VLOG_DBG("clearing all flows");
+    minimatch_destroy(&fm.match);
 
     /* Clear installed_flows, to match the state of the switch. */
     ovn_flow_table_clear(&installed_flows);
@@ -385,7 +399,19 @@ run_S_CLEAR_FLOWS(void)
 
     /* Clear existing groups, to match the state of the switch. */
     if (groups) {
-        ovn_group_table_clear(groups, true);
+        ovn_extend_table_clear(groups, true);
+    }
+
+    /* Send a meter_mod to delete all meters. */
+    struct ofputil_meter_mod mm;
+    memset(&mm, 0, sizeof mm);
+    mm.command = OFPMC13_DELETE;
+    mm.meter.meter_id = OFPM13_ALL;
+    queue_msg(encode_meter_mod(&mm));
+
+    /* Clear existing meters, to match the state of the switch. */
+    if (meters) {
+        ovn_extend_table_clear(meters, true);
     }
 
     /* All flow updates are irrelevant now. */
@@ -513,7 +539,7 @@ ofctrl_run(const struct ovsrec_bridge *br_int, struct shash *pending_ct_zones)
                     OVS_NOT_REACHED();
                 }
             } else {
-                char *s = ofp_to_string(oh, ntohs(oh->length), NULL, 1);
+                char *s = ofp_to_string(oh, ntohs(oh->length), NULL, NULL, 1);
                 VLOG_WARN("could not decode OpenFlow message (%s): %s",
                           ofperr_to_string(error), s);
                 free(s);
@@ -563,9 +589,9 @@ static ovs_be32
 queue_msg(struct ofpbuf *msg)
 {
     const struct ofp_header *oh = msg->data;
-    ovs_be32 xid = oh->xid;
+    ovs_be32 xid_ = oh->xid;
     rconn_send(swconn, msg, tx_counter);
-    return xid;
+    return xid_;
 }
 
 static void
@@ -573,7 +599,7 @@ log_openflow_rl(struct vlog_rate_limit *rl, enum vlog_level level,
                 const struct ofp_header *oh, const char *title)
 {
     if (!vlog_should_drop(&this_module, level, rl)) {
-        char *s = ofp_to_string(oh, ntohs(oh->length), NULL, 2);
+        char *s = ofp_to_string(oh, ntohs(oh->length), NULL, NULL, 2);
         vlog(&this_module, level, "%s: %s", title, s);
         free(s);
     }
@@ -583,7 +609,7 @@ static void
 ofctrl_recv(const struct ofp_header *oh, enum ofptype type)
 {
     if (type == OFPTYPE_ECHO_REQUEST) {
-        queue_msg(make_echo_reply(oh));
+        queue_msg(ofputil_encode_echo_reply(oh));
     } else if (type == OFPTYPE_ERROR) {
         static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(30, 300);
         log_openflow_rl(&rl, VLL_INFO, oh, "OpenFlow error");
@@ -606,13 +632,12 @@ ofctrl_recv(const struct ofp_header *oh, enum ofptype type)
 void
 ofctrl_add_flow(struct hmap *desired_flows,
                 uint8_t table_id, uint16_t priority, uint64_t cookie,
-                const struct match *match,
-                const struct ofpbuf *actions)
+                const struct match *match, const struct ofpbuf *actions)
 {
     struct ovn_flow *f = xmalloc(sizeof *f);
     f->table_id = table_id;
     f->priority = priority;
-    f->match = *match;
+    minimatch_init(&f->match, match);
     f->ofpacts = xmemdup(actions->data, actions->size);
     f->ofpacts_len = actions->size;
     f->hmap_node.hash = ovn_flow_hash(f);
@@ -620,9 +645,9 @@ ofctrl_add_flow(struct hmap *desired_flows,
 
     if (ovn_flow_lookup(desired_flows, f)) {
         static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 5);
-        if (!VLOG_DROP_INFO(&rl)) {
+        if (!VLOG_DROP_DBG(&rl)) {
             char *s = ovn_flow_to_string(f);
-            VLOG_INFO("dropping duplicate flow: %s", s);
+            VLOG_DBG("dropping duplicate flow: %s", s);
             free(s);
         }
 
@@ -641,7 +666,7 @@ static uint32_t
 ovn_flow_hash(const struct ovn_flow *f)
 {
     return hash_2words((f->table_id << 16) | f->priority,
-                       match_hash(&f->match, 0));
+                       minimatch_hash(&f->match, 0));
 
 }
 
@@ -652,7 +677,7 @@ ofctrl_dup_flow(struct ovn_flow *src)
     struct ovn_flow *dst = xmalloc(sizeof *dst);
     dst->table_id = src->table_id;
     dst->priority = src->priority;
-    dst->match = src->match;
+    minimatch_clone(&dst->match, &src->match);
     dst->ofpacts = xmemdup(src->ofpacts, src->ofpacts_len);
     dst->ofpacts_len = src->ofpacts_len;
     dst->hmap_node.hash = ovn_flow_hash(dst);
@@ -670,7 +695,7 @@ ovn_flow_lookup(struct hmap *flow_table, const struct ovn_flow *target)
                              flow_table) {
         if (f->table_id == target->table_id
             && f->priority == target->priority
-            && match_equal(&f->match, &target->match)) {
+            && minimatch_equal(&f->match, &target->match)) {
             return f;
         }
     }
@@ -683,9 +708,10 @@ ovn_flow_to_string(const struct ovn_flow *f)
     struct ds s = DS_EMPTY_INITIALIZER;
     ds_put_format(&s, "table_id=%"PRIu8", ", f->table_id);
     ds_put_format(&s, "priority=%"PRIu16", ", f->priority);
-    match_format(&f->match, NULL, &s, OFP_DEFAULT_PRIORITY);
+    minimatch_format(&f->match, NULL, NULL, &s, OFP_DEFAULT_PRIORITY);
     ds_put_cstr(&s, ", actions=");
-    ofpacts_format(f->ofpacts, f->ofpacts_len, NULL, &s);
+    struct ofpact_format_params fp = { .s = &s };
+    ofpacts_format(f->ofpacts, f->ofpacts_len, &fp);
     return ds_steal_cstr(&s);
 }
 
@@ -703,6 +729,7 @@ static void
 ovn_flow_destroy(struct ovn_flow *f)
 {
     if (f) {
+        minimatch_destroy(&f->match);
         free(f->ofpacts);
         free(f);
     }
@@ -747,44 +774,6 @@ add_flow_mod(struct ofputil_flow_mod *fm, struct ovs_list *msgs)
 
 /* group_table. */
 
-/* Finds and returns a group_info in 'existing_groups' whose key is identical
- * to 'target''s key, or NULL if there is none. */
-static struct group_info *
-ovn_group_lookup(struct hmap *exisiting_groups,
-                 const struct group_info *target)
-{
-    struct group_info *e;
-
-    HMAP_FOR_EACH_WITH_HASH(e, hmap_node, target->hmap_node.hash,
-                            exisiting_groups) {
-        if (e->group_id == target->group_id) {
-            return e;
-        }
-   }
-    return NULL;
-}
-
-/* Clear either desired_groups or existing_groups in group_table. */
-void
-ovn_group_table_clear(struct group_table *group_table, bool existing)
-{
-    struct group_info *g, *next;
-    struct hmap *target_group = existing
-                                ? &group_table->existing_groups
-                                : &group_table->desired_groups;
-
-    HMAP_FOR_EACH_SAFE (g, next, hmap_node, target_group) {
-        hmap_remove(target_group, &g->hmap_node);
-        /* Don't unset bitmap for desired group_info if the group_id
-         * was not freshly reserved. */
-        if (existing || g->new_group_id) {
-            bitmap_set0(group_table->group_ids, g->group_id);
-        }
-        ds_destroy(&g->group);
-        free(g);
-    }
-}
-
 static struct ofpbuf *
 encode_group_mod(const struct ofputil_group_mod *gm)
 {
@@ -795,6 +784,20 @@ static void
 add_group_mod(const struct ofputil_group_mod *gm, struct ovs_list *msgs)
 {
     struct ofpbuf *msg = encode_group_mod(gm);
+    ovs_list_push_back(msgs, &msg->list_node);
+}
+
+
+static struct ofpbuf *
+encode_meter_mod(const struct ofputil_meter_mod *mm)
+{
+    return ofputil_encode_meter_mod(OFP13_VERSION, mm);
+}
+
+static void
+add_meter_mod(const struct ofputil_meter_mod *mm, struct ovs_list *msgs)
+{
+    struct ofpbuf *msg = encode_meter_mod(mm);
     ovs_list_push_back(msgs, &msg->list_node);
 }
 
@@ -827,11 +830,10 @@ ofctrl_can_put(void)
 /* Replaces the flow table on the switch, if possible, by the flows added
  * with ofctrl_add_flow().
  *
- * Replaces the group table on the switch, if possible, by the contents of
- * 'groups->desired_groups'.  Regardless of whether the group table
- * is updated, this deletes all the groups from the
- * 'groups->desired_groups' and frees them. (The hmap itself isn't
- * destroyed.)
+ * Replaces the group table and meter table on the switch, if possible, by the
+ *  contents of 'groups->desired'.  Regardless of whether the group table
+ * is updated, this deletes all the groups from the 'groups->desired' and frees
+ * them. (The hmap itself isn't destroyed.)
  *
  * Sends conntrack flush messages to each zone in 'pending_ct_zones' that
  * is in the CT_ZONE_OF_QUEUED state and then moves the zone into the
@@ -844,7 +846,8 @@ ofctrl_put(struct hmap *flow_table, struct shash *pending_ct_zones,
 {
     if (!ofctrl_can_put()) {
         ovn_flow_table_clear(flow_table);
-        ovn_group_table_clear(groups, false);
+        ovn_extend_table_clear(groups, false);
+        ovn_extend_table_clear(meters, false);
         return;
     }
 
@@ -864,31 +867,47 @@ ofctrl_put(struct hmap *flow_table, struct shash *pending_ct_zones,
 
     /* Iterate through all the desired groups. If there are new ones,
      * add them to the switch. */
-    struct group_info *desired;
-    HMAP_FOR_EACH(desired, hmap_node, &groups->desired_groups) {
-        if (!ovn_group_lookup(&groups->existing_groups, desired)) {
-            /* Create and install new group. */
-            struct ofputil_group_mod gm;
-            enum ofputil_protocol usable_protocols;
-            char *error;
-            struct ds group_string = DS_EMPTY_INITIALIZER;
-            ds_put_format(&group_string, "group_id=%u,%s",
-                          desired->group_id, ds_cstr(&desired->group));
-
-            error = parse_ofp_group_mod_str(&gm, OFPGC11_ADD,
-                                            ds_cstr(&group_string), NULL,
-                                            &usable_protocols);
-            if (!error) {
-                add_group_mod(&gm, &msgs);
-            } else {
-                static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
-                VLOG_ERR_RL(&rl, "new group %s %s", error,
-                         ds_cstr(&group_string));
-                free(error);
-            }
-            ds_destroy(&group_string);
-            ofputil_uninit_group_mod(&gm);
+    struct ovn_extend_table_info *desired;
+    EXTEND_TABLE_FOR_EACH_UNINSTALLED (desired, groups) {
+        /* Create and install new group. */
+        struct ofputil_group_mod gm;
+        enum ofputil_protocol usable_protocols;
+        char *group_string = xasprintf("group_id=%"PRIu32",%s",
+                                       desired->table_id,
+                                       ds_cstr(&desired->info));
+        char *error = parse_ofp_group_mod_str(&gm, OFPGC11_ADD, group_string,
+                                              NULL, NULL, &usable_protocols);
+        if (!error) {
+            add_group_mod(&gm, &msgs);
+        } else {
+            static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
+            VLOG_ERR_RL(&rl, "new group %s %s", error, group_string);
+            free(error);
         }
+        free(group_string);
+        ofputil_uninit_group_mod(&gm);
+    }
+
+    /* Iterate through all the desired meters. If there are new ones,
+     * add them to the switch. */
+    struct ovn_extend_table_info *m_desired;
+    EXTEND_TABLE_FOR_EACH_UNINSTALLED (m_desired, meters) {
+        /* Create and install new meter. */
+        struct ofputil_meter_mod mm;
+        enum ofputil_protocol usable_protocols;
+        char *meter_string = xasprintf("meter=%"PRIu32",%s",
+                                       m_desired->table_id,
+                                       ds_cstr(&m_desired->info));
+        char *error = parse_ofp_meter_mod_str(&mm, meter_string, OFPMC13_ADD,
+                                              &usable_protocols);
+        if (!error) {
+            add_meter_mod(&mm, &msgs);
+        } else {
+            static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
+            VLOG_ERR_RL(&rl, "new meter %s %s", error, meter_string);
+            free(error);
+        }
+        free(meter_string);
     }
 
     /* Iterate through all of the installed flows.  If any of them are no
@@ -964,59 +983,64 @@ ofctrl_put(struct hmap *flow_table, struct shash *pending_ct_zones,
 
     /* Iterate through the installed groups from previous runs. If they
      * are not needed delete them. */
-    struct group_info *installed, *next_group;
-    HMAP_FOR_EACH_SAFE(installed, next_group, hmap_node,
-                       &groups->existing_groups) {
-        if (!ovn_group_lookup(&groups->desired_groups, installed)) {
-            /* Delete the group. */
-            struct ofputil_group_mod gm;
-            enum ofputil_protocol usable_protocols;
-            char *error;
-            struct ds group_string = DS_EMPTY_INITIALIZER;
-            ds_put_format(&group_string, "group_id=%u", installed->group_id);
-
-            error = parse_ofp_group_mod_str(&gm, OFPGC11_DELETE,
-                                            ds_cstr(&group_string), NULL,
-                                            &usable_protocols);
-            if (!error) {
-                add_group_mod(&gm, &msgs);
-            } else {
-                static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
-                VLOG_ERR_RL(&rl, "Error deleting group %d: %s",
-                         installed->group_id, error);
-                free(error);
-            }
-            ds_destroy(&group_string);
-            ofputil_uninit_group_mod(&gm);
-
-            /* Remove 'installed' from 'groups->existing_groups' */
-            hmap_remove(&groups->existing_groups, &installed->hmap_node);
-            ds_destroy(&installed->group);
-
-            /* Dealloc group_id. */
-            bitmap_set0(groups->group_ids, installed->group_id);
-            free(installed);
-        }
-    }
-
-    /* Move the contents of desired_groups to existing_groups. */
-    HMAP_FOR_EACH_SAFE(desired, next_group, hmap_node,
-                       &groups->desired_groups) {
-        hmap_remove(&groups->desired_groups, &desired->hmap_node);
-        if (!ovn_group_lookup(&groups->existing_groups, desired)) {
-            hmap_insert(&groups->existing_groups, &desired->hmap_node,
-                        desired->hmap_node.hash);
+    struct ovn_extend_table_info *installed, *next_group;
+    EXTEND_TABLE_FOR_EACH_INSTALLED (installed, next_group, groups) {
+        /* Delete the group. */
+        struct ofputil_group_mod gm;
+        enum ofputil_protocol usable_protocols;
+        char *group_string = xasprintf("group_id=%"PRIu32"",
+                                       installed->table_id);
+        char *error = parse_ofp_group_mod_str(&gm, OFPGC11_DELETE,
+                                              group_string, NULL, NULL,
+                                              &usable_protocols);
+        if (!error) {
+            add_group_mod(&gm, &msgs);
         } else {
-           ds_destroy(&desired->group);
-           free(desired);
+            static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
+            VLOG_ERR_RL(&rl, "Error deleting group %d: %s",
+                        installed->table_id, error);
+            free(error);
         }
+        free(group_string);
+        ofputil_uninit_group_mod(&gm);
+        ovn_extend_table_remove(groups, installed);
     }
+
+    /* Move the contents of groups->desired to groups->existing. */
+    ovn_extend_table_move(groups);
+
+    /* Iterate through the installed meters from previous runs. If they
+     * are not needed delete them. */
+    struct ovn_extend_table_info *m_installed, *next_meter;
+    EXTEND_TABLE_FOR_EACH_INSTALLED (m_installed, next_meter, meters) {
+        /* Delete the meter. */
+        struct ofputil_meter_mod mm;
+        enum ofputil_protocol usable_protocols;
+        char *meter_string = xasprintf("meter=%"PRIu32"",
+                                       m_installed->table_id);
+        char *error = parse_ofp_meter_mod_str(&mm, meter_string,
+                                              OFPMC13_DELETE,
+                                              &usable_protocols);
+        if (!error) {
+            add_meter_mod(&mm, &msgs);
+        } else {
+            static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
+            VLOG_ERR_RL(&rl,  "Error deleting meter %"PRIu32": %s",
+                        m_installed->table_id, error);
+            free(error);
+        }
+        free(meter_string);
+        ovn_extend_table_remove(meters, m_installed);
+    }
+
+    /* Move the contents of meters->desired to meters->existing. */
+    ovn_extend_table_move(meters);
 
     if (!ovs_list_is_empty(&msgs)) {
         /* Add a barrier to the list of messages. */
         struct ofpbuf *barrier = ofputil_encode_barrier_request(OFP13_VERSION);
         const struct ofp_header *oh = barrier->data;
-        ovs_be32 xid = oh->xid;
+        ovs_be32 xid_ = oh->xid;
         ovs_list_push_back(&msgs, &barrier->list_node);
 
         /* Queue the messages. */
@@ -1029,7 +1053,7 @@ ofctrl_put(struct hmap *flow_table, struct shash *pending_ct_zones,
         SHASH_FOR_EACH(iter, pending_ct_zones) {
             struct ct_zone_pending_entry *ctzpe = iter->data;
             if (ctzpe->state == CT_ZONE_OF_SENT && !ctzpe->of_xid) {
-                ctzpe->of_xid = xid;
+                ctzpe->of_xid = xid_;
             }
         }
 
@@ -1054,7 +1078,7 @@ ofctrl_put(struct hmap *flow_table, struct shash *pending_ct_zones,
                  * so that we don't send a notification that we're up-to-date
                  * until we're really caught up. */
                 VLOG_DBG("advanced xid target for nb_cfg=%"PRId64, nb_cfg);
-                fup->xid = xid;
+                fup->xid = xid_;
                 goto done;
             } else {
                 break;
@@ -1064,7 +1088,7 @@ ofctrl_put(struct hmap *flow_table, struct shash *pending_ct_zones,
         /* Add a flow update. */
         fup = xmalloc(sizeof *fup);
         ovs_list_push_back(&flow_updates, &fup->list_node);
-        fup->xid = xid;
+        fup->xid = xid_;
         fup->nb_cfg = nb_cfg;
     done:;
     } else if (!ovs_list_is_empty(&flow_updates)) {
@@ -1123,7 +1147,8 @@ ofctrl_lookup_port(const void *br_int_, const char *port_name,
  * must free(). */
 char *
 ofctrl_inject_pkt(const struct ovsrec_bridge *br_int, const char *flow_s,
-                  const struct shash *addr_sets)
+                  const struct shash *addr_sets,
+                  const struct shash *port_groups)
 {
     int version = rconn_get_version(swconn);
     if (version < 0) {
@@ -1132,7 +1157,8 @@ ofctrl_inject_pkt(const struct ovsrec_bridge *br_int, const char *flow_s,
 
     struct flow uflow;
     char *error = expr_parse_microflow(flow_s, &symtab, addr_sets,
-                                       ofctrl_lookup_port, br_int, &uflow);
+                                       port_groups, ofctrl_lookup_port,
+                                       br_int, &uflow);
     if (error) {
         return error;
     }
@@ -1149,7 +1175,7 @@ ofctrl_inject_pkt(const struct ovsrec_bridge *br_int, const char *flow_s,
     uint64_t packet_stub[128 / 8];
     struct dp_packet packet;
     dp_packet_use_stub(&packet, packet_stub, sizeof packet_stub);
-    flow_compose(&packet, &uflow, 0);
+    flow_compose(&packet, &uflow, NULL, 64);
 
     uint64_t ofpacts_stub[1024 / 8];
     struct ofpbuf ofpacts = OFPBUF_STUB_INITIALIZER(ofpacts_stub);

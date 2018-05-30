@@ -31,6 +31,7 @@ struct lexer;
 struct ofpbuf;
 struct shash;
 struct simap;
+struct ovn_extend_table;
 
 /* List of OVN logical actions.
  *
@@ -63,7 +64,11 @@ struct simap;
     OVNACT(CT_CLEAR,          ovnact_null)            \
     OVNACT(CLONE,             ovnact_nest)            \
     OVNACT(ARP,               ovnact_nest)            \
+    OVNACT(ICMP4,             ovnact_nest)            \
+    OVNACT(ICMP6,             ovnact_nest)            \
+    OVNACT(TCP_RESET,         ovnact_nest)            \
     OVNACT(ND_NA,             ovnact_nest)            \
+    OVNACT(ND_NA_ROUTER,      ovnact_nest)            \
     OVNACT(GET_ARP,           ovnact_get_mac_bind)    \
     OVNACT(PUT_ARP,           ovnact_put_mac_bind)    \
     OVNACT(GET_ND,            ovnact_get_mac_bind)    \
@@ -74,7 +79,8 @@ struct simap;
     OVNACT(DNS_LOOKUP,        ovnact_dns_lookup)      \
     OVNACT(LOG,               ovnact_log)             \
     OVNACT(PUT_ND_RA_OPTS,    ovnact_put_opts)        \
-    OVNACT(ND_NS,             ovnact_nest)
+    OVNACT(ND_NS,             ovnact_nest)            \
+    OVNACT(SET_METER,         ovnact_set_meter)
 
 /* enum ovnact_type, with a member OVNACT_<ENUM> for each action. */
 enum OVS_PACKED_ENUM ovnact_type {
@@ -280,6 +286,13 @@ struct ovnact_log {
     char *name;
 };
 
+/* OVNACT_SET_METER. */
+struct ovnact_set_meter {
+    struct ovnact ovnact;
+    uint64_t rate;                   /* rate field, in kbps. */
+    uint64_t burst;                  /* burst rate field, in kbps. */
+};
+
 /* Internal use by the helpers below. */
 void ovnact_init(struct ovnact *, enum ovnact_type, size_t len);
 void *ovnact_put(struct ofpbuf *, enum ovnact_type, size_t len);
@@ -337,24 +350,6 @@ void *ovnact_put(struct ofpbuf *, enum ovnact_type, size_t len);
     }
 OVNACTS
 #undef OVNACT
-
-#define MAX_OVN_GROUPS 65535
-
-struct group_table {
-    unsigned long *group_ids;  /* Used as a bitmap with value set
-                                * for allocated group ids in either
-                                * desired_groups or existing_groups. */
-    struct hmap desired_groups;
-    struct hmap existing_groups;
-};
-
-struct group_info {
-    struct hmap_node hmap_node;
-    struct ds group;
-    uint32_t group_id;
-    bool new_group_id;  /* 'True' if 'group_id' was reserved from
-                         * group_table's 'group_ids' bitmap. */
-};
 
 enum action_opcode {
     /* "arp { ...actions... }".
@@ -438,6 +433,24 @@ enum action_opcode {
      * The actions, in OpenFlow 1.3 format, follow the action_header.
      */
     ACTION_OPCODE_ND_NS,
+
+    /* "icmp4 { ...actions... } and icmp6 { ...actions... }".
+     *
+     * The actions, in OpenFlow 1.3 format, follow the action_header.
+     */
+    ACTION_OPCODE_ICMP,
+
+    /* "tcp_reset { ...actions... }".
+     *
+     * The actions, in OpenFlow 1.3 format, follow the action_header.
+     */
+    ACTION_OPCODE_TCP_RESET,
+
+    /* "nd_na_router { ...actions... }" with rso flag 'ND_RSO_ROUTER' set.
+        *
+        * The actions, in OpenFlow 1.3 format, follow the action_header.
+        */
+    ACTION_OPCODE_ND_NA_ROUTER,
 };
 
 /* Header. */
@@ -501,11 +514,11 @@ struct ovnact_encode_params {
     /* 'true' if the flow is for a switch. */
     bool is_switch;
 
-    /* 'true' if the flow is for a gateway router. */
-    bool is_gateway_router;
-
     /* A struct to figure out the group_id for group actions. */
-    struct group_table *group_table;
+    struct ovn_extend_table *group_table;
+
+    /* A struct to figure out the meter_id for meter actions. */
+    struct ovn_extend_table *meter_table;
 
     /* OVN maps each logical flow table (ltable), one-to-one, onto a physical
      * OpenFlow flow table (ptable).  A number of parameters describe this

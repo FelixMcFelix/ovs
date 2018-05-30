@@ -66,9 +66,12 @@ Prints to the console features for each of the flow tables used by
 \fBdump\-table\-desc \fIswitch\fR
 Prints to the console configuration for each of the flow tables used
 by \fIswitch\fR for OpenFlow 1.4+.
-.IP "\fBmod\-table \fIswitch\fR \fItable_id\fR \fIsetting\fR"
-This command configures flow table settings for OpenFlow table
-\fItable_id\fR within \fIswitch\fR.  The available settings depend on
+.IP "\fBmod\-table \fIswitch\fR \fItable\fR \fIsetting\fR"
+This command configures flow table settings in \fIswitch\fR for
+OpenFlow table \fItable\fR, which may be expressed as a number or
+(unless \fB\-\-no\-names\fR is specified) a name.
+.IP
+The available settings depend on
 the OpenFlow version in use.  In OpenFlow 1.1 and 1.2 (which must be
 enabled with the \fB\-O\fR option) only, \fBmod\-table\fR configures
 behavior when no flow is found when a packet is looked up in a flow
@@ -285,71 +288,6 @@ Flushes the connection tracking entries in \fIzone\fR on \fIswitch\fR.
 This command uses an Open vSwitch extension that is only in Open
 vSwitch 2.6 and later.
 .
-.SS "OpenFlow 1.1+ Group Table Commands"
-.
-The following commands work only with switches that support OpenFlow
-1.1 or later.  Because support for OpenFlow 1.1 and later is still
-experimental in Open vSwitch, it is necessary to explicitly enable
-these protocol versions in \fBovs\-ofctl\fR (using \fB\-O\fR) and in
-the switch itself (with the \fBprotocols\fR column in the \fBBridge\fR
-table).  For more information, see ``Q: What versions of OpenFlow does
-Open vSwitch support?'' in the Open vSwitch FAQ.
-.
-.IP "\fBdump\-groups \fIswitch\fR [\fIgroup\fR]"
-Prints group entries in \fIswitch\fR's tables to console.  To dump
-only a specific group, specify its number as \fIgroup\fR.  Otherwise,
-if \fIgroup\fR is omitted, or if it is specified as \fBALL\fR, then
-all groups are printed.  Each line of output is a group entry as
-described in \fBGroup Syntax\fR below.
-.IP
-Only OpenFlow 1.5 and later support dumping a specific group.  Earlier
-versions of OpenFlow always dump all groups.
-.
-.IP "\fBdump\-group\-features \fIswitch"
-Prints to the console the group features of the \fIswitch\fR.
-.
-.IP "\fBdump\-group-stats \fIswitch \fR[\fIgroups\fR]"
-Prints to the console statistics for the specified \fIgroups in the
-\fIswitch\fR's tables.  If \fIgroups\fR is omitted then statistics for all
-groups are printed.  See \fBGroup Syntax\fR, below, for the syntax of
-\fIgroups\fR.
-.
-.SS "OpenFlow 1.3+ Switch Meter Table Commands"
-.
-These commands manage the meter table in an OpenFlow switch.  In each
-case, \fImeter\fR specifies a meter entry in the format described in
-\fBMeter Syntax\fR, below.
-.
-.PP
-OpenFlow 1.3 introduced support for meters, so these commands only
-work with switches that support OpenFlow 1.3 or later.  The caveats
-described for groups in the previous section also apply to meters.
-.
-.IP "\fBadd\-meter \fIswitch meter\fR"
-Add a meter entry to \fIswitch\fR's tables. The \fImeter\fR syntax is
-described in section \fBMeter Syntax\fR, below.
-.
-.IP "\fBmod\-meter \fIswitch meter\fR"
-Modify an existing meter.
-.
-.IP "\fBdel\-meters \fIswitch\fR"
-.IQ "\fBdel\-meter \fIswitch\fR [\fImeter\fR]"
-Delete entries from \fIswitch\fR's meter table.  \fImeter\fR can specify
-a single meter with syntax \fBmeter=\fIid\fR, or all meters with syntax
-\fBmeter=all\fR.
-.
-.IP "\fBdump\-meters \fIswitch\fR"
-.IQ "\fBdump\-meter \fIswitch\fR [\fImeter\fR]"
-Print meter configuration.  \fImeter\fR can specify a single meter with
-syntax \fBmeter=\fIid\fR, or all meters with syntax \fBmeter=all\fR.
-.
-.IP "\fBmeter\-stats \fIswitch\fR [\fImeter\fR]"
-Print meter statistics.  \fImeter\fR can specify a single meter with
-syntax \fBmeter=\fIid\fR, or all meters with syntax \fBmeter=all\fR.
-.
-.IP "\fBmeter\-features \fIswitch\fR"
-Print meter features.
-.
 .SS "OpenFlow Switch Flow Table Commands"
 .
 These commands manage the flow table in an OpenFlow switch.  In each
@@ -426,7 +364,7 @@ Connects to \fIswitch\fR and instructs it to execute the
 \fIpacket-out\fR OpenFlow message, specified as defined in
 \fBPacket\-Out Syntax\fR section.
 .
-.SS "OpenFlow Switch Group Table Commands"
+.SS "Group Table Commands"
 .
 These commands manage the group table in an OpenFlow switch.  In each
 case, \fIgroup\fR specifies a group entry in the format described in
@@ -434,7 +372,14 @@ case, \fIgroup\fR specifies a group entry in the format described in
 zero or more groups in the same syntax, one per line, and the optional
 \fB\-\-bundle\fR option operates the command as a single atomic
 transation, see option \fB\-\-bundle\fR, below.
-
+.PP
+The group commands work only with switches that support OpenFlow 1.1
+or later or the Open vSwitch group extensions to OpenFlow 1.0 (added
+in Open vSwitch 2.9.90).  For OpenFlow 1.1 or later, it is necessary
+to explicitly enable these protocol versions in \fBovs\-ofctl\fR
+(using \fB\-O\fR).  For more information, see ``Q: What versions of
+OpenFlow does Open vSwitch support?'' in the Open vSwitch FAQ.
+.
 .IP "[\fB\-\-bundle\fR] \fBadd\-group \fIswitch group\fR"
 .IQ "[\fB\-\-bundle\fR] \fBadd\-group \fIswitch \fB\- < \fIfile\fR"
 .IQ "[\fB\-\-bundle\fR] \fBadd\-groups \fIswitch file\fR"
@@ -475,6 +420,62 @@ buckets of the group are removed.
 Remove buckets to an existing group present in the \fIswitch\fR's group table.
 If no \fIcommand_bucket_id\fR is present in the group specification then all
 buckets of the group are removed.
+.
+.IP "\fBdump\-groups \fIswitch\fR [\fIgroup\fR]"
+Prints group entries in \fIswitch\fR's tables to console.  To dump
+only a specific group, specify its number as \fIgroup\fR.  Otherwise,
+if \fIgroup\fR is omitted, or if it is specified as \fBALL\fR, then
+all groups are printed.
+.IP
+Only OpenFlow 1.5 and later support dumping a specific group.  Earlier
+versions of OpenFlow always dump all groups.
+.
+.IP "\fBdump\-group\-features \fIswitch"
+Prints to the console the group features of the \fIswitch\fR.
+.
+.IP "\fBdump\-group\-stats \fIswitch \fR[\fIgroup\fR]"
+Prints to the console statistics for the specified \fIgroup\fR in
+\fIswitch\fR's tables.  If \fIgroup\fR is omitted then statistics for all
+groups are printed.
+.
+.SS "OpenFlow 1.3+ Switch Meter Table Commands"
+.
+These commands manage the meter table in an OpenFlow switch.  In each
+case, \fImeter\fR specifies a meter entry in the format described in
+\fBMeter Syntax\fR, below.
+.
+.PP
+OpenFlow 1.3 introduced support for meters, so these commands only work
+with switches that support OpenFlow 1.3 or later.  It is necessary to
+explicitly enable these protocol versions in \fBovs\-ofctl\fR (using
+\fB\-O\fR) and in the switch itself (with the \fBprotocols\fR column in
+the \fBBridge\fR table).  For more information, see ``Q: What versions
+of OpenFlow does Open vSwitch support?'' in the Open vSwitch FAQ.
+.
+.IP "\fBadd\-meter \fIswitch meter\fR"
+Add a meter entry to \fIswitch\fR's tables. The \fImeter\fR syntax is
+described in section \fBMeter Syntax\fR, below.
+.
+.IP "\fBmod\-meter \fIswitch meter\fR"
+Modify an existing meter.
+.
+.IP "\fBdel\-meters \fIswitch\fR"
+.IQ "\fBdel\-meter \fIswitch\fR [\fImeter\fR]"
+Delete entries from \fIswitch\fR's meter table.  \fImeter\fR can specify
+a single meter with syntax \fBmeter=\fIid\fR, or all meters with syntax
+\fBmeter=all\fR.
+.
+.IP "\fBdump\-meters \fIswitch\fR"
+.IQ "\fBdump\-meter \fIswitch\fR [\fImeter\fR]"
+Print meter configuration.  \fImeter\fR can specify a single meter with
+syntax \fBmeter=\fIid\fR, or all meters with syntax \fBmeter=all\fR.
+.
+.IP "\fBmeter\-stats \fIswitch\fR [\fImeter\fR]"
+Print meter statistics.  \fImeter\fR can specify a single meter with
+syntax \fBmeter=\fIid\fR, or all meters with syntax \fBmeter=all\fR.
+.
+.IP "\fBmeter\-features \fIswitch\fR"
+Print meter features.
 .
 .SS OpenFlow Switch Bundle Command
 .
@@ -606,9 +607,11 @@ connection to the switch.  (These could only occur using the
 COMMANDS\fR.)
 .IP "\fB!actions\fR"
 Do not report actions as part of flow updates.
-.IP "\fBtable=\fInumber\fR"
-Limits the monitoring to the table with the given \fInumber\fR between
-0 and 254.  By default, all tables are monitored.
+.IP "\fBtable=\fItable\fR"
+Limits the monitoring to the table with the given \fItable\fR, which
+may be expressed as a number between 0 and 254 or (unless
+\fB\-\-no\-names\fR is specified) a name.  By default, all tables are
+monitored.
 .IP "\fBout_port=\fIport\fR"
 If set, only flows that output to \fIport\fR are monitored.  The
 \fIport\fR may be an OpenFlow port number or keyword
@@ -699,10 +702,11 @@ flows not in normal form.
 them.  In addition to match fields, commands that operate on flows
 accept a few additional key-value pairs:
 .
-.IP \fBtable=\fInumber\fR
-For flow dump commands, limits the flows dumped to those in the table
-with the given \fInumber\fR between 0 and 254.  If not specified (or if
-255 is specified as \fInumber\fR), then flows in all tables are
+.IP \fBtable=\fItable\fR
+For flow dump commands, limits the flows dumped to those in
+\fItable\fR, which may be expressed as a number between 0 and 255 or
+(unless \fB\-\-no\-names\fR is specified) a name.  If not specified
+(or if 255 is specified as \fItable\fR), then flows in all tables are
 dumped.
 .
 .IP
@@ -970,8 +974,8 @@ only known to be implemented by Open vSwitch:
 .IP \fBresubmit\fB:\fIport\fR
 .IQ \fBresubmit\fB(\fR[\fIport\fR]\fB,\fR[\fItable\fR]\fB)
 .IQ \fBresubmit\fB(\fR[\fIport\fR]\fB,\fR[\fItable\fR]\fB,ct)
-Re-searches this OpenFlow flow table (or the table whose number is
-specified by \fItable\fR) with the \fBin_port\fR field replaced by
+Re-searches this OpenFlow flow table (or table \fItable\fR, if
+specified) with the \fBin_port\fR field replaced by
 \fIport\fR (if \fIport\fR is specified) and the packet 5-tuple fields
 swapped with the corresponding conntrack original direction tuple
 fields (if \fBct\fR is specified, see \fBct_nw_src\fR above), and
@@ -979,6 +983,9 @@ executes the actions found, if any, in addition to any other actions
 in this flow entry.  The \fBin_port\fR and swapped 5-tuple fields are
 restored immediately after the search, before any actions are
 executed.
+.IP
+The \fItable\fR may be expressed as a number between 0 and 254 or
+(unless \fB\-\-no\-names\fR is specified) a name.
 .IP
 The \fBct\fR option requires a valid connection tracking state as a
 match prerequisite in the flow where this action is placed.  Examples
@@ -1057,12 +1064,14 @@ existing connection and start a new one in the current direction.
 This flag has no effect if the original direction of the connection is
 already the same as that of the current packet.
 .RE
-.IP \fBtable=\fInumber\fR
+.IP \fBtable=\fItable\fR
 Fork pipeline processing in two. The original instance of the packet will
 continue processing the current actions list as an untracked packet. An
 additional instance of the packet will be sent to the connection tracker, which
 will be re-injected into the OpenFlow pipeline to resume processing in table
-\fInumber\fR, with the \fBct_state\fR and other ct match fields set. If the
+\fInumber\fR (which may be specified as a number between 0 and 254 or,
+unless \fB\-\-no\-names\fR is specified, a name), with the
+\fBct_state\fR and other ct match fields set. If
 \fBtable\fR is not specified, then the packet which is submitted to the
 connection tracker is not re-injected into the OpenFlow pipeline. It is
 strongly recommended to specify a table later than the current table to prevent
@@ -1280,6 +1289,15 @@ Processing the current set of actions then stops.  However, if the current
 set of actions was reached through ``resubmit'' then remaining actions in
 outer levels resume processing.
 .
+.IP \fBdec_nsh_ttl\fR
+Decrement TTL of the outer NSH header of a packet.  If the TTL
+is initially zero or decrementing would make it so, no decrement occurs.
+Instead, a ``packet-in'' message with reason code \fBOFPR_INVALID_TTL\fR
+is sent to the main controller (id zero), if it has enabled receiving them.
+Processing the current set of actions then stops.  However, if the current
+set of actions was reached through ``resubmit'' then remaining actions in
+outer levels resume processing.
+.
 .IP \fBnote:\fR[\fIhh\fR]...
 Does nothing at all.  Any number of bytes represented as hex digits
 \fIhh\fR may be included.  Pairs of hex digits may be separated by
@@ -1341,23 +1359,32 @@ subfield, \fBOFPAT_SET_FIELD\fR otherwise; and OpenFlow 1.5 and later,
 \fBOFPAT_SET_FIELD\fR.
 .
 .IP "\fBpush:\fIsrc\fB[\fIstart\fB..\fIend\fB]"
-Pushes \fIstart\fR to \fIend\fR bits inclusive, in fields
-on top of the stack.
+.IQ "\fBpop:\fIdst\fB[\fIstart\fB..\fIend\fB]"
+These Open vSwitch extension actions act on bits \fIstart\fR to
+\fIend\fR, inclusive, in the named field, pushing or popping the bits
+on a general-purpose stack of fields or subfields.  Controllers can
+use this stack for saving and restoring data or metadata around
+\fBresubmit\fR actions, for swapping or rearranging data and metadata,
+or for other purposes.  Any data or metadata field, or part of one,
+may be pushed, and any modifiable field or subfield may be popped.
+.IP
+The number of bits pushed in a stack entry do not have to match the
+number of bits later popped from that entry.  If more bits are popped
+from an entry than were pushed, then the entry is conceptually
+left-padded with 0-bits as needed.  If fewer bits are popped than
+pushed, then bits are conceptually trimmed from the left side of the
+entry.
+.IP
+The stack's size is intended to have a large enough limit that
+``normal'' use will not pose problems.  Stack overflow or underflow is
+an error that causes action execution to stop.
 .IP
 Example: \fBpush:NXM_NX_REG2[0..5]\fR or \fBpush:reg2[0..5]\fR push
-the value stored in register 2 bits 0 through 5, inclusive, on to the
-internal stack.
-.
-.IP "\fBpop:\fIdst\fB[\fIstart\fB..\fIend\fB]"
-Pops from the top of the stack, retrieves the \fIstart\fR to \fIend\fR bits
-inclusive, from the value popped and store them into the corresponding
-bits in \fIdst\fR.
-.
-.IP
-Example: \fBpop:NXM_NX_REG2[0..5]\fR or \fBpop:reg2[0..5]\fR pops the
-value from top of the stack.  Set register 2 bits 0 through 5,
-inclusive, based on bits 0 through 5 from the value just popped.
-.
+the value stored in register 2 bits 0 through 5, inclusive, on the
+internal stack, and \fBpop:NXM_NX_REG2[0..5]\fR or
+\fBpop:reg2[0..5]\fR pops the value from top of the stack and sets
+register 2 bits 0 through 5, inclusive, based on bits 0 through 5 from
+the value just popped.
 .
 .IP "\fBmultipath(\fIfields\fB, \fIbasis\fB, \fIalgorithm\fB, \fIn_links\fB, \fIarg\fB, \fIdst\fB[\fIstart\fB..\fIend\fB])\fR"
 Hashes \fIfields\fR using \fIbasis\fR as a universal hash parameter,
@@ -1454,10 +1481,10 @@ flow syntax.
 Adds a \fBfin_timeout\fR action with the specified arguments to the
 new flow.  This feature was added in Open vSwitch 1.5.90.
 .
-.IP \fBtable=\fInumber\fR
+.IP \fBtable=\fItable\fR
 The table in which the new flow should be inserted.  Specify a decimal
-number between 0 and 254.  The default, if \fBtable\fR is unspecified,
-is table 1.
+number between 0 and 254 or (unless \fB\-\-no\-names\fR is specified)
+a name.  The default, if \fBtable\fR is unspecified, is table 1.
 .
 .IP \fBdelete_learned\fR
 This flag enables deletion of the learned flows when the flow with the
@@ -1529,12 +1556,6 @@ Add an \fBoutput\fR action to the new flow's actions, that outputs to
 the OpenFlow port taken from \fIfield\fB[\fIstart\fB..\fIend\fB]\fR,
 which must be an NXM field as described above.
 .RE
-.IP
-For best performance, segregate learned flows into a table (using
-\fBtable=\fInumber\fR) that is not used for any other flows except
-possibly for a lowest-priority ``catch-all'' flow, that is, a flow
-with no match criteria.  (This is why the default \fBtable\fR is 1, to
-keep the learned flows separate from the primary flow table 0.)
 .RE
 .
 .RS
@@ -1578,6 +1599,8 @@ the action set, the one written later replaces the earlier action:
 \fBdec_ttl\fR
 .IQ
 \fBdec_mpls_ttl\fR
+.IQ
+\fBdec_nsh_ttl\fR
 .
 .IP 7.
 \fBload\fR
@@ -1638,7 +1661,7 @@ not visible.)
 .RE
 .IP
 Only the actions listed above may be written to the action set.
-\fBencap\fR and \fBdecap\fR actions are nonstandard.
+\fBencap\fR, \fBdecap\fR and \fBdec_nsh_ttl\fR actions are nonstandard.
 .
 .IP \fBwrite_metadata\fB:\fIvalue\fR[/\fImask\fR]
 Updates the metadata field for the flow. If \fImask\fR is omitted, the
@@ -1655,7 +1678,9 @@ band type. See the description of the \fBMeter Table Commands\fR, above,
 for more details.
 .
 .IP \fBgoto_table\fR:\fItable\fR
-Indicates the next table in the process pipeline.
+Jumps to \fItable\Fr as the next table in the process pipeline.  The
+\fItable\fR may be a number between 0 and 254 or (unless
+\fB\-\-no\-names\fR is specified) a name.
 .
 .IP "\fBfin_timeout(\fIargument\fR[\fB,\fIargument\fR]\fB)"
 This action changes the idle timeout or hard timeout, or both, of this
@@ -2095,28 +2120,23 @@ The selection method used to select a bucket for a select group.
 This is a string of 1 to 15 bytes in length known to lower layers.
 This field is optional for \fBadd\-group\fR, \fBadd\-groups\fR and
 \fBmod\-group\fR commands on groups of type \fBselect\fR. Prohibited
-otherwise. The default value is the empty string.
+otherwise.  If no selection method is specified, Open vSwitch up to
+release 2.9 applies the \fBhash\fR method with default fields. From
+2.10 onwards Open vSwitch defaults to the \fBdp_hash\fR method with symmetric
+L3/L4 hash algorithm, unless the weighted group buckets cannot be mapped to
+a maximum of 64 dp_hash values with sufficient accuracy.
+In those rare cases Open vSwitch 2.10 and later fall back to the \fBhash\fR
+method with the default set of hash fields.
 .RS
-.IP \fBhash\fR
-Use a hash computed over the fields specified with the \fBfields\fR
-option, see below.  \fBhash\fR uses the \fBselection_method_param\fR
-as the hash basis.
-.IP
-Note that the hashed fields become exact matched by the datapath
-flows.  For example, if the TCP source port is hashed, the created
-datapath flows will match the specific TCP source port value present
-in the packet received.  Since each TCP connection generally has a
-different source port value, a separate datapath flow will be need to
-be inserted for each TCP connection thus hashed to a select group
-bucket.
 .IP \fBdp_hash\fR
 Use a datapath computed hash value.  The hash algorithm varies accross
 different datapath implementations.  \fBdp_hash\fR uses the upper 32
 bits of the \fBselection_method_param\fR as the datapath hash
-algorithm selector, which currently must always be 0, corresponding to
-hash computation over the IP 5-tuple (selecting specific fields with
-the \fBfields\fR option is not allowed with \fBdp_hash\fR).  The lower
-32 bits are used as the hash basis.
+algorithm selector.  The supported values are \fB0\fR (corresponding to
+hash computation over the IP 5-tuple) and \fB1\fR (corresponding to a
+\fIsymmetric\fR hash computation over the IP 5-tuple).  Selecting specific
+fields with the \fBfields\fR option is not supported with \fBdp_hash\fR).
+The lower 32 bits are used as the hash basis.
 .IP
 Using \fBdp_hash\fR has the advantage that it does not require the
 generated datapath flows to exact match any additional packet header
@@ -2130,9 +2150,23 @@ when needed, and a second match is required to match some bits of its
 value.  This double-matching incurs a small additional latency cost
 for each packet, but this latency is orders of magnitude less than the
 latency of creating new datapath flows for new TCP connections.
+.IP \fBhash\fR
+Use a hash computed over the fields specified with the \fBfields\fR
+option, see below.  If no hash fields are specified, \fBhash\fR defaults
+to a symmetric hash over the combination of MAC addresses, VLAN tags,
+Ether type, IP addresses and L4 port numbers.  \fBhash\fR uses the
+\fBselection_method_param\fR as the hash basis.
+.IP
+Note that the hashed fields become exact matched by the datapath
+flows.  For example, if the TCP source port is hashed, the created
+datapath flows will match the specific TCP source port value present
+in the packet received.  Since each TCP connection generally has a
+different source port value, a separate datapath flow will be need to
+be inserted for each TCP connection thus hashed to a select group
+bucket.
 .RE
 .IP
-This option will use a Netronome OpenFlow extension which is only supported
+This option uses a Netronome OpenFlow extension which is only supported
 when using Open vSwitch 2.4 and later with OpenFlow 1.5 and later.
 
 .IP \fBselection_method_param\fR=\fIparam\fR
@@ -2142,7 +2176,7 @@ lower-layer that implements the \fBselection_method\fR.  It is optional if
 the \fBselection_method\fR field is specified as a non-empty string.
 Prohibited otherwise. The default value is zero.
 .IP
-This option will use a Netronome OpenFlow extension which is only supported
+This option uses a Netronome OpenFlow extension which is only supported
 when using Open vSwitch 2.4 and later with OpenFlow 1.5 and later.
 
 .IP \fBfields\fR=\fIfield\fR
@@ -2216,7 +2250,7 @@ The integer meter id of the meter.
 When this field is specified in \fBdel-meter\fR, \fBdump-meter\fR, or
 \fBmeter-stats\fR, the keyword "all" may be used to designate all meters.
 .
-This field is required, exept for \fBmeter-stats\fR, which dumps all stats
+This field is required, except for \fBmeter-stats\fR, which dumps all stats
 when this field is not specified.
 
 .IP \fBkbps\fR
@@ -2266,21 +2300,24 @@ Uses strict matching when running flow modification commands.
 .
 .IP "\fB\-\-names\fR"
 .IQ "\fB\-\-no\-names\fR"
-Every OpenFlow port has a name and a number.  By default,
-\fBovs\-ofctl\fR commands accept both port names and numbers, and they
-display port names if \fBovs\-ofctl\fR is running on an interactive
-console, port numbers otherwise.  With \fB\-\-names\fR,
-\fBovs\-ofctl\fR commands both accept and display port names; with
-\fB\-\-no\-names\fR, commands neither accept nor display port names.
+Every OpenFlow port has a name and a number, and every OpenFlow flow
+table has a number and sometimes a name.  By default, \fBovs\-ofctl\fR
+commands accept both port and table names and numbers, and they
+display port and table names if \fBovs\-ofctl\fR is running on an
+interactive console, numbers otherwise.  With \fB\-\-names\fR,
+\fBovs\-ofctl\fR commands both accept and display port and table
+names; with \fB\-\-no\-names\fR, commands neither accept nor display
+port and table names.
 .IP
-If a port name contains special characters or might be confused with a
-keyword within a flow, it may be enclosed in double quotes (escaped
-from the shell).  If necessary, JSON-style escape sequences may be
-used inside quotes, as specified in RFC 7159.  When it displays port
-names, \fBovs\-ofctl\fR quotes any name that does not start with a
-letter followed by letters or digits.
+If a port or table name contains special characters or might be
+confused with a keyword within a flow, it may be enclosed in double
+quotes (escaped from the shell).  If necessary, JSON-style escape
+sequences may be used inside quotes, as specified in RFC 7159.  When
+it displays port and table names, \fBovs\-ofctl\fR quotes any name
+that does not start with a letter followed by letters or digits.
 .IP
-These options are new in Open vSwitch 2.8.  Earlier versions always
+Open vSwitch added support for port names and these options.  Open
+vSwitch 2.10 added support for table names.  Earlier versions always
 behaved as if \fB\-\-no\-names\fR were specified.
 .IP
 Open vSwitch does not place its own limit on the length of port names,
@@ -2292,6 +2329,8 @@ Truncation can also cause long names that are different to appear to
 be the same; when a switch has two ports with the same (truncated)
 name, \fBovs\-ofctl\fR refuses to display or accept the name, using
 the number instead.
+.IP
+OpenFlow and Open vSwitch limit table names to 32 bytes.
 .
 .IP "\fB\-\-stats\fR"
 .IQ "\fB\-\-no\-stats\fR"

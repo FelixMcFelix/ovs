@@ -17,6 +17,8 @@
 #ifndef DPDK_H
 #define DPDK_H
 
+#include <stdbool.h>
+
 #ifdef DPDK_NETDEV
 
 #include <rte_config.h>
@@ -31,9 +33,12 @@
 #endif /* DPDK_NETDEV */
 
 struct smap;
+struct ovsrec_open_vswitch;
 
 void dpdk_init(const struct smap *ovs_other_config);
 void dpdk_set_lcore_id(unsigned cpu);
 const char *dpdk_get_vhost_sock_dir(void);
-
+bool dpdk_vhost_iommu_enabled(void);
+void print_dpdk_version(void);
+void dpdk_status(const struct ovsrec_open_vswitch *);
 #endif /* dpdk.h */

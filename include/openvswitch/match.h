@@ -109,6 +109,18 @@ void match_set_tun_gbp_id_masked(struct match *match, ovs_be16 gbp_id, ovs_be16 
 void match_set_tun_gbp_id(struct match *match, ovs_be16 gbp_id);
 void match_set_tun_gbp_flags_masked(struct match *match, uint8_t flags, uint8_t mask);
 void match_set_tun_gbp_flags(struct match *match, uint8_t flags);
+void match_set_tun_erspan_ver(struct match *match, uint8_t ver);
+void match_set_tun_erspan_ver_masked(struct match *match, uint8_t ver,
+                                     uint8_t mask);
+void match_set_tun_erspan_idx(struct match *match, uint32_t idx);
+void match_set_tun_erspan_idx_masked(struct match *match, uint32_t idx,
+                                     uint32_t mask);
+void match_set_tun_erspan_dir(struct match *match, uint8_t dir);
+void match_set_tun_erspan_dir_masked(struct match *match, uint8_t dir,
+                                     uint8_t mask);
+void match_set_tun_erspan_hwid(struct match *match, uint8_t hwid);
+void match_set_tun_erspan_hwid_masked(struct match *match, uint8_t hwid,
+                                      uint8_t mask);
 void match_set_in_port(struct match *, ofp_port_t ofp_port);
 void match_set_pkt_mark(struct match *, uint32_t pkt_mark);
 void match_set_pkt_mark_masked(struct match *, uint32_t pkt_mark, uint32_t mask);
@@ -242,9 +254,11 @@ struct minimatch {
         };
         struct miniflow *flows[2];
     };
+    struct tun_metadata_allocation *tun_md;
 };
 
 void minimatch_init(struct minimatch *, const struct match *);
+void minimatch_init_catchall(struct minimatch *);
 void minimatch_clone(struct minimatch *, const struct minimatch *);
 void minimatch_move(struct minimatch *dst, struct minimatch *src);
 void minimatch_destroy(struct minimatch *);
@@ -252,6 +266,7 @@ void minimatch_destroy(struct minimatch *);
 void minimatch_expand(const struct minimatch *, struct match *);
 
 bool minimatch_equal(const struct minimatch *a, const struct minimatch *b);
+uint32_t minimatch_hash(const struct minimatch *, uint32_t basis);
 
 bool minimatch_matches_flow(const struct minimatch *, const struct flow *);
 
@@ -260,6 +275,8 @@ void minimatch_format(const struct minimatch *, const struct tun_table *,
                       struct ds *, int priority);
 char *minimatch_to_string(const struct minimatch *,
                           const struct ofputil_port_map *, int priority);
+
+bool minimatch_has_default_hidden_fields(const struct minimatch *);
 
 #ifdef __cplusplus
 }

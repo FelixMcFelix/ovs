@@ -10,6 +10,7 @@
 /test-dpdkr
 /ovs-pki.log
 /pki/
+/system-dpdk-testsuite
 /system-kmod-testsuite
 /system-userspace-testsuite
 /system-offloads-testsuite
@@ -34,6 +35,7 @@
 /test-ofpbuf
 /test-ovsdb
 /test-packets
+/test-raft
 /test-random
 /test-reconnect
 /test-rstp

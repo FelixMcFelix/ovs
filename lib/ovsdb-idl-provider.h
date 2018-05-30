@@ -26,6 +26,10 @@
 #include "openvswitch/shash.h"
 #include "uuid.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* A local copy of a row in an OVSDB table, replicated from an OVSDB server.
  * This structure is used as a header for a larger structure that translates
  * the "struct ovsdb_datum"s into easier-to-use forms, via the ->parse() and
@@ -90,6 +94,7 @@ struct ovsdb_idl_column {
     char *name;
     struct ovsdb_type type;
     bool is_mutable;
+    bool is_synthetic;
     void (*parse)(struct ovsdb_idl_row *, const struct ovsdb_datum *);
     void (*unparse)(struct ovsdb_idl_row *);
 };
@@ -97,6 +102,7 @@ struct ovsdb_idl_column {
 struct ovsdb_idl_table_class {
     char *name;
     bool is_root;
+    bool is_singleton;
     const struct ovsdb_idl_column *columns;
     size_t n_columns;
     size_t allocation_size;
@@ -110,7 +116,7 @@ struct ovsdb_idl_table {
                               * for replication. */
     struct shash columns;    /* Contains "const struct ovsdb_idl_column *"s. */
     struct hmap rows;        /* Contains "struct ovsdb_idl_row"s. */
-    struct ovsdb_idl *idl;   /* Containing idl. */
+    struct ovsdb_idl_db *db; /* Containing db. */
     unsigned int change_seqno[OVSDB_IDL_CHANGE_MAX];
     struct shash indexes;    /* Contains "struct ovsdb_idl_index"s */
     struct ovs_list track_list; /* Tracked rows (ovsdb_idl_row.track_node). */
@@ -160,5 +166,9 @@ void ovsdb_idl_txn_verify(const struct ovsdb_idl_row *,
                           const struct ovsdb_idl_column *);
 
 struct ovsdb_idl_txn *ovsdb_idl_txn_get(const struct ovsdb_idl_row *);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* ovsdb-idl-provider.h */

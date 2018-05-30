@@ -36,6 +36,11 @@ The DPDK datapath provides DPDK-backed ring ports that are implemented using
 DPDK's ``librte_ring`` library. For more information on this library, refer to
 the `DPDK documentation`_.
 
+.. important::
+
+   To use any DPDK-backed interface, you must ensure your bridge is configured
+   correctly. For more information, refer to :doc:`bridge`.
+
 Quick Example
 -------------
 
@@ -74,7 +79,7 @@ DPDK. However, this functionality was removed because:
 - Support for IVSHMEM was never upstreamed to QEMU and has been publicly
   rejected by the QEMU community
 
-- :doc:`vhost-user interfaces <vhost-user>` are the defacto DPDK-based path to
+- :doc:`vhost-user interfaces <vhost-user>` are the de facto DPDK-based path to
   guests
 
-.. _DPDK documentation: https://dpdk.readthedocs.io/en/v17.05/prog_guide/ring_lib.html
+.. _DPDK documentation: https://dpdk.readthedocs.io/en/v17.11/prog_guide/ring_lib.html

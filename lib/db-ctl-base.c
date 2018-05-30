@@ -35,6 +35,7 @@
 #include "ovsdb-idl-provider.h"
 #include "openvswitch/shash.h"
 #include "sset.h"
+#include "svec.h"
 #include "string.h"
 #include "table.h"
 #include "util.h"
@@ -60,6 +61,9 @@ static const struct cmd_show_table *cmd_show_tables;
  */
 static void (*ctl_exit_func)(int status) = NULL;
 OVS_NO_RETURN static void ctl_exit(int status);
+
+/* IDL class. */
+static const struct ovsdb_idl_class *idl_class;
 
 /* Two arrays with 'n_classes' elements, which represent the tables in this
  * database and how the user can refer to their rows. */
@@ -789,8 +793,8 @@ is_condition_satisfied(const struct ovsdb_idl_table_class *table,
 static void
 invalidate_cache(struct ctl_context *ctx)
 {
-    if (ctx->invalidate_cache) {
-        (ctx->invalidate_cache)(ctx);
+    if (ctx->invalidate_cache_cb) {
+        (ctx->invalidate_cache_cb)(ctx);
     }
 }
 
@@ -1805,12 +1809,12 @@ cmd_show_row(struct ctl_context *ctx, const struct ovsdb_idl_row *row,
 
         datum = ovsdb_idl_read(row, column);
         if (column->type.key.type == OVSDB_TYPE_UUID &&
-            column->type.key.u.uuid.refTableName) {
+            column->type.key.uuid.refTableName) {
             const struct cmd_show_table *ref_show;
             size_t j;
 
             ref_show = cmd_show_find_table_by_name(
-                column->type.key.u.uuid.refTableName);
+                column->type.key.uuid.refTableName);
             if (ref_show) {
                 for (j = 0; j < datum->n; j++) {
                     const struct ovsdb_idl_row *ref_row;
@@ -1826,14 +1830,14 @@ cmd_show_row(struct ctl_context *ctx, const struct ovsdb_idl_row *row,
             }
         } else if (ovsdb_type_is_map(&column->type) &&
                    column->type.value.type == OVSDB_TYPE_UUID &&
-                   column->type.value.u.uuid.refTableName) {
+                   column->type.value.uuid.refTableName) {
             const struct cmd_show_table *ref_show;
             size_t j;
 
             /* Prints the key to ref'ed table name map if the ref'ed table
              * is also defined in 'cmd_show_tables'.  */
             ref_show = cmd_show_find_table_by_name(
-                column->type.value.u.uuid.refTableName);
+                column->type.value.uuid.refTableName);
             if (ref_show && ref_show->name_column) {
                 ds_put_char_multiple(&ctx->output, ' ', (level + 1) * 4);
                 ds_put_format(&ctx->output, "%s:\n", column->name);
@@ -2042,12 +2046,10 @@ ctl_default_db(void)
  * database, otherwise false.  (Not very smart, so it's prone to false
  * positives.) */
 bool
-ctl_might_write_to_db(char **argv)
+ctl_might_write_to_db(const struct ctl_command *commands, size_t n)
 {
-    for (; *argv; argv++) {
-        const struct ctl_command_syntax *p = shash_find_data(&all_commands,
-                                                             *argv);
-        if (p && p->mode == RW) {
+    for (size_t i = 0; i < n; i++) {
+        if (commands[i].syntax->mode == RW) {
             return true;
         }
     }
@@ -2132,15 +2134,15 @@ ctl_register_commands(const struct ctl_command_syntax *commands)
 
 /* Registers the 'db_ctl_commands' to 'all_commands'. */
 void
-ctl_init__(const struct ovsdb_idl_table_class *idl_classes_,
+ctl_init__(const struct ovsdb_idl_class *idl_class_,
            const struct ctl_table_class *ctl_classes_,
-           size_t n_classes_,
            const struct cmd_show_table cmd_show_tables_[],
            void (*ctl_exit_func_)(int status))
 {
-    idl_classes = idl_classes_;
+    idl_class = idl_class_;
+    idl_classes = idl_class_->tables;
     ctl_classes = ctl_classes_;
-    n_classes = n_classes_;
+    n_classes = idl_class->n_tables;
     ctl_exit_func = ctl_exit_func_;
     ctl_register_commands(db_ctl_commands);
 
@@ -2170,6 +2172,63 @@ ctl_get_db_cmd_usage(void)
 Potentially unsafe database commands require --force option.\n";
 }
 
+const char *
+ctl_list_db_tables_usage(void)
+{
+    static struct ds s = DS_EMPTY_INITIALIZER;
+    if (s.length) {
+        return ds_cstr(&s);
+    }
+
+    ds_put_cstr(&s, "Database commands may reference a row in each table in the following ways:\n");
+    for (int i = 0; i < n_classes; i++) {
+        struct svec options = SVEC_EMPTY_INITIALIZER;
+
+        svec_add(&options, "by UUID");
+        if (idl_classes[i].is_singleton) {
+            svec_add(&options, "as \".\"");
+        }
+
+        for (int j = 0; j < ARRAY_SIZE(ctl_classes[i].row_ids); j++) {
+            const struct ctl_row_id *id = &ctl_classes[i].row_ids[j];
+            if (!id->name_column) {
+                continue;
+            }
+
+            struct ds o = DS_EMPTY_INITIALIZER;
+            if (id->uuid_column) {
+                ds_put_format(&o, "via \"%s\"", id->uuid_column->name);
+                const struct ovsdb_idl_table_class *referrer
+                    = ovsdb_idl_table_class_from_column(idl_class,
+                                                        id->uuid_column);
+                if (referrer != &idl_classes[i]) {
+                    ds_put_format(&o, " of %s", referrer->name);
+                }
+                if (id->key) {
+                    ds_put_format(&o, " with matching \"%s:%s\"",
+                                  id->name_column->name, id->key);
+                } else {
+                    ds_put_format(&o, " with matching \"%s\"", id->name_column->name);
+                }
+            } else if (id->key) {
+                ds_put_format(&o, "by \"%s:%s\"", id->name_column->name, id->key);
+            } else {
+                ds_put_format(&o, "by \"%s\"", id->name_column->name);
+            }
+            svec_add_nocopy(&options, ds_steal_cstr(&o));
+        }
+
+        ds_put_format(&s, "  %s:", idl_classes[i].name);
+        for (int j = 0; j < options.n; j++) {
+            ds_put_format(&s, "\n    %s", options.names[j]);
+        }
+        ds_put_char(&s, '\n');
+        svec_destroy(&options);
+    }
+
+    return ds_cstr(&s);
+}
+
 /* Initializes 'ctx' from 'command'. */
 void
 ctl_context_init_command(struct ctl_context *ctx,
@@ -2189,7 +2248,7 @@ void
 ctl_context_init(struct ctl_context *ctx, struct ctl_command *command,
                  struct ovsdb_idl *idl, struct ovsdb_idl_txn *txn,
                  struct ovsdb_symbol_table *symtab,
-                 void (*invalidate_cache)(struct ctl_context *))
+                 void (*invalidate_cache_cb)(struct ctl_context *))
 {
     if (command) {
         ctl_context_init_command(ctx, command);
@@ -2197,7 +2256,7 @@ ctl_context_init(struct ctl_context *ctx, struct ctl_command *command,
     ctx->idl = idl;
     ctx->txn = txn;
     ctx->symtab = symtab;
-    ctx->invalidate_cache = invalidate_cache;
+    ctx->invalidate_cache_cb = invalidate_cache_cb;
 }
 
 /* Completes processing of 'command' within 'ctx'. */

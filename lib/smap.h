@@ -15,9 +15,14 @@
 #ifndef SMAP_H
 #define SMAP_H 1
 
+#include <sys/types.h>
 #include <netinet/in.h>
 #include "hash.h"
 #include "openvswitch/hmap.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 struct json;
 struct uuid;
@@ -86,6 +91,7 @@ void smap_add_format(struct smap *, const char *key, const char *, ...)
     OVS_PRINTF_FORMAT(3, 4);
 void smap_add_ipv6(struct smap *, const char *, struct in6_addr *);
 void smap_replace(struct smap *, const char *, const char *);
+void smap_replace_nocopy(struct smap *, const char *, char *);
 
 void smap_remove(struct smap *, const char *);
 void smap_remove_node(struct smap *, struct smap_node *);
@@ -112,5 +118,9 @@ void smap_from_json(struct smap *, const struct json *);
 struct json *smap_to_json(const struct smap *);
 
 bool smap_equal(const struct smap *, const struct smap *);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* smap.h */

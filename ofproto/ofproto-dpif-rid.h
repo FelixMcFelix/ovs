@@ -99,7 +99,7 @@ struct rule;
 /* Metadata for restoring pipeline context after recirculation.  Helpers
  * are inlined below to keep them together with the definition for easier
  * updates. */
-BUILD_ASSERT_DECL(FLOW_WC_SEQ == 40);
+BUILD_ASSERT_DECL(FLOW_WC_SEQ == 41);
 
 struct frozen_metadata {
     /* Metadata in struct flow. */
@@ -143,12 +143,17 @@ struct frozen_state {
     size_t stack_size;
     mirror_mask_t mirrors;        /* Mirrors already output. */
     bool conntracked;             /* Conntrack occurred prior to freeze. */
+    struct uuid xport_uuid;       /* UUID of 1st port packet received on. */
 
     /* Actions to be translated when thawing. */
     struct ofpact *ofpacts;
     size_t ofpacts_len;           /* Size of 'ofpacts', in bytes. */
     struct ofpact *action_set;
     size_t action_set_len;        /* Size of 'action_set', in bytes. */
+
+    /* User data for controller userspace cookie. */
+    uint8_t *userdata;
+    size_t userdata_len;
 };
 
 /* This maps a recirculation ID to saved state that flow translation can

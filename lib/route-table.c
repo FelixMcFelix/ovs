@@ -19,6 +19,8 @@
 #include "route-table.h"
 
 #include <errno.h>
+#include <sys/types.h>
+#include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <linux/rtnetlink.h>
@@ -45,6 +47,7 @@ VLOG_DEFINE_THIS_MODULE(route_table);
 struct route_data {
     /* Copied from struct rtmsg. */
     unsigned char rtm_dst_len;
+    bool local;
 
     /* Extracted from Netlink attributes. */
     struct in6_addr rta_dst; /* 0 if missing. */
@@ -153,7 +156,7 @@ static int
 route_table_reset(void)
 {
     struct nl_dump dump;
-    struct rtgenmsg *rtmsg;
+    struct rtgenmsg *rtgenmsg;
     uint64_t reply_stub[NL_DUMP_BUFSIZE / 8];
     struct ofpbuf request, reply, buf;
 
@@ -164,10 +167,11 @@ route_table_reset(void)
 
     ofpbuf_init(&request, 0);
 
-    nl_msg_put_nlmsghdr(&request, sizeof *rtmsg, RTM_GETROUTE, NLM_F_REQUEST);
+    nl_msg_put_nlmsghdr(&request, sizeof *rtgenmsg, RTM_GETROUTE,
+                        NLM_F_REQUEST);
 
-    rtmsg = ofpbuf_put_zeros(&request, sizeof *rtmsg);
-    rtmsg->rtgen_family = AF_UNSPEC;
+    rtgenmsg = ofpbuf_put_zeros(&request, sizeof *rtgenmsg);
+    rtgenmsg->rtgen_family = AF_UNSPEC;
 
     nl_dump_start(&dump, NETLINK_ROUTE, &request);
     ofpbuf_uninit(&request);
@@ -242,6 +246,7 @@ route_table_parse(struct ofpbuf *buf, struct route_table_msg *change)
         }
         change->nlmsg_type     = nlmsg->nlmsg_type;
         change->rd.rtm_dst_len = rtm->rtm_dst_len + (ipv4 ? 96 : 0);
+        change->rd.local = rtm->rtm_type == RTN_LOCAL;
         if (attrs[RTA_OIF]) {
             rta_oif = nl_attr_get_u32(attrs[RTA_OIF]);
 
@@ -304,7 +309,7 @@ route_table_handle_msg(const struct route_table_msg *change)
         const struct route_data *rd = &change->rd;
 
         ovs_router_insert(rd->mark, &rd->rta_dst, rd->rtm_dst_len,
-                          rd->ifname, &rd->rta_gw);
+                          rd->local, rd->ifname, &rd->rta_gw);
     }
 }
 

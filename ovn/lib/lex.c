@@ -89,7 +89,7 @@ lex_token_strcpy(struct lex_token *token, const char *s, size_t length)
                 ? token->buffer
                 : xmalloc(length + 1));
     memcpy(token->s, s, length);
-    token->buffer[length] = '\0';
+    token->s[length] = '\0';
 }
 
 void
@@ -229,6 +229,10 @@ lex_token_format(const struct lex_token *token, struct ds *s)
 
     case LEX_T_MACRO:
         ds_put_format(s, "$%s", token->s);
+        break;
+
+    case LEX_T_PORT_GROUP:
+        ds_put_format(s, "@%s", token->s);
         break;
 
     case LEX_T_LPAREN:
@@ -573,6 +577,18 @@ lex_parse_addr_set(const char *p, struct lex_token *token)
     return lex_parse_id(p, LEX_T_MACRO, token);
 }
 
+static const char *
+lex_parse_port_group(const char *p, struct lex_token *token)
+{
+    p++;
+    if (!lex_is_id1(*p)) {
+        lex_error(token, "`@' must be followed by a valid identifier.");
+        return p;
+    }
+
+    return lex_parse_id(p, LEX_T_PORT_GROUP, token);
+}
+
 /* Initializes 'token' and parses the first token from the beginning of
  * null-terminated string 'p' into 'token'.  Stores a pointer to the start of
  * the token (after skipping white space and comments, if any) into '*startp'.
@@ -745,6 +761,10 @@ next:
 
     case '$':
         p = lex_parse_addr_set(p, token);
+        break;
+
+    case '@':
+        p = lex_parse_port_group(p, token);
         break;
 
     case ':':

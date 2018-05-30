@@ -46,10 +46,11 @@ int check_connection_completion(int fd);
 void drain_fd(int fd, size_t n_packets);
 ovs_be32 guess_netmask(ovs_be32 ip);
 
-char *inet_parse_token(char **);
-bool inet_parse_active(const char *target, uint16_t default_port,
+void inet_parse_host_port_tokens(char *s, char **hostp, char **portp);
+void inet_parse_port_host_tokens(char *s, char **portp, char **hostp);
+bool inet_parse_active(const char *target, int default_port,
                        struct sockaddr_storage *ssp);
-int inet_open_active(int style, const char *target, uint16_t default_port,
+int inet_open_active(int style, const char *target, int default_port,
                      struct sockaddr_storage *ssp, int *fdp, uint8_t dscp);
 
 bool inet_parse_passive(const char *target, int default_port,
@@ -57,6 +58,8 @@ bool inet_parse_passive(const char *target, int default_port,
 int inet_open_passive(int style, const char *target, int default_port,
                       struct sockaddr_storage *ssp, uint8_t dscp,
                       bool kernel_print_port);
+
+bool inet_parse_address(const char *target, struct sockaddr_storage *);
 
 int read_fully(int fd, void *, size_t, size_t *bytes_read);
 int write_fully(int fd, const void *, size_t, size_t *bytes_written);
@@ -71,11 +74,24 @@ char *describe_fd(int fd);
  * in <netinet/ip.h> is used. */
 #define DSCP_DEFAULT (IPTOS_PREC_INTERNETCONTROL >> 2)
 
+/* Functions for working with sockaddr that might contain an IPv4 or
+ * IPv6 address. */
+bool sa_is_ip(const struct sockaddr *);
+uint16_t sa_get_port(const struct sockaddr *);
+struct in6_addr sa_get_address(const struct sockaddr *);
+void sa_format_address(const struct sockaddr *, struct ds *);
+void sa_format_address_nobracks(const struct sockaddr *, struct ds *);
+size_t sa_length(const struct sockaddr *);
+
 /* Functions for working with sockaddr_storage that might contain an IPv4 or
  * IPv6 address. */
+bool ss_is_ip(const struct sockaddr_storage *);
 uint16_t ss_get_port(const struct sockaddr_storage *);
+struct in6_addr ss_get_address(const struct sockaddr_storage *);
 void ss_format_address(const struct sockaddr_storage *, struct ds *);
+void ss_format_address_nobracks(const struct sockaddr_storage *, struct ds *);
 size_t ss_length(const struct sockaddr_storage *);
+
 const char *sock_strerror(int error);
 
 #ifndef _WIN32
@@ -138,7 +154,7 @@ static inline int make_unix_socket(int style, bool nonblock,
 static inline int rpl_setsockopt(int sock, int level, int optname,
                                  const void *optval, socklen_t optlen)
 {
-    return (setsockopt)(sock, level, optname, optval, optlen);
+    return (setsockopt)(sock, level, optname, (const char *)optval, optlen);
 }
 
 #define getsockopt(sock, level, optname, optval, optlen) \
@@ -146,7 +162,7 @@ static inline int rpl_setsockopt(int sock, int level, int optname,
 static inline int rpl_getsockopt(int sock, int level, int optname,
                                  void *optval, socklen_t *optlen)
 {
-    return (getsockopt)(sock, level, optname, optval, optlen);
+    return (getsockopt)(sock, level, optname, (char *)optval, optlen);
 }
 #endif
 

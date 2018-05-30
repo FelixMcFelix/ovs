@@ -195,12 +195,17 @@ int ct_dpif_dump_start(struct dpif *, struct ct_dpif_dump_state **,
                        const uint16_t *zone, int *);
 int ct_dpif_dump_next(struct ct_dpif_dump_state *, struct ct_dpif_entry *);
 int ct_dpif_dump_done(struct ct_dpif_dump_state *);
-int ct_dpif_flush(struct dpif *, const uint16_t *zone);
+int ct_dpif_flush(struct dpif *, const uint16_t *zone,
+                  const struct ct_dpif_tuple *);
+int ct_dpif_set_maxconns(struct dpif *dpif, uint32_t maxconns);
+int ct_dpif_get_maxconns(struct dpif *dpif, uint32_t *maxconns);
+int ct_dpif_get_nconns(struct dpif *dpif, uint32_t *nconns);
 void ct_dpif_entry_uninit(struct ct_dpif_entry *);
 void ct_dpif_format_entry(const struct ct_dpif_entry *, struct ds *,
                           bool verbose, bool print_stats);
 void ct_dpif_format_tuple(struct ds *, const struct ct_dpif_tuple *);
 uint8_t ct_dpif_coalesce_tcp_state(uint8_t state);
 void ct_dpif_format_tcp_stat(struct ds *, int, int);
+bool ct_dpif_parse_tuple(struct ct_dpif_tuple *, const char *s, struct ds *);
 
 #endif /* CT_DPIF_H */

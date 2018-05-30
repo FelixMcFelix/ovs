@@ -28,12 +28,12 @@
 
 #include <config.h>
 #include "ovs-lldp.h"
+#include <sys/types.h>
+#include <netinet/in.h>
 #include <arpa/inet.h>
 #include <inttypes.h>
-#include <netinet/in.h>
 #include <stdbool.h>
 #include <stdlib.h>
-#include <sys/types.h>
 #include "openvswitch/dynamic-string.h"
 #include "flow.h"
 #include "openvswitch/list.h"
@@ -726,8 +726,7 @@ lldp_put_packet(struct lldp *lldp, struct dp_packet *packet,
 {
     struct lldpd *mylldpd = lldp->lldpd;
     struct lldpd_hardware *hw = lldpd_first_hardware(mylldpd);
-    static const struct eth_addr eth_addr_lldp =
-        { { { 0x01, 0x80, 0xC2, 0x00, 0x00, 0x0e } } };
+    static const struct eth_addr eth_addr_lldp = ETH_ADDR_C(01,80,c2,00,00,0e);
 
     ovs_mutex_lock(&mutex);
 

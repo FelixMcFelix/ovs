@@ -66,26 +66,40 @@ int ovs_vport_init(void)
 		goto err_lisp;
 	err = ipgre_init();
 	if (err)
-		goto err_gre;
+		goto err_ipgre;
+	err = ip6gre_init();
+	if (err)
+		goto err_ip6gre;
+	err = ip6_tunnel_init();
+	if (err)
+		goto err_ip6_tunnel;
 	err = geneve_init_module();
 	if (err)
 		goto err_geneve;
-
 	err = vxlan_init_module();
 	if (err)
 		goto err_vxlan;
 	err = ovs_stt_init_module();
 	if (err)
 		goto err_stt;
-	return 0;
+	err = gre_init();
+	if (err)
+		goto err_gre;
 
+	return 0;
+err_gre:
+	ovs_stt_cleanup_module();
 err_stt:
 	vxlan_cleanup_module();
 err_vxlan:
 	geneve_cleanup_module();
 err_geneve:
+	ip6_tunnel_cleanup();
+err_ip6_tunnel:
+	ip6gre_fini();
+err_ip6gre:
 	ipgre_fini();
-err_gre:
+err_ipgre:
 	lisp_cleanup_module();
 err_lisp:
 	kfree(dev_table);
@@ -99,9 +113,12 @@ err_lisp:
  */
 void ovs_vport_exit(void)
 {
+	gre_exit();
 	ovs_stt_cleanup_module();
 	vxlan_cleanup_module();
 	geneve_cleanup_module();
+	ip6_tunnel_cleanup();
+	ip6gre_fini();
 	ipgre_fini();
 	lisp_cleanup_module();
 	kfree(dev_table);
@@ -508,10 +525,10 @@ int ovs_vport_receive(struct vport *vport, struct sk_buff *skb,
 	return 0;
 }
 
-static unsigned int packet_length(const struct sk_buff *skb,
-				  struct net_device *dev)
+static int packet_length(const struct sk_buff *skb,
+			 struct net_device *dev)
 {
-	unsigned int length = skb->len - dev->hard_header_len;
+	int length = skb->len - dev->hard_header_len;
 
 	if (!skb_vlan_tag_present(skb) &&
 	    eth_type_vlan(skb->protocol))
@@ -522,7 +539,7 @@ static unsigned int packet_length(const struct sk_buff *skb,
 	 * account for 802.1ad. e.g. is_skb_forwardable().
 	 */
 
-	return length;
+	return length > 0 ? length: 0;
 }
 
 void ovs_vport_send(struct vport *vport, struct sk_buff *skb, u8 mac_proto)

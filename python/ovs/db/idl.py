@@ -22,6 +22,7 @@ import ovs.jsonrpc
 import ovs.ovsuuid
 import ovs.poller
 import ovs.vlog
+from ovs.db import custom_index
 from ovs.db import error
 
 import six
@@ -148,10 +149,22 @@ class Idl(object):
                 if not hasattr(column, 'alert'):
                     column.alert = True
             table.need_table = False
-            table.rows = {}
+            table.rows = custom_index.IndexedRows(table)
             table.idl = self
             table.condition = [True]
             table.cond_changed = False
+
+    def index_create(self, table, name):
+        """Create a named multi-column index on a table"""
+        return self.tables[table].rows.index_create(name)
+
+    def index_irange(self, table, name, start, end):
+        """Return items in a named index between start/end inclusive"""
+        return self.tables[table].rows.indexes[name].irange(start, end)
+
+    def index_equal(self, table, name, value):
+        """Return items in a named index matching a value"""
+        return self.tables[table].rows.indexes[name].irange(value, value)
 
     def close(self):
         """Closes the connection to the database.  The IDL will no longer
@@ -359,7 +372,7 @@ class Idl(object):
         for table in six.itervalues(self.tables):
             if table.rows:
                 changed = True
-                table.rows = {}
+                table.rows = custom_index.IndexedRows(table)
 
         if changed:
             self.change_seqno += 1
@@ -425,10 +438,11 @@ class Idl(object):
                         (table.name in self.readonly) and
                         (column not in self.readonly[table.name])):
                     columns.append(column)
-            monitor_requests[table.name] = {"columns": columns}
+            monitor_request = {"columns": columns}
             if method == "monitor_cond" and table.condition != [True]:
-                monitor_requests[table.name]["where"] = table.condition
+                monitor_request["where"] = table.condition
                 table.cond_change = False
+            monitor_requests[table.name] = [monitor_request]
 
         msg = ovs.jsonrpc.Message.create_request(
             method, [self._db.name, str(self.uuid), monitor_requests])
@@ -511,17 +525,16 @@ class Idl(object):
             else:
                 row_update = row_update['initial']
             self.__add_default(table, row_update)
-            if self.__row_update(table, row, row_update):
-                changed = True
+            changed = self.__row_update(table, row, row_update)
+            table.rows[uuid] = row
+            if changed:
                 self.notify(ROW_CREATE, row)
         elif "modify" in row_update:
             if not row:
                 raise error.Error('Modify non-existing row')
 
-            old_row_diff_json = self.__apply_diff(table, row,
-                                                  row_update['modify'])
-            self.notify(ROW_UPDATE, row,
-                        Row.from_json(self, table, uuid, old_row_diff_json))
+            old_row = self.__apply_diff(table, row, row_update['modify'])
+            self.notify(ROW_UPDATE, row, Row(self, table, uuid, old_row))
             changed = True
         else:
             raise error.Error('<row-update> unknown operation',
@@ -544,15 +557,19 @@ class Idl(object):
                           % (uuid, table.name))
         elif not old:
             # Insert row.
+            op = ROW_CREATE
             if not row:
                 row = self.__create_row(table, uuid)
                 changed = True
             else:
                 # XXX rate-limit
+                op = ROW_UPDATE
                 vlog.warn("cannot add existing row %s to table %s"
                           % (uuid, table.name))
-            if self.__row_update(table, row, new):
-                changed = True
+            changed |= self.__row_update(table, row, new)
+            if op == ROW_CREATE:
+                table.rows[uuid] = row
+            if changed:
                 self.notify(ROW_CREATE, row)
         else:
             op = ROW_UPDATE
@@ -563,8 +580,10 @@ class Idl(object):
                 # XXX rate-limit
                 vlog.warn("cannot modify missing row %s in table %s"
                           % (uuid, table.name))
-            if self.__row_update(table, row, new):
-                changed = True
+            changed |= self.__row_update(table, row, new)
+            if op == ROW_CREATE:
+                table.rows[uuid] = row
+            if changed:
                 self.notify(op, row, Row.from_json(self, table, uuid, old))
         return changed
 
@@ -584,7 +603,7 @@ class Idl(object):
                         row_update[column.name] = self.__column_name(column)
 
     def __apply_diff(self, table, row, row_diff):
-        old_row_diff_json = {}
+        old_row = {}
         for column_name, datum_diff_json in six.iteritems(row_diff):
             column = table.columns.get(column_name)
             if not column:
@@ -601,12 +620,12 @@ class Idl(object):
                           % (column_name, table.name, e))
                 continue
 
-            old_row_diff_json[column_name] = row._data[column_name].to_json()
+            old_row[column_name] = row._data[column_name].copy()
             datum = row._data[column_name].diff(datum_diff)
             if datum != row._data[column_name]:
                 row._data[column_name] = datum
 
-        return old_row_diff_json
+        return old_row
 
     def __row_update(self, table, row, row_json):
         changed = False
@@ -640,8 +659,7 @@ class Idl(object):
         data = {}
         for column in six.itervalues(table.columns):
             data[column.name] = ovs.db.data.Datum.default(column.type)
-        row = table.rows[uuid] = Row(self, table, uuid, data)
-        return row
+        return Row(self, table, uuid, data)
 
     def __error(self):
         self._session.force_reconnect()
@@ -776,7 +794,11 @@ class Row(object):
         assert self._changes is not None
         assert self._mutations is not None
 
-        column = self._table.columns[column_name]
+        try:
+            column = self._table.columns[column_name]
+        except KeyError:
+            raise AttributeError("%s instance has no attribute '%s'" %
+                                 (self.__class__.__name__, column_name))
         datum = self._changes.get(column_name)
         inserts = None
         if '_inserts' in self._mutations.keys():
@@ -846,7 +868,17 @@ class Row(object):
             vlog.err("attempting to write bad value to column %s (%s)"
                      % (column_name, e))
             return
+        # Remove prior version of the Row from the index if it has the indexed
+        # column set, and the column changing is an indexed column
+        if hasattr(self, column_name):
+            for idx in self._table.rows.indexes.values():
+                if column_name in (c.column for c in idx.columns):
+                    idx.remove(self)
         self._idl.txn._write(self, column, datum)
+        for idx in self._table.rows.indexes.values():
+            # Only update the index if indexed columns change
+            if column_name in (c.column for c in idx.columns):
+                idx.add(self)
 
     def addvalue(self, column_name, key):
         self._idl.txn._txn_rows[self.uuid] = self
@@ -974,8 +1006,8 @@ class Row(object):
             del self._idl.txn._txn_rows[self.uuid]
         else:
             self._idl.txn._txn_rows[self.uuid] = self
-        self.__dict__["_changes"] = None
         del self._table.rows[self.uuid]
+        self.__dict__["_changes"] = None
 
     def fetch(self, column_name):
         self._idl.txn._fetch(self, column_name)
@@ -1147,6 +1179,10 @@ class Transaction(object):
 
         for row in six.itervalues(self._txn_rows):
             if row._changes is None:
+                # If we add the deleted row back to rows with _changes == None
+                # then __getattr__ will not work for the indexes
+                row.__dict__["_changes"] = {}
+                row.__dict__["_mutations"] = {}
                 row._table.rows[row.uuid] = row
             elif row._data is None:
                 del row._table.rows[row.uuid]

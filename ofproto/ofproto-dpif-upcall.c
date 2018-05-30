@@ -34,10 +34,12 @@
 #include "ofproto-dpif-sflow.h"
 #include "ofproto-dpif-xlate.h"
 #include "ofproto-dpif-xlate-cache.h"
+#include "ofproto-dpif-trace.h"
 #include "ovs-rcu.h"
 #include "packets.h"
 #include "openvswitch/poll-loop.h"
 #include "seq.h"
+#include "tunnel.h"
 #include "unixctl.h"
 #include "openvswitch/vlog.h"
 
@@ -183,9 +185,11 @@ struct udpif {
 enum upcall_type {
     BAD_UPCALL,                 /* Some kind of bug somewhere. */
     MISS_UPCALL,                /* A flow miss.  */
+    SLOW_PATH_UPCALL,           /* Slow path upcall.  */
     SFLOW_UPCALL,               /* sFlow sample. */
     FLOW_SAMPLE_UPCALL,         /* Per-flow sampling. */
-    IPFIX_UPCALL                /* Per-bridge sampling. */
+    IPFIX_UPCALL,               /* Per-bridge sampling. */
+    CONTROLLER_UPCALL           /* Destined for the controller. */
 };
 
 enum reval_result {
@@ -203,15 +207,15 @@ struct upcall {
      * dpif-netdev.  If a modification is absolutely necessary, a const cast
      * may be used with other datapaths. */
     const struct flow *flow;       /* Parsed representation of the packet. */
+    enum odp_key_fitness fitness;  /* Fitness of 'flow' relative to ODP key. */
     const ovs_u128 *ufid;          /* Unique identifier for 'flow'. */
     unsigned pmd_id;               /* Datapath poll mode driver id. */
     const struct dp_packet *packet;   /* Packet associated with this upcall. */
-    ofp_port_t in_port;            /* OpenFlow in port, or OFPP_NONE. */
+    ofp_port_t ofp_in_port;        /* OpenFlow in port, or OFPP_NONE. */
     uint16_t mru;                  /* If !0, Maximum receive unit of
                                       fragmented IP packet */
 
-    enum dpif_upcall_type type;    /* Datapath type of the upcall. */
-    const struct nlattr *userdata; /* Userdata for DPIF_UC_ACTION Upcalls. */
+    enum upcall_type type;         /* Type of the upcall. */
     const struct nlattr *actions;  /* Flow actions in DPIF_UC_ACTION Upcalls. */
 
     bool xout_initialized;         /* True if 'xout' must be uninitialized. */
@@ -227,13 +231,14 @@ struct upcall {
     bool ukey_persists;            /* Set true to keep 'ukey' beyond the
                                       lifetime of this upcall. */
 
-    uint64_t dump_seq;             /* udpif->dump_seq at translation time. */
     uint64_t reval_seq;            /* udpif->reval_seq at translation time. */
 
     /* Not used by the upcall callback interface. */
     const struct nlattr *key;      /* Datapath flow key. */
     size_t key_len;                /* Datapath flow key length. */
     const struct nlattr *out_tun_key;  /* Datapath output tunnel key. */
+
+    struct user_action_cookie cookie;
 
     uint64_t odp_actions_stub[1024 / 8]; /* Stub for odp_actions. */
 };
@@ -367,7 +372,8 @@ static int ukey_acquire(struct udpif *, const struct dpif_flow *,
 static void ukey_delete__(struct udpif_key *);
 static void ukey_delete(struct umap *, struct udpif_key *);
 static enum upcall_type classify_upcall(enum dpif_upcall_type type,
-                                        const struct nlattr *userdata);
+                                        const struct nlattr *userdata,
+                                        struct user_action_cookie *cookie);
 
 static void put_op_init(struct ukey_op *op, struct udpif_key *ukey,
                         enum dpif_flow_put_flags flags);
@@ -528,18 +534,15 @@ udpif_stop_threads(struct udpif *udpif)
 /* Starts the handler and revalidator threads, must be enclosed in
  * ovsrcu quiescent state. */
 static void
-udpif_start_threads(struct udpif *udpif, size_t n_handlers,
-                    size_t n_revalidators)
+udpif_start_threads(struct udpif *udpif, size_t n_handlers_,
+                    size_t n_revalidators_)
 {
-    if (udpif && n_handlers && n_revalidators) {
-        size_t i;
-        bool enable_ufid;
-
-        udpif->n_handlers = n_handlers;
-        udpif->n_revalidators = n_revalidators;
+    if (udpif && n_handlers_ && n_revalidators_) {
+        udpif->n_handlers = n_handlers_;
+        udpif->n_revalidators = n_revalidators_;
 
         udpif->handlers = xzalloc(udpif->n_handlers * sizeof *udpif->handlers);
-        for (i = 0; i < udpif->n_handlers; i++) {
+        for (size_t i = 0; i < udpif->n_handlers; i++) {
             struct handler *handler = &udpif->handlers[i];
 
             handler->udpif = udpif;
@@ -548,8 +551,7 @@ udpif_start_threads(struct udpif *udpif, size_t n_handlers,
                 "handler", udpif_upcall_handler, handler);
         }
 
-        enable_ufid = udpif->backer->rt_support.ufid;
-        atomic_init(&udpif->enable_ufid, enable_ufid);
+        atomic_init(&udpif->enable_ufid, udpif->backer->rt_support.ufid);
         dpif_enable_upcall(udpif->dpif);
 
         ovs_barrier_init(&udpif->reval_barrier, udpif->n_revalidators);
@@ -558,7 +560,7 @@ udpif_start_threads(struct udpif *udpif, size_t n_handlers,
         udpif->pause = false;
         udpif->revalidators = xzalloc(udpif->n_revalidators
                                       * sizeof *udpif->revalidators);
-        for (i = 0; i < udpif->n_revalidators; i++) {
+        for (size_t i = 0; i < udpif->n_revalidators; i++) {
             struct revalidator *revalidator = &udpif->revalidators[i];
 
             revalidator->udpif = udpif;
@@ -592,33 +594,33 @@ udpif_resume_revalidators(struct udpif *udpif)
 }
 
 /* Tells 'udpif' how many threads it should use to handle upcalls.
- * 'n_handlers' and 'n_revalidators' can never be zero.  'udpif''s
+ * 'n_handlers_' and 'n_revalidators_' can never be zero.  'udpif''s
  * datapath handle must have packet reception enabled before starting
  * threads. */
 void
-udpif_set_threads(struct udpif *udpif, size_t n_handlers,
-                  size_t n_revalidators)
+udpif_set_threads(struct udpif *udpif, size_t n_handlers_,
+                  size_t n_revalidators_)
 {
     ovs_assert(udpif);
-    ovs_assert(n_handlers && n_revalidators);
+    ovs_assert(n_handlers_ && n_revalidators_);
 
     ovsrcu_quiesce_start();
-    if (udpif->n_handlers != n_handlers
-        || udpif->n_revalidators != n_revalidators) {
+    if (udpif->n_handlers != n_handlers_
+        || udpif->n_revalidators != n_revalidators_) {
         udpif_stop_threads(udpif);
     }
 
     if (!udpif->handlers && !udpif->revalidators) {
         int error;
 
-        error = dpif_handlers_set(udpif->dpif, n_handlers);
+        error = dpif_handlers_set(udpif->dpif, n_handlers_);
         if (error) {
             VLOG_ERR("failed to configure handlers in dpif %s: %s",
                      dpif_name(udpif->dpif), ovs_strerror(error));
             return;
         }
 
-        udpif_start_threads(udpif, n_handlers, n_revalidators);
+        udpif_start_threads(udpif, n_handlers_, n_revalidators_);
     }
     ovsrcu_quiesce_end();
 }
@@ -633,12 +635,12 @@ udpif_synchronize(struct udpif *udpif)
     /* This is stronger than necessary.  It would be sufficient to ensure
      * (somehow) that each handler and revalidator thread had passed through
      * its main loop once. */
-    size_t n_handlers = udpif->n_handlers;
-    size_t n_revalidators = udpif->n_revalidators;
+    size_t n_handlers_ = udpif->n_handlers;
+    size_t n_revalidators_ = udpif->n_revalidators;
 
     ovsrcu_quiesce_start();
     udpif_stop_threads(udpif);
-    udpif_start_threads(udpif, n_handlers, n_revalidators);
+    udpif_start_threads(udpif, n_handlers_, n_revalidators_);
     ovsrcu_quiesce_end();
 }
 
@@ -676,16 +678,14 @@ udpif_get_memory_usage(struct udpif *udpif, struct simap *usage)
 void
 udpif_flush(struct udpif *udpif)
 {
-    size_t n_handlers, n_revalidators;
-
-    n_handlers = udpif->n_handlers;
-    n_revalidators = udpif->n_revalidators;
+    size_t n_handlers_ = udpif->n_handlers;
+    size_t n_revalidators_ = udpif->n_revalidators;
 
     ovsrcu_quiesce_start();
 
     udpif_stop_threads(udpif);
     dpif_flow_flush(udpif->dpif);
-    udpif_start_threads(udpif, n_handlers, n_revalidators);
+    udpif_start_threads(udpif, n_handlers_, n_revalidators_);
 
     ovsrcu_quiesce_end();
 }
@@ -782,8 +782,9 @@ recv_upcalls(struct handler *handler)
             break;
         }
 
-        if (odp_flow_key_to_flow(dupcall->key, dupcall->key_len, flow)
-            == ODP_FIT_ERROR) {
+        upcall->fitness = odp_flow_key_to_flow(dupcall->key, dupcall->key_len,
+                                               flow);
+        if (upcall->fitness == ODP_FIT_ERROR) {
             goto free_dupcall;
         }
 
@@ -969,11 +970,9 @@ udpif_revalidator(void *arg)
 }
 
 static enum upcall_type
-classify_upcall(enum dpif_upcall_type type, const struct nlattr *userdata)
+classify_upcall(enum dpif_upcall_type type, const struct nlattr *userdata,
+                struct user_action_cookie *cookie)
 {
-    union user_action_cookie cookie;
-    size_t userdata_len;
-
     /* First look at the upcall type. */
     switch (type) {
     case DPIF_UC_ACTION:
@@ -993,30 +992,27 @@ classify_upcall(enum dpif_upcall_type type, const struct nlattr *userdata)
         VLOG_WARN_RL(&rl, "action upcall missing cookie");
         return BAD_UPCALL;
     }
-    userdata_len = nl_attr_get_size(userdata);
-    if (userdata_len < sizeof cookie.type
-        || userdata_len > sizeof cookie) {
+
+    size_t userdata_len = nl_attr_get_size(userdata);
+    if (userdata_len != sizeof *cookie) {
         VLOG_WARN_RL(&rl, "action upcall cookie has unexpected size %"PRIuSIZE,
                      userdata_len);
         return BAD_UPCALL;
     }
-    memset(&cookie, 0, sizeof cookie);
-    memcpy(&cookie, nl_attr_get(userdata), userdata_len);
-    if (userdata_len == MAX(8, sizeof cookie.sflow)
-        && cookie.type == USER_ACTION_COOKIE_SFLOW) {
+    memcpy(cookie, nl_attr_get(userdata), sizeof *cookie);
+    if (cookie->type == USER_ACTION_COOKIE_SFLOW) {
         return SFLOW_UPCALL;
-    } else if (userdata_len == MAX(8, sizeof cookie.slow_path)
-               && cookie.type == USER_ACTION_COOKIE_SLOW_PATH) {
-        return MISS_UPCALL;
-    } else if (userdata_len == MAX(8, sizeof cookie.flow_sample)
-               && cookie.type == USER_ACTION_COOKIE_FLOW_SAMPLE) {
+    } else if (cookie->type == USER_ACTION_COOKIE_SLOW_PATH) {
+        return SLOW_PATH_UPCALL;
+    } else if (cookie->type == USER_ACTION_COOKIE_FLOW_SAMPLE) {
         return FLOW_SAMPLE_UPCALL;
-    } else if (userdata_len == MAX(8, sizeof cookie.ipfix)
-               && cookie.type == USER_ACTION_COOKIE_IPFIX) {
+    } else if (cookie->type == USER_ACTION_COOKIE_IPFIX) {
         return IPFIX_UPCALL;
+    } else if (cookie->type == USER_ACTION_COOKIE_CONTROLLER) {
+        return CONTROLLER_UPCALL;
     } else {
         VLOG_WARN_RL(&rl, "invalid user cookie of type %"PRIu16
-                     " and size %"PRIuSIZE, cookie.type, userdata_len);
+                     " and size %"PRIuSIZE, cookie->type, userdata_len);
         return BAD_UPCALL;
     }
 }
@@ -1025,16 +1021,18 @@ classify_upcall(enum dpif_upcall_type type, const struct nlattr *userdata)
  * initialized with at least 128 bytes of space. */
 static void
 compose_slow_path(struct udpif *udpif, struct xlate_out *xout,
-                  const struct flow *flow, odp_port_t odp_in_port,
-                  struct ofpbuf *buf, uint32_t slowpath_meter_id,
-                  uint32_t controller_meter_id)
+                  const struct flow *flow,
+                  odp_port_t odp_in_port, ofp_port_t ofp_in_port,
+                  struct ofpbuf *buf, uint32_t meter_id,
+                  struct uuid *ofproto_uuid)
 {
-    union user_action_cookie cookie;
+    struct user_action_cookie cookie;
     odp_port_t port;
     uint32_t pid;
 
     cookie.type = USER_ACTION_COOKIE_SLOW_PATH;
-    cookie.slow_path.unused = 0;
+    cookie.ofp_in_port = ofp_in_port;
+    cookie.ofproto_uuid = *ofproto_uuid;
     cookie.slow_path.reason = xout->slow;
 
     port = xout->slow & (SLOW_CFM | SLOW_BFD | SLOW_LACP | SLOW_STP)
@@ -1044,9 +1042,6 @@ compose_slow_path(struct udpif *udpif, struct xlate_out *xout,
 
     size_t offset;
     size_t ac_offset;
-    uint32_t meter_id = xout->slow & SLOW_CONTROLLER ? controller_meter_id
-                                                     : slowpath_meter_id;
-
     if (meter_id != UINT32_MAX) {
         /* If slowpath meter is configured, generate clone(meter, userspace)
          * action. */
@@ -1056,7 +1051,7 @@ compose_slow_path(struct udpif *udpif, struct xlate_out *xout,
         nl_msg_put_u32(buf, OVS_ACTION_ATTR_METER, meter_id);
     }
 
-    odp_put_userspace_action(pid, &cookie, sizeof cookie.slow_path,
+    odp_put_userspace_action(pid, &cookie, sizeof cookie,
                              ODPP_NONE, false, buf);
 
     if (meter_id != UINT32_MAX) {
@@ -1078,10 +1073,26 @@ upcall_receive(struct upcall *upcall, const struct dpif_backer *backer,
 {
     int error;
 
-    error = xlate_lookup(backer, flow, &upcall->ofproto, &upcall->ipfix,
-                         &upcall->sflow, NULL, &upcall->in_port);
-    if (error) {
-        return error;
+    upcall->type = classify_upcall(type, userdata, &upcall->cookie);
+    if (upcall->type == BAD_UPCALL) {
+        return EAGAIN;
+    } else if (upcall->type == MISS_UPCALL) {
+        error = xlate_lookup(backer, flow, &upcall->ofproto, &upcall->ipfix,
+                             &upcall->sflow, NULL, &upcall->ofp_in_port);
+        if (error) {
+            return error;
+        }
+    } else {
+        struct ofproto_dpif *ofproto
+            = ofproto_dpif_lookup_by_uuid(&upcall->cookie.ofproto_uuid);
+        if (!ofproto) {
+            VLOG_INFO_RL(&rl, "upcall could not find ofproto");
+            return ENODEV;
+        }
+        upcall->ofproto = ofproto;
+        upcall->ipfix = ofproto->ipfix;
+        upcall->sflow = ofproto->sflow;
+        upcall->ofp_in_port = upcall->cookie.ofp_in_port;
     }
 
     upcall->recirc = NULL;
@@ -1090,8 +1101,6 @@ upcall_receive(struct upcall *upcall, const struct dpif_backer *backer,
     upcall->packet = packet;
     upcall->ufid = ufid;
     upcall->pmd_id = pmd_id;
-    upcall->type = type;
-    upcall->userdata = userdata;
     ofpbuf_use_stub(&upcall->odp_actions, upcall->odp_actions_stub,
                     sizeof upcall->odp_actions_stub);
     ofpbuf_init(&upcall->put_actions, 0);
@@ -1115,7 +1124,9 @@ upcall_xlate(struct udpif *udpif, struct upcall *upcall,
              struct ofpbuf *odp_actions, struct flow_wildcards *wc)
 {
     struct dpif_flow_stats stats;
+    enum xlate_error xerr;
     struct xlate_in xin;
+    struct ds output;
 
     stats.n_packets = 1;
     stats.n_bytes = dp_packet_size(upcall->packet);
@@ -1124,10 +1135,10 @@ upcall_xlate(struct udpif *udpif, struct upcall *upcall,
 
     xlate_in_init(&xin, upcall->ofproto,
                   ofproto_dpif_get_tables_version(upcall->ofproto),
-                  upcall->flow, upcall->in_port, NULL,
+                  upcall->flow, upcall->ofp_in_port, NULL,
                   stats.tcp_flags, upcall->packet, wc, odp_actions);
 
-    if (upcall->type == DPIF_UC_MISS) {
+    if (upcall->type == MISS_UPCALL) {
         xin.resubmit_stats = &stats;
 
         if (xin.frozen_state) {
@@ -1147,10 +1158,26 @@ upcall_xlate(struct udpif *udpif, struct upcall *upcall,
          * with pushing its stats eventually. */
     }
 
-    upcall->dump_seq = seq_read(udpif->dump_seq);
     upcall->reval_seq = seq_read(udpif->reval_seq);
 
-    xlate_actions(&xin, &upcall->xout);
+    xerr = xlate_actions(&xin, &upcall->xout);
+
+    /* Translate again and log the ofproto trace for
+     * these two error types. */
+    if (xerr == XLATE_RECURSION_TOO_DEEP ||
+        xerr == XLATE_TOO_MANY_RESUBMITS) {
+        static struct vlog_rate_limit rll = VLOG_RATE_LIMIT_INIT(1, 1);
+
+        /* This is a huge log, so be conservative. */
+        if (!VLOG_DROP_WARN(&rll)) {
+            ds_init(&output);
+            ofproto_trace(upcall->ofproto, upcall->flow,
+                          upcall->packet, NULL, 0, NULL, &output);
+            VLOG_WARN("%s", ds_cstr(&output));
+            ds_destroy(&output);
+        }
+    }
+
     if (wc) {
         /* Convert the input port wildcard from OFP to ODP format. There's no
          * real way to do this for arbitrary bitmasks since the numbering spaces
@@ -1161,22 +1188,25 @@ upcall_xlate(struct udpif *udpif, struct upcall *upcall,
 
     upcall->xout_initialized = true;
 
+    if (upcall->fitness == ODP_FIT_TOO_LITTLE) {
+        upcall->xout.slow |= SLOW_MATCH;
+    }
     if (!upcall->xout.slow) {
         ofpbuf_use_const(&upcall->put_actions,
                          odp_actions->data, odp_actions->size);
     } else {
-        uint32_t smid = upcall->ofproto->up.slowpath_meter_id;
-        uint32_t cmid = upcall->ofproto->up.controller_meter_id;
         /* upcall->put_actions already initialized by upcall_receive(). */
         compose_slow_path(udpif, &upcall->xout, upcall->flow,
-                          upcall->flow->in_port.odp_port,
-                          &upcall->put_actions, smid, cmid);
+                          upcall->flow->in_port.odp_port, upcall->ofp_in_port,
+                          &upcall->put_actions,
+                          upcall->ofproto->up.slowpath_meter_id,
+                          &upcall->ofproto->uuid);
     }
 
     /* This function is also called for slow-pathed flows.  As we are only
      * going to create new datapath flows for actual datapath misses, there is
      * no point in creating a ukey otherwise. */
-    if (upcall->type == DPIF_UC_MISS) {
+    if (upcall->type == MISS_UPCALL) {
         upcall->ukey = ukey_create_from_upcall(upcall, wc);
     }
 }
@@ -1212,7 +1242,7 @@ should_install_flow(struct udpif *udpif, struct upcall *upcall)
 {
     unsigned int flow_limit;
 
-    if (upcall->type != DPIF_UC_MISS) {
+    if (upcall->type != MISS_UPCALL) {
         return false;
     } else if (upcall->recirc && !upcall->have_recirc_ref) {
         VLOG_DBG_RL(&rl, "upcall: no reference for recirc flow");
@@ -1234,7 +1264,6 @@ upcall_cb(const struct dp_packet *packet, const struct flow *flow, ovs_u128 *ufi
           const struct nlattr *userdata, struct ofpbuf *actions,
           struct flow_wildcards *wc, struct ofpbuf *put_actions, void *aux)
 {
-    static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
     struct udpif *udpif = aux;
     struct upcall upcall;
     bool megaflow;
@@ -1248,6 +1277,7 @@ upcall_cb(const struct dp_packet *packet, const struct flow *flow, ovs_u128 *ufi
         return error;
     }
 
+    upcall.fitness = ODP_FIT_PERFECT;
     error = process_upcall(udpif, &upcall, actions, wc);
     if (error) {
         goto out;
@@ -1268,7 +1298,8 @@ upcall_cb(const struct dp_packet *packet, const struct flow *flow, ovs_u128 *ufi
     }
 
     if (upcall.ukey && !ukey_install(udpif, upcall.ukey)) {
-        VLOG_WARN_RL(&rl, "upcall_cb failure: ukey installation fails");
+        static struct vlog_rate_limit rll = VLOG_RATE_LIMIT_INIT(1, 1);
+        VLOG_WARN_RL(&rll, "upcall_cb failure: ukey installation fails");
         error = ENOSPC;
     }
 out:
@@ -1317,7 +1348,7 @@ dpif_read_actions(struct udpif *udpif, struct upcall *upcall,
 
     switch (type) {
     case SFLOW_UPCALL:
-        dpif_sflow_read_actions(flow, actions, actions_len, upcall_data);
+        dpif_sflow_read_actions(flow, actions, actions_len, upcall_data, true);
         break;
     case FLOW_SAMPLE_UPCALL:
     case IPFIX_UPCALL:
@@ -1325,6 +1356,8 @@ dpif_read_actions(struct udpif *udpif, struct upcall *upcall,
         break;
     case BAD_UPCALL:
     case MISS_UPCALL:
+    case SLOW_PATH_UPCALL:
+    case CONTROLLER_UPCALL:
     default:
         break;
     }
@@ -1336,82 +1369,143 @@ static int
 process_upcall(struct udpif *udpif, struct upcall *upcall,
                struct ofpbuf *odp_actions, struct flow_wildcards *wc)
 {
-    const struct nlattr *userdata = upcall->userdata;
     const struct dp_packet *packet = upcall->packet;
     const struct flow *flow = upcall->flow;
     size_t actions_len = 0;
-    enum upcall_type upcall_type = classify_upcall(upcall->type, userdata);
 
-    switch (upcall_type) {
+    switch (upcall->type) {
     case MISS_UPCALL:
+    case SLOW_PATH_UPCALL:
         upcall_xlate(udpif, upcall, odp_actions, wc);
         return 0;
 
     case SFLOW_UPCALL:
         if (upcall->sflow) {
-            union user_action_cookie cookie;
             struct dpif_sflow_actions sflow_actions;
 
             memset(&sflow_actions, 0, sizeof sflow_actions);
-            memset(&cookie, 0, sizeof cookie);
-            memcpy(&cookie, nl_attr_get(userdata), sizeof cookie.sflow);
 
-            actions_len = dpif_read_actions(udpif, upcall, flow, upcall_type,
-                                            &sflow_actions);
+            actions_len = dpif_read_actions(udpif, upcall, flow,
+                                            upcall->type, &sflow_actions);
             dpif_sflow_received(upcall->sflow, packet, flow,
-                                flow->in_port.odp_port, &cookie,
+                                flow->in_port.odp_port, &upcall->cookie,
                                 actions_len > 0 ? &sflow_actions : NULL);
         }
         break;
 
     case IPFIX_UPCALL:
+    case FLOW_SAMPLE_UPCALL:
         if (upcall->ipfix) {
-            union user_action_cookie cookie;
             struct flow_tnl output_tunnel_key;
             struct dpif_ipfix_actions ipfix_actions;
 
-            memset(&cookie, 0, sizeof cookie);
-            memcpy(&cookie, nl_attr_get(userdata), sizeof cookie.ipfix);
             memset(&ipfix_actions, 0, sizeof ipfix_actions);
 
             if (upcall->out_tun_key) {
                 odp_tun_key_from_attr(upcall->out_tun_key, &output_tunnel_key);
             }
 
-            actions_len = dpif_read_actions(udpif, upcall, flow, upcall_type,
-                                            &ipfix_actions);
-            dpif_ipfix_bridge_sample(upcall->ipfix, packet, flow,
-                                     flow->in_port.odp_port,
-                                     cookie.ipfix.output_odp_port,
-                                     upcall->out_tun_key ?
-                                         &output_tunnel_key : NULL,
-                                     actions_len > 0 ? &ipfix_actions: NULL);
+            actions_len = dpif_read_actions(udpif, upcall, flow,
+                                            upcall->type, &ipfix_actions);
+            if (upcall->type == IPFIX_UPCALL) {
+                dpif_ipfix_bridge_sample(upcall->ipfix, packet, flow,
+                                         flow->in_port.odp_port,
+                                         upcall->cookie.ipfix.output_odp_port,
+                                         upcall->out_tun_key ?
+                                             &output_tunnel_key : NULL,
+                                         actions_len > 0 ?
+                                             &ipfix_actions: NULL);
+            } else {
+                /* The flow reflects exactly the contents of the packet.
+                 * Sample the packet using it. */
+                dpif_ipfix_flow_sample(upcall->ipfix, packet, flow,
+                                       &upcall->cookie, flow->in_port.odp_port,
+                                       upcall->out_tun_key ?
+                                           &output_tunnel_key : NULL,
+                                       actions_len > 0 ? &ipfix_actions: NULL);
+            }
         }
         break;
 
-    case FLOW_SAMPLE_UPCALL:
-        if (upcall->ipfix) {
-            union user_action_cookie cookie;
-            struct flow_tnl output_tunnel_key;
-            struct dpif_ipfix_actions ipfix_actions;
+    case CONTROLLER_UPCALL:
+        {
+            struct user_action_cookie *cookie = &upcall->cookie;
 
-            memset(&cookie, 0, sizeof cookie);
-            memcpy(&cookie, nl_attr_get(userdata), sizeof cookie.flow_sample);
-            memset(&ipfix_actions, 0, sizeof ipfix_actions);
-
-            if (upcall->out_tun_key) {
-                odp_tun_key_from_attr(upcall->out_tun_key, &output_tunnel_key);
+            if (cookie->controller.dont_send) {
+                return 0;
             }
 
-            actions_len = dpif_read_actions(udpif, upcall, flow, upcall_type,
-                                            &ipfix_actions);
-            /* The flow reflects exactly the contents of the packet.
-             * Sample the packet using it. */
-            dpif_ipfix_flow_sample(upcall->ipfix, packet, flow,
-                                   &cookie, flow->in_port.odp_port,
-                                   upcall->out_tun_key ?
-                                       &output_tunnel_key : NULL,
-                                   actions_len > 0 ? &ipfix_actions: NULL);
+            uint32_t recirc_id = cookie->controller.recirc_id;
+            if (!recirc_id) {
+                break;
+            }
+
+            const struct recirc_id_node *recirc_node
+                                = recirc_id_node_find(recirc_id);
+            if (!recirc_node) {
+                break;
+            }
+
+            const struct frozen_state *state = &recirc_node->state;
+
+            struct ofproto_async_msg *am = xmalloc(sizeof *am);
+            *am = (struct ofproto_async_msg) {
+                .controller_id = cookie->controller.controller_id,
+                .oam = OAM_PACKET_IN,
+                .pin = {
+                    .up = {
+                        .base = {
+                            .packet = xmemdup(dp_packet_data(packet),
+                                              dp_packet_size(packet)),
+                            .packet_len = dp_packet_size(packet),
+                            .reason = cookie->controller.reason,
+                            .table_id = state->table_id,
+                            .cookie = get_32aligned_be64(
+                                         &cookie->controller.rule_cookie),
+                            .userdata = (recirc_node->state.userdata_len
+                                     ? xmemdup(recirc_node->state.userdata,
+                                               recirc_node->state.userdata_len)
+                                      : NULL),
+                            .userdata_len = recirc_node->state.userdata_len,
+                        },
+                    },
+                    .max_len = cookie->controller.max_len,
+                },
+            };
+
+            if (cookie->controller.continuation) {
+                am->pin.up.stack = (state->stack_size
+                          ? xmemdup(state->stack, state->stack_size)
+                          : NULL),
+                am->pin.up.stack_size = state->stack_size,
+                am->pin.up.mirrors = state->mirrors,
+                am->pin.up.conntracked = state->conntracked,
+                am->pin.up.actions = (state->ofpacts_len
+                            ? xmemdup(state->ofpacts,
+                                      state->ofpacts_len) : NULL),
+                am->pin.up.actions_len = state->ofpacts_len,
+                am->pin.up.action_set = (state->action_set_len
+                               ? xmemdup(state->action_set,
+                                         state->action_set_len)
+                               : NULL),
+                am->pin.up.action_set_len = state->action_set_len,
+                am->pin.up.bridge = upcall->ofproto->uuid;
+            }
+
+            /* We don't want to use the upcall 'flow', since it may be
+             * more specific than the point at which the "controller"
+             * action was specified. */
+            struct flow frozen_flow;
+
+            frozen_flow = *flow;
+            if (!state->conntracked) {
+                flow_clear_conntrack(&frozen_flow);
+            }
+
+            frozen_metadata_to_flow(&state->metadata, &frozen_flow);
+            flow_get_metadata(&frozen_flow, &am->pin.up.base.flow_metadata);
+
+            ofproto_dpif_send_async_msg(upcall->ofproto, am);
         }
         break;
 
@@ -1436,9 +1530,6 @@ handle_upcalls(struct udpif *udpif, struct upcall *upcalls,
      *     translation is what processes received packets for these
      *     protocols.
      *
-     *   - For SLOW_CONTROLLER, translation sends the packet to the OpenFlow
-     *     controller.
-     *
      *   - For SLOW_ACTION, translation executes the actions directly.
      *
      * The loop fills 'ops' with an array of operations to execute in the
@@ -1462,15 +1553,15 @@ handle_upcalls(struct udpif *udpif, struct upcall *upcalls,
             op = &ops[n_ops++];
             op->ukey = NULL;
             op->dop.type = DPIF_OP_EXECUTE;
-            op->dop.u.execute.packet = CONST_CAST(struct dp_packet *, packet);
-            op->dop.u.execute.flow = upcall->flow;
+            op->dop.execute.packet = CONST_CAST(struct dp_packet *, packet);
+            op->dop.execute.flow = upcall->flow;
             odp_key_to_dp_packet(upcall->key, upcall->key_len,
-                                 op->dop.u.execute.packet);
-            op->dop.u.execute.actions = upcall->odp_actions.data;
-            op->dop.u.execute.actions_len = upcall->odp_actions.size;
-            op->dop.u.execute.needs_help = (upcall->xout.slow & SLOW_ACTION) != 0;
-            op->dop.u.execute.probe = false;
-            op->dop.u.execute.mtu = upcall->mru;
+                                 op->dop.execute.packet);
+            op->dop.execute.actions = upcall->odp_actions.data;
+            op->dop.execute.actions_len = upcall->odp_actions.size;
+            op->dop.execute.needs_help = (upcall->xout.slow & SLOW_ACTION) != 0;
+            op->dop.execute.probe = false;
+            op->dop.execute.mtu = upcall->mru;
         }
     }
 
@@ -1530,8 +1621,13 @@ ukey_get_actions(struct udpif_key *ukey, const struct nlattr **actions, size_t *
 static void
 ukey_set_actions(struct udpif_key *ukey, const struct ofpbuf *actions)
 {
-    ovsrcu_postpone(ofpbuf_delete,
-                    ovsrcu_get_protected(struct ofpbuf *, &ukey->actions));
+    struct ofpbuf *old_actions = ovsrcu_get_protected(struct ofpbuf *,
+                                                      &ukey->actions);
+
+    if (old_actions) {
+        ovsrcu_postpone(ofpbuf_delete, old_actions);
+    }
+
     ovsrcu_set(&ukey->actions, ofpbuf_clone(actions));
 }
 
@@ -1540,7 +1636,7 @@ ukey_create__(const struct nlattr *key, size_t key_len,
               const struct nlattr *mask, size_t mask_len,
               bool ufid_present, const ovs_u128 *ufid,
               const unsigned pmd_id, const struct ofpbuf *actions,
-              uint64_t dump_seq, uint64_t reval_seq, long long int used,
+              uint64_t reval_seq, long long int used,
               uint32_t key_recirc_id, struct xlate_out *xout)
     OVS_NO_THREAD_SAFETY_ANALYSIS
 {
@@ -1561,7 +1657,7 @@ ukey_create__(const struct nlattr *key, size_t key_len,
     ukey_set_actions(ukey, actions);
 
     ovs_mutex_init(&ukey->mutex);
-    ukey->dump_seq = dump_seq;
+    ukey->dump_seq = 0;     /* Not yet dumped */
     ukey->reval_seq = reval_seq;
     ukey->state = UKEY_CREATED;
     ukey->state_thread = ovsthread_id_self();
@@ -1611,8 +1707,7 @@ ukey_create_from_upcall(struct upcall *upcall, struct flow_wildcards *wc)
 
     return ukey_create__(keybuf.data, keybuf.size, maskbuf.data, maskbuf.size,
                          true, upcall->ufid, upcall->pmd_id,
-                         &upcall->put_actions, upcall->dump_seq,
-                         upcall->reval_seq, 0,
+                         &upcall->put_actions, upcall->reval_seq, 0,
                          upcall->have_recirc_ref ? upcall->recirc->id : 0,
                          &upcall->xout);
 }
@@ -1624,7 +1719,7 @@ ukey_create_from_dpif_flow(const struct udpif *udpif,
 {
     struct dpif_flow full_flow;
     struct ofpbuf actions;
-    uint64_t dump_seq, reval_seq;
+    uint64_t reval_seq;
     uint64_t stub[DPIF_FLOW_BUFSIZE / 8];
     const struct nlattr *a;
     unsigned int left;
@@ -1661,12 +1756,11 @@ ukey_create_from_dpif_flow(const struct udpif *udpif,
         }
     }
 
-    dump_seq = seq_read(udpif->dump_seq);
     reval_seq = seq_read(udpif->reval_seq) - 1; /* Ensure revalidation. */
     ofpbuf_use_const(&actions, &flow->actions, flow->actions_len);
     *ukey = ukey_create__(flow->key, flow->key_len,
                           flow->mask, flow->mask_len, flow->ufid_present,
-                          &flow->ufid, flow->pmd_id, &actions, dump_seq,
+                          &flow->ufid, flow->pmd_id, &actions,
                           reval_seq, flow->stats.used, 0, NULL);
 
     return 0;
@@ -1956,10 +2050,12 @@ xlate_key(struct udpif *udpif, const struct nlattr *key, unsigned int len,
 {
     struct ofproto_dpif *ofproto;
     ofp_port_t ofp_in_port;
+    enum odp_key_fitness fitness;
     struct xlate_in xin;
     int error;
 
-    if (odp_flow_key_to_flow(key, len, &ctx->flow) == ODP_FIT_ERROR) {
+    fitness = odp_flow_key_to_flow(key, len, &ctx->flow);
+    if (fitness == ODP_FIT_ERROR) {
         return EINVAL;
     }
 
@@ -1978,6 +2074,9 @@ xlate_key(struct udpif *udpif, const struct nlattr *key, unsigned int len,
     }
     xin.xcache = ctx->xcache;
     xlate_actions(&xin, &ctx->xout);
+    if (fitness == ODP_FIT_TOO_LITTLE) {
+        ctx->xout.slow |= SLOW_MATCH;
+    }
 
     return 0;
 }
@@ -2046,13 +2145,19 @@ revalidate_ukey__(struct udpif *udpif, const struct udpif_key *ukey,
 
     if (xoutp->slow) {
         struct ofproto_dpif *ofproto;
-        ofproto = xlate_lookup_ofproto(udpif->backer, &ctx.flow, NULL);
-        uint32_t smid = ofproto ? ofproto->up.slowpath_meter_id : UINT32_MAX;
-        uint32_t cmid = ofproto ? ofproto->up.controller_meter_id : UINT32_MAX;
+        ofp_port_t ofp_in_port;
+
+        ofproto = xlate_lookup_ofproto(udpif->backer, &ctx.flow, &ofp_in_port);
 
         ofpbuf_clear(odp_actions);
+
+        if (!ofproto) {
+            goto exit;
+        }
+
         compose_slow_path(udpif, xoutp, &ctx.flow, ctx.flow.in_port.odp_port,
-                          odp_actions, smid, cmid);
+                          ofp_in_port, odp_actions,
+                          ofproto->up.slowpath_meter_id, &ofproto->uuid);
     }
 
     if (odp_flow_key_to_mask(ukey->mask, ukey->mask_len, &dp_mask, &ctx.flow)
@@ -2064,7 +2169,7 @@ revalidate_ukey__(struct udpif *udpif, const struct udpif_key *ukey,
      * but not the newly revalidated wildcard mask (wc), i.e., if revalidation
      * tells that the datapath flow is now too generic and must be narrowed
      * down.  Note that we do not know if the datapath has ignored any of the
-     * wildcarded bits, so we may be overtly conservative here. */
+     * wildcarded bits, so we may be overly conservative here. */
     if (flow_wildcards_has_extra(&dp_mask, ctx.wc)) {
         goto exit;
     }
@@ -2160,12 +2265,12 @@ delete_op_init__(struct udpif *udpif, struct ukey_op *op,
 {
     op->ukey = NULL;
     op->dop.type = DPIF_OP_FLOW_DEL;
-    op->dop.u.flow_del.key = flow->key;
-    op->dop.u.flow_del.key_len = flow->key_len;
-    op->dop.u.flow_del.ufid = flow->ufid_present ? &flow->ufid : NULL;
-    op->dop.u.flow_del.pmd_id = flow->pmd_id;
-    op->dop.u.flow_del.stats = &op->stats;
-    op->dop.u.flow_del.terse = udpif_use_ufid(udpif);
+    op->dop.flow_del.key = flow->key;
+    op->dop.flow_del.key_len = flow->key_len;
+    op->dop.flow_del.ufid = flow->ufid_present ? &flow->ufid : NULL;
+    op->dop.flow_del.pmd_id = flow->pmd_id;
+    op->dop.flow_del.stats = &op->stats;
+    op->dop.flow_del.terse = udpif_use_ufid(udpif);
 }
 
 static void
@@ -2173,12 +2278,12 @@ delete_op_init(struct udpif *udpif, struct ukey_op *op, struct udpif_key *ukey)
 {
     op->ukey = ukey;
     op->dop.type = DPIF_OP_FLOW_DEL;
-    op->dop.u.flow_del.key = ukey->key;
-    op->dop.u.flow_del.key_len = ukey->key_len;
-    op->dop.u.flow_del.ufid = ukey->ufid_present ? &ukey->ufid : NULL;
-    op->dop.u.flow_del.pmd_id = ukey->pmd_id;
-    op->dop.u.flow_del.stats = &op->stats;
-    op->dop.u.flow_del.terse = udpif_use_ufid(udpif);
+    op->dop.flow_del.key = ukey->key;
+    op->dop.flow_del.key_len = ukey->key_len;
+    op->dop.flow_del.ufid = ukey->ufid_present ? &ukey->ufid : NULL;
+    op->dop.flow_del.pmd_id = ukey->pmd_id;
+    op->dop.flow_del.stats = &op->stats;
+    op->dop.flow_del.terse = udpif_use_ufid(udpif);
 }
 
 static void
@@ -2187,16 +2292,16 @@ put_op_init(struct ukey_op *op, struct udpif_key *ukey,
 {
     op->ukey = ukey;
     op->dop.type = DPIF_OP_FLOW_PUT;
-    op->dop.u.flow_put.flags = flags;
-    op->dop.u.flow_put.key = ukey->key;
-    op->dop.u.flow_put.key_len = ukey->key_len;
-    op->dop.u.flow_put.mask = ukey->mask;
-    op->dop.u.flow_put.mask_len = ukey->mask_len;
-    op->dop.u.flow_put.ufid = ukey->ufid_present ? &ukey->ufid : NULL;
-    op->dop.u.flow_put.pmd_id = ukey->pmd_id;
-    op->dop.u.flow_put.stats = NULL;
-    ukey_get_actions(ukey, &op->dop.u.flow_put.actions,
-                     &op->dop.u.flow_put.actions_len);
+    op->dop.flow_put.flags = flags;
+    op->dop.flow_put.key = ukey->key;
+    op->dop.flow_put.key_len = ukey->key_len;
+    op->dop.flow_put.mask = ukey->mask;
+    op->dop.flow_put.mask_len = ukey->mask_len;
+    op->dop.flow_put.ufid = ukey->ufid_present ? &ukey->ufid : NULL;
+    op->dop.flow_put.pmd_id = ukey->pmd_id;
+    op->dop.flow_put.stats = NULL;
+    ukey_get_actions(ukey, &op->dop.flow_put.actions,
+                     &op->dop.flow_put.actions_len);
 }
 
 /* Executes datapath operations 'ops' and attributes stats retrieved from the
@@ -2217,7 +2322,7 @@ push_dp_ops(struct udpif *udpif, struct ukey_op *ops, size_t n_ops)
         struct ukey_op *op = &ops[i];
         struct dpif_flow_stats *push, *stats, push_buf;
 
-        stats = op->dop.u.flow_del.stats;
+        stats = op->dop.flow_del.stats;
         push = &push_buf;
 
         if (op->dop.type != DPIF_OP_FLOW_DEL) {
@@ -2248,8 +2353,8 @@ push_dp_ops(struct udpif *udpif, struct ukey_op *ops, size_t n_ops)
         }
 
         if (push->n_packets || netflow_exists()) {
-            const struct nlattr *key = op->dop.u.flow_del.key;
-            size_t key_len = op->dop.u.flow_del.key_len;
+            const struct nlattr *key = op->dop.flow_del.key;
+            size_t key_len = op->dop.flow_del.key_len;
             struct netflow *netflow;
             struct reval_context ctx = {
                 .netflow = &netflow,
@@ -2270,9 +2375,8 @@ push_dp_ops(struct udpif *udpif, struct ukey_op *ops, size_t n_ops)
 
             error = xlate_key(udpif, key, key_len, push, &ctx);
             if (error) {
-                static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
-
-                VLOG_WARN_RL(&rl, "xlate_key failed (%s)!",
+                static struct vlog_rate_limit rll = VLOG_RATE_LIMIT_INIT(1, 5);
+                VLOG_WARN_RL(&rll, "xlate_key failed (%s)!",
                              ovs_strerror(error));
             } else {
                 xlate_out_uninit(&ctx.xout);
@@ -2305,13 +2409,15 @@ push_ukey_ops(struct udpif *udpif, struct umap *umap,
 static void
 log_unexpected_flow(const struct dpif_flow *flow, int error)
 {
-    static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(10, 60);
     struct ds ds = DS_EMPTY_INITIALIZER;
 
     ds_put_format(&ds, "Failed to acquire udpif_key corresponding to "
                   "unexpected flow (%s): ", ovs_strerror(error));
     odp_format_ufid(&flow->ufid, &ds);
-    VLOG_WARN_RL(&rl, "%s", ds_cstr(&ds));
+
+    static struct vlog_rate_limit rll = VLOG_RATE_LIMIT_INIT(10, 60);
+    VLOG_WARN_RL(&rll, "%s", ds_cstr(&ds));
+
     ds_destroy(&ds);
 }
 

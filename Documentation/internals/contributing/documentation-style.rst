@@ -358,8 +358,8 @@ Writing Style
 -------------
 
 Follow these guidelines to ensure readability and consistency of the Open
-vSwitch documentation. These guidelines are based on the `IBM Style Guide
-<http://www.redbooks.ibm.com/Redbooks.nsf/ibmpressisbn/9780132101301?Open>`__.
+vSwitch documentation. These guidelines are based on the `/*IBM Style Guide/*
+<https://www.ibm.com/developerworks/library/styleguidelines/>`__.
 
 - Use standard US English
 
@@ -411,7 +411,7 @@ vSwitch documentation. These guidelines are based on the `IBM Style Guide
      * - To create a bridge, the user runs:
        - To create a bridge, run:
 
-- Keep sentences short and consise
+- Keep sentences short and concise
 
 - Eliminate needless politeness
 
@@ -442,4 +442,5 @@ Useful Links
 - `Quick reStructuredText
   <http://docutils.sourceforge.net/docs/user/rst/quickref.html>`__
 
-- `Sphinx Documentation <http://sphinx.readthedocs.io/en/latest/rest.html>`__
+- `Sphinx Documentation
+  <http://www.sphinx-doc.org/en/master/usage/restructuredtext/index.html>`__

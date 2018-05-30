@@ -35,6 +35,7 @@
 #include "ovn/expr.h"
 #include "ovn/lex.h"
 #include "ovn/lib/acl-log.h"
+#include "ovn/lib/extend-table.h"
 #include "packets.h"
 #include "openvswitch/shash.h"
 #include "simap.h"
@@ -233,7 +234,8 @@ add_prerequisite(struct action_context *ctx, const char *prerequisite)
     struct expr *expr;
     char *error;
 
-    expr = expr_parse_string(prerequisite, ctx->pp->symtab, NULL, &error);
+    expr = expr_parse_string(prerequisite, ctx->pp->symtab, NULL, NULL,
+                             &error);
     ovs_assert(!error);
     ctx->prereqs = expr_combine(EXPR_T_AND, ctx->prereqs, expr);
 }
@@ -831,17 +833,6 @@ encode_ct_nat(const struct ovnact_ct_nat *cn,
     ct = ofpacts->header;
     if (cn->ip) {
         ct->flags |= NX_CT_F_COMMIT;
-    } else if (snat && ep->is_gateway_router) {
-        /* For performance reasons, we try to prevent additional
-         * recirculations.  ct_snat which is used in a gateway router
-         * does not need a recirculation.  ct_snat(IP) does need a
-         * recirculation.  ct_snat in a distributed router needs
-         * recirculation regardless of whether an IP address is
-         * specified.
-         * XXX Should we consider a method to let the actions specify
-         * whether an action needs recirculation if there are more use
-         * cases?. */
-        ct->recirc_table = NX_CT_RECIRC_NONE;
     }
     ofpact_finish(ofpacts, &ct->ofpact);
     ofpbuf_push_uninit(ofpacts, ct_offset);
@@ -1026,8 +1017,7 @@ encode_CT_LB(const struct ovnact_ct_lb *cl,
         return;
     }
 
-    uint32_t group_id = 0, hash;
-    struct group_info *group_info;
+    uint32_t table_id = 0;
     struct ofpact_group *og;
     uint32_t zone_reg = ep->is_switch ? MFF_LOG_CT_ZONE - MFF_REG0
                             : MFF_LOG_DNAT_ZONE - MFF_REG0;
@@ -1059,59 +1049,15 @@ encode_CT_LB(const struct ovnact_ct_lb *cl,
                       recirc_table, zone_reg);
     }
 
-    hash = hash_string(ds_cstr(&ds), 0);
-
-    /* Check whether we have non installed but allocated group_id. */
-    HMAP_FOR_EACH_WITH_HASH (group_info, hmap_node, hash,
-                             &ep->group_table->desired_groups) {
-        if (!strcmp(ds_cstr(&group_info->group), ds_cstr(&ds))) {
-            group_id = group_info->group_id;
-            break;
-        }
-    }
-
-    if (!group_id) {
-        /* Check whether we already have an installed entry for this
-         * combination. */
-        HMAP_FOR_EACH_WITH_HASH (group_info, hmap_node, hash,
-                                 &ep->group_table->existing_groups) {
-            if (!strcmp(ds_cstr(&group_info->group), ds_cstr(&ds))) {
-                group_id = group_info->group_id;
-            }
-        }
-
-        bool new_group_id = false;
-        if (!group_id) {
-            /* Reserve a new group_id. */
-            group_id = bitmap_scan(ep->group_table->group_ids, 0, 1,
-                                   MAX_OVN_GROUPS + 1);
-            new_group_id = true;
-        }
-
-        if (group_id == MAX_OVN_GROUPS + 1) {
-            static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
-            VLOG_ERR_RL(&rl, "out of group ids");
-
-            ds_destroy(&ds);
-            return;
-        }
-        bitmap_set1(ep->group_table->group_ids, group_id);
-
-        group_info = xmalloc(sizeof *group_info);
-        group_info->group = ds;
-        group_info->group_id = group_id;
-        group_info->hmap_node.hash = hash;
-        group_info->new_group_id = new_group_id;
-
-        hmap_insert(&ep->group_table->desired_groups,
-                    &group_info->hmap_node, group_info->hmap_node.hash);
-    } else {
-        ds_destroy(&ds);
+    table_id = ovn_extend_table_assign_id(ep->group_table, &ds);
+    ds_destroy(&ds);
+    if (table_id == EXT_TABLE_ID_INVALID) {
+        return;
     }
 
     /* Create an action to set the group. */
     og = ofpact_put_GROUP(ofpacts);
-    og->group_id = group_id;
+    og->group_id = table_id;
 }
 
 static void
@@ -1186,9 +1132,33 @@ parse_ARP(struct action_context *ctx)
 }
 
 static void
+parse_ICMP4(struct action_context *ctx)
+{
+    parse_nested_action(ctx, OVNACT_ICMP4, "ip4");
+}
+
+static void
+parse_ICMP6(struct action_context *ctx)
+{
+    parse_nested_action(ctx, OVNACT_ICMP6, "ip6");
+}
+
+static void
+parse_TCP_RESET(struct action_context *ctx)
+{
+    parse_nested_action(ctx, OVNACT_TCP_RESET, "tcp");
+}
+
+static void
 parse_ND_NA(struct action_context *ctx)
 {
     parse_nested_action(ctx, OVNACT_ND_NA, "nd_ns");
+}
+
+static void
+parse_ND_NA_ROUTER(struct action_context *ctx)
+{
+    parse_nested_action(ctx, OVNACT_ND_NA_ROUTER, "nd_ns");
 }
 
 static void
@@ -1219,9 +1189,33 @@ format_ARP(const struct ovnact_nest *nest, struct ds *s)
 }
 
 static void
+format_ICMP4(const struct ovnact_nest *nest, struct ds *s)
+{
+    format_nested_action(nest, "icmp4", s);
+}
+
+static void
+format_ICMP6(const struct ovnact_nest *nest, struct ds *s)
+{
+    format_nested_action(nest, "icmp6", s);
+}
+
+static void
+format_TCP_RESET(const struct ovnact_nest *nest, struct ds *s)
+{
+    format_nested_action(nest, "tcp_reset", s);
+}
+
+static void
 format_ND_NA(const struct ovnact_nest *nest, struct ds *s)
 {
     format_nested_action(nest, "nd_na", s);
+}
+
+static void
+format_ND_NA_ROUTER(const struct ovnact_nest *nest, struct ds *s)
+{
+    format_nested_action(nest, "nd_na_router", s);
 }
 
 static void
@@ -1237,10 +1231,10 @@ format_CLONE(const struct ovnact_nest *nest, struct ds *s)
 }
 
 static void
-encode_nested_neighbor_actions(const struct ovnact_nest *on,
-                               const struct ovnact_encode_params *ep,
-                               enum action_opcode opcode,
-                               struct ofpbuf *ofpacts)
+encode_nested_actions(const struct ovnact_nest *on,
+                      const struct ovnact_encode_params *ep,
+                      enum action_opcode opcode,
+                      struct ofpbuf *ofpacts)
 {
     /* Convert nested actions into ofpacts. */
     uint64_t inner_ofpacts_stub[1024 / 8];
@@ -1265,7 +1259,31 @@ encode_ARP(const struct ovnact_nest *on,
            const struct ovnact_encode_params *ep,
            struct ofpbuf *ofpacts)
 {
-    encode_nested_neighbor_actions(on, ep, ACTION_OPCODE_ARP, ofpacts);
+    encode_nested_actions(on, ep, ACTION_OPCODE_ARP, ofpacts);
+}
+
+static void
+encode_ICMP4(const struct ovnact_nest *on,
+             const struct ovnact_encode_params *ep,
+             struct ofpbuf *ofpacts)
+{
+    encode_nested_actions(on, ep, ACTION_OPCODE_ICMP, ofpacts);
+}
+
+static void
+encode_ICMP6(const struct ovnact_nest *on,
+             const struct ovnact_encode_params *ep,
+             struct ofpbuf *ofpacts)
+{
+    encode_nested_actions(on, ep, ACTION_OPCODE_ICMP, ofpacts);
+}
+
+static void
+encode_TCP_RESET(const struct ovnact_nest *on,
+                 const struct ovnact_encode_params *ep,
+                 struct ofpbuf *ofpacts)
+{
+    encode_nested_actions(on, ep, ACTION_OPCODE_TCP_RESET, ofpacts);
 }
 
 static void
@@ -1273,7 +1291,15 @@ encode_ND_NA(const struct ovnact_nest *on,
              const struct ovnact_encode_params *ep,
              struct ofpbuf *ofpacts)
 {
-    encode_nested_neighbor_actions(on, ep, ACTION_OPCODE_ND_NA, ofpacts);
+    encode_nested_actions(on, ep, ACTION_OPCODE_ND_NA, ofpacts);
+}
+
+static void
+encode_ND_NA_ROUTER(const struct ovnact_nest *on,
+             const struct ovnact_encode_params *ep,
+             struct ofpbuf *ofpacts)
+{
+    encode_nested_actions(on, ep, ACTION_OPCODE_ND_NA_ROUTER, ofpacts);
 }
 
 static void
@@ -1281,7 +1307,7 @@ encode_ND_NS(const struct ovnact_nest *on,
              const struct ovnact_encode_params *ep,
              struct ofpbuf *ofpacts)
 {
-    encode_nested_neighbor_actions(on, ep, ACTION_OPCODE_ND_NS, ofpacts);
+    encode_nested_actions(on, ep, ACTION_OPCODE_ND_NS, ofpacts);
 }
 
 static void
@@ -2139,6 +2165,87 @@ ovnact_log_free(struct ovnact_log *log)
     free(log->name);
 }
 
+static void
+parse_set_meter_action(struct action_context *ctx)
+{
+    uint64_t rate = 0;
+    uint64_t burst = 0;
+
+    lexer_force_match(ctx->lexer, LEX_T_LPAREN); /* Skip '('. */
+    if (ctx->lexer->token.type == LEX_T_INTEGER
+        && ctx->lexer->token.format == LEX_F_DECIMAL) {
+        rate = ntohll(ctx->lexer->token.value.integer);
+    }
+    lexer_get(ctx->lexer);
+    if (lexer_match(ctx->lexer, LEX_T_COMMA)) {  /* Skip ','. */
+        if (ctx->lexer->token.type == LEX_T_INTEGER
+            && ctx->lexer->token.format == LEX_F_DECIMAL) {
+            burst = ntohll(ctx->lexer->token.value.integer);
+        }
+        lexer_get(ctx->lexer);
+    }
+    lexer_force_match(ctx->lexer, LEX_T_RPAREN); /* Skip ')'. */
+
+    if (!rate) {
+        lexer_error(ctx->lexer,
+                    "Rate %"PRId64" for set_meter is not in valid.",
+                    rate);
+        return;
+    }
+
+    struct ovnact_set_meter *cl = ovnact_put_SET_METER(ctx->ovnacts);
+    cl->rate = rate;
+    cl->burst = burst;
+}
+
+static void
+format_SET_METER(const struct ovnact_set_meter *cl, struct ds *s)
+{
+    if (cl->burst) {
+        ds_put_format(s, "set_meter(%"PRId64", %"PRId64");",
+                      cl->rate, cl->burst);
+    } else {
+        ds_put_format(s, "set_meter(%"PRId64");", cl->rate);
+    }
+}
+
+static void
+encode_SET_METER(const struct ovnact_set_meter *cl,
+                 const struct ovnact_encode_params *ep,
+                 struct ofpbuf *ofpacts)
+{
+    uint32_t table_id;
+    struct ofpact_meter *om;
+
+    struct ds ds = DS_EMPTY_INITIALIZER;
+    if (cl->burst) {
+        ds_put_format(&ds,
+                      "kbps burst stats bands=type=drop rate=%"PRId64" "
+                      "burst_size=%"PRId64"",
+                      cl->rate, cl->burst);
+    } else {
+        ds_put_format(&ds, "kbps stats bands=type=drop rate=%"PRId64"",
+                      cl->rate);
+    }
+
+    table_id = ovn_extend_table_assign_id(ep->meter_table, &ds);
+    if (table_id == EXT_TABLE_ID_INVALID) {
+        ds_destroy(&ds);
+        return;
+    }
+
+    ds_destroy(&ds);
+
+    /* Create an action to set the meter. */
+    om = ofpact_put_METER(ofpacts);
+    om->meter_id = table_id;
+}
+
+static void
+ovnact_set_meter_free(struct ovnact_set_meter *ct OVS_UNUSED)
+{
+}
+
 /* Parses an assignment or exchange or put_dhcp_opts action. */
 static void
 parse_set_action(struct action_context *ctx)
@@ -2210,8 +2317,16 @@ parse_action(struct action_context *ctx)
         parse_CLONE(ctx);
     } else if (lexer_match_id(ctx->lexer, "arp")) {
         parse_ARP(ctx);
+    } else if (lexer_match_id(ctx->lexer, "icmp4")) {
+        parse_ICMP4(ctx);
+    } else if (lexer_match_id(ctx->lexer, "icmp6")) {
+        parse_ICMP6(ctx);
+    } else if (lexer_match_id(ctx->lexer, "tcp_reset")) {
+        parse_TCP_RESET(ctx);
     } else if (lexer_match_id(ctx->lexer, "nd_na")) {
         parse_ND_NA(ctx);
+    } else if (lexer_match_id(ctx->lexer, "nd_na_router")) {
+        parse_ND_NA_ROUTER(ctx);
     } else if (lexer_match_id(ctx->lexer, "nd_ns")) {
         parse_ND_NS(ctx);
     } else if (lexer_match_id(ctx->lexer, "get_arp")) {
@@ -2226,6 +2341,8 @@ parse_action(struct action_context *ctx)
         parse_SET_QUEUE(ctx);
     } else if (lexer_match_id(ctx->lexer, "log")) {
         parse_LOG(ctx);
+    } else if (lexer_match_id(ctx->lexer, "set_meter")) {
+        parse_set_meter_action(ctx);
     } else {
         lexer_syntax_error(ctx->lexer, "expecting action");
     }

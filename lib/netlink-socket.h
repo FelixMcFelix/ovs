@@ -213,6 +213,8 @@ void nl_sock_destroy(struct nl_sock *);
 int nl_sock_join_mcgroup(struct nl_sock *, unsigned int multicast_group);
 int nl_sock_leave_mcgroup(struct nl_sock *, unsigned int multicast_group);
 
+int nl_sock_listen_all_nsid(struct nl_sock *, bool enable);
+
 #ifdef _WIN32
 int nl_sock_subscribe_packets(struct nl_sock *sock);
 int nl_sock_unsubscribe_packets(struct nl_sock *sock);
@@ -221,7 +223,7 @@ int nl_sock_unsubscribe_packets(struct nl_sock *sock);
 int nl_sock_send(struct nl_sock *, const struct ofpbuf *, bool wait);
 int nl_sock_send_seq(struct nl_sock *, const struct ofpbuf *,
                      uint32_t nlmsg_seq, bool wait);
-int nl_sock_recv(struct nl_sock *, struct ofpbuf *, bool wait);
+int nl_sock_recv(struct nl_sock *, struct ofpbuf *, int *nsid, bool wait);
 
 int nl_sock_drain(struct nl_sock *);
 

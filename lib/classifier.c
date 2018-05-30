@@ -18,11 +18,11 @@
 #include "classifier.h"
 #include "classifier-private.h"
 #include <errno.h>
+#include <sys/types.h>
 #include <netinet/in.h>
 #include "byte-order.h"
 #include "openvswitch/dynamic-string.h"
 #include "odp-util.h"
-#include "openvswitch/ofp-util.h"
 #include "packets.h"
 #include "util.h"
 
@@ -495,8 +495,8 @@ classifier_count(const struct classifier *cls)
 static inline ovs_be32 minimatch_get_ports(const struct minimatch *match)
 {
     /* Could optimize to use the same map if needed for fast path. */
-    return MINIFLOW_GET_BE32(match->flow, tp_src)
-        & MINIFLOW_GET_BE32(&match->mask->masks, tp_src);
+    return (miniflow_get_ports(match->flow)
+            & miniflow_get_ports(&match->mask->masks));
 }
 
 /* Inserts 'rule' into 'cls' in 'version'.  Until 'rule' is removed from 'cls',
@@ -694,15 +694,16 @@ classifier_insert(struct classifier *cls, const struct cls_rule *rule,
     ovs_assert(!displaced_rule);
 }
 
-/* Removes 'rule' from 'cls'.  It is the caller's responsibility to destroy
- * 'rule' with cls_rule_destroy(), freeing the memory block in which 'rule'
- * resides, etc., as necessary.
+/* If 'rule' is in 'cls', removes 'rule' from 'cls' and returns true.  It is
+ * the caller's responsibility to destroy 'rule' with cls_rule_destroy(),
+ * freeing the memory block in which 'rule' resides, etc., as necessary.
  *
- * Does nothing if 'rule' has been already removed, or was never inserted.
+ * If 'rule' is not in any classifier, returns false without making any
+ * changes.
  *
- * Returns the removed rule, or NULL, if it was already removed.
+ * 'rule' must not be in some classifier other than 'cls'.
  */
-const struct cls_rule *
+bool
 classifier_remove(struct classifier *cls, const struct cls_rule *cls_rule)
 {
     struct cls_match *rule, *prev, *next, *head;
@@ -715,7 +716,7 @@ classifier_remove(struct classifier *cls, const struct cls_rule *cls_rule)
 
     rule = get_cls_match_protected(cls_rule);
     if (!rule) {
-        return NULL;
+        return false;
     }
     /* Mark as removed. */
     ovsrcu_set(&CONST_CAST(struct cls_rule *, cls_rule)->cls_match, NULL);
@@ -819,7 +820,14 @@ check_priority:
     ovsrcu_postpone(cls_match_free_cb, rule);
     cls->n_rules--;
 
-    return cls_rule;
+    return true;
+}
+
+void
+classifier_remove_assert(struct classifier *cls,
+                         const struct cls_rule *cls_rule)
+{
+    ovs_assert(classifier_remove(cls, cls_rule));
 }
 
 /* Prefix tree context.  Valid when 'lookup_done' is true.  Can skip all
@@ -1215,6 +1223,25 @@ classifier_find_match_exactly(const struct classifier *cls,
     return retval;
 }
 
+/* Finds and returns a rule in 'cls' with priority 'priority' and exactly the
+ * same matching criteria as 'target', and that is visible in 'version'.
+ * Returns a null pointer if 'cls' doesn't contain an exact match visible in
+ * 'version'. */
+const struct cls_rule *
+classifier_find_minimatch_exactly(const struct classifier *cls,
+                              const struct minimatch *target, int priority,
+                              ovs_version_t version)
+{
+    const struct cls_rule *retval;
+    struct cls_rule cr;
+
+    cls_rule_init_from_minimatch(&cr, target, priority);
+    retval = classifier_find_rule_exactly(cls, &cr, version);
+    cls_rule_destroy(&cr);
+
+    return retval;
+}
+
 /* Checks if 'target' would overlap any other rule in 'cls' in 'version'.  Two
  * rules are considered to overlap if both rules have the same priority and a
  * packet could match both, and if both rules are visible in the same version.
@@ -1493,7 +1520,7 @@ insert_subtable(struct classifier *cls, const struct minimask *mask)
     /* Ports trie. */
     ovsrcu_set_hidden(&subtable->ports_trie, NULL);
     *CONST_CAST(int *, &subtable->ports_mask_len)
-        = 32 - ctz32(ntohl(MINIFLOW_GET_BE32(&mask->masks, tp_src)));
+        = 32 - ctz32(ntohl(miniflow_get_ports(&mask->masks)));
 
     /* List of rules. */
     rculist_init(&subtable->rules_list);
@@ -1688,7 +1715,7 @@ find_match_wc(const struct cls_subtable *subtable, ovs_version_t version,
         unsigned int mbits;
         ovs_be32 value, plens, mask;
 
-        mask = MINIFLOW_GET_BE32(&subtable->mask.masks, tp_src);
+        mask = miniflow_get_ports(&subtable->mask.masks);
         value = ((OVS_FORCE ovs_be32 *)flow)[TP_PORTS_OFS32] & mask;
         mbits = trie_lookup_value(&subtable->ports_trie, &value, &plens, 32);
 

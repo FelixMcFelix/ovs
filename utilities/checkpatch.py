@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 # Copyright (c) 2016, 2017 Red Hat, Inc.
+# Copyright (c) 2018 Nicira, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,12 +21,66 @@ import os
 import re
 import sys
 
+try:
+    import enchant
+
+    extra_keywords = ['ovs', 'vswitch', 'vswitchd', 'ovs-vswitchd', 'netdev',
+                      'selinux', 'ovs-ctl', 'dpctl', 'ofctl', 'openvswitch',
+                      'dpdk', 'hugepage', 'hugepages', 'pmd', 'upcall',
+                      'vhost', 'rx', 'tx', 'vhostuser', 'openflow', 'qsort',
+                      'rxq', 'txq', 'perf', 'stats', 'struct', 'int',
+                      'char', 'bool', 'upcalls', 'nicira', 'bitmask', 'ipv4',
+                      'ipv6', 'tcp', 'tcp4', 'tcpv4', 'udp', 'udp4', 'udpv4',
+                      'icmp', 'icmp4', 'icmpv6', 'vlan', 'vxlan', 'cksum',
+                      'csum', 'checksum', 'ofproto', 'numa', 'mempool',
+                      'mempools', 'mbuf', 'mbufs', 'hmap', 'cmap', 'smap',
+                      'dhcpv4', 'dhcp', 'dhcpv6', 'opts', 'metadata',
+                      'geneve', 'mutex', 'netdev', 'netdevs', 'subtable',
+                      'virtio', 'qos', 'policer', 'datapath', 'tunctl',
+                      'attr', 'ethernet', 'ether', 'defrag', 'defragment',
+                      'loopback', 'sflow', 'acl', 'initializer', 'recirc',
+                      'xlated', 'unclosed', 'netlink', 'msec', 'usec',
+                      'nsec', 'ms', 'us', 'ns', 'kilobits', 'kbps',
+                      'kilobytes', 'megabytes', 'mbps', 'gigabytes', 'gbps',
+                      'megabits', 'gigabits', 'pkts', 'tuple', 'miniflow',
+                      'megaflow', 'conntrack', 'vlans', 'vxlans', 'arg',
+                      'tpid', 'xbundle', 'xbundles', 'mbundle', 'mbundles',
+                      'netflow', 'localnet', 'odp', 'pre', 'dst', 'dest',
+                      'src', 'ethertype', 'cvlan', 'ips', 'msg', 'msgs',
+                      'liveness', 'userspace', 'eventmask', 'datapaths',
+                      'slowpath', 'fastpath', 'multicast', 'unicast',
+                      'revalidation', 'namespace', 'qdisc', 'uuid', 'ofport',
+                      'subnet', 'revalidation', 'revalidator', 'revalidate',
+                      'l2', 'l3', 'l4', 'openssl', 'mtu', 'ifindex', 'enum',
+                      'enums', 'http', 'https', 'num', 'vconn', 'vconns',
+                      'conn', 'nat', 'memset', 'memcmp', 'strcmp',
+                      'strcasecmp', 'tc', 'ufid', 'api', 'ofpbuf', 'ofpbufs',
+                      'hashmaps', 'hashmap', 'deref', 'dereference', 'hw',
+                      'prio', 'sendmmsg', 'sendmsg', 'malloc', 'free', 'alloc',
+                      'pid', 'ppid', 'pgid', 'uid', 'gid', 'sid', 'utime',
+                      'stime', 'cutime', 'cstime', 'vsize', 'rss', 'rsslim',
+                      'whcan', 'gtime', 'eip', 'rip', 'cgtime', 'dbg', 'gw',
+                      'sbrec', 'bfd', 'sizeof', 'pmds', 'nic', 'nics', 'hwol',
+                      'encap', 'decap', 'tlv', 'tlvs', 'decapsulation', 'fd',
+                      'cacheline', 'xlate', 'skiplist', 'idl', 'comparator',
+                      'natting', 'alg', 'pasv', 'epasv', 'wildcard', 'nated',
+                      'amd64', 'x86_64', 'recirculation']
+
+    spell_check_dict = enchant.Dict("en_US")
+    for kw in extra_keywords:
+        spell_check_dict.add(kw)
+
+    no_spellcheck = False
+except:
+    no_spellcheck = True
+
 __errors = 0
 __warnings = 0
 print_file_name = None
 checking_file = False
 total_line = 0
 colors = False
+spellcheck_comments = False
 
 
 def get_color_end():
@@ -95,9 +150,13 @@ __regex_ends_with_bracket = \
     re.compile(r'[^\s]\) {(\s+/\*[\s\Sa-zA-Z0-9\.,\?\*/+-]*)?$')
 __regex_ptr_declaration_missing_whitespace = re.compile(r'[a-zA-Z0-9]\*[^*]')
 __regex_is_comment_line = re.compile(r'^\s*(/\*|\*\s)')
+__regex_has_comment = re.compile(r'.*(/\*|\*\s)')
 __regex_trailing_operator = re.compile(r'^[^ ]* [^ ]*[?:]$')
 __regex_conditional_else_bracing = re.compile(r'^\s*else\s*{?$')
 __regex_conditional_else_bracing2 = re.compile(r'^\s*}\selse\s*$')
+__regex_has_xxx_mark = re.compile(r'.*xxx.*', re.IGNORECASE)
+__regex_added_doc_rst = re.compile(
+                    r'\ndiff .*Documentation/.*rst\nnew file mode')
 
 skip_leading_whitespace_check = False
 skip_trailing_whitespace_check = False
@@ -108,13 +167,13 @@ skip_signoff_check = False
 # name, as they may have legitimate reasons to have longer lines.
 #
 # Python isn't checked as flake8 performs these checks during build.
-line_length_blacklist = ['.am', '.at', 'etc', '.in', '.m4', '.mk', '.patch',
-                         '.py']
+line_length_blacklist = re.compile(
+    r'\.(am|at|etc|in|m4|mk|patch|py)$|debian/rules')
 
 # Don't enforce a requirement that leading whitespace be all spaces on
 # files that include these characters in their name, since these kinds
 # of files need lines with leading tabs.
-leading_whitespace_blacklist = ['.mk', '.am', '.at']
+leading_whitespace_blacklist = re.compile(r'\.(mk|am|at)$|debian/rules')
 
 
 def is_subtracted_line(line):
@@ -205,6 +264,8 @@ def pointer_whitespace_check(line):
 def line_length_check(line):
     """Return TRUE if the line length is too long"""
     if len(line) > 79:
+        print_warning("Line is %d characters long (recommended limit is 79)"
+                      % len(line))
         return True
     return False
 
@@ -214,21 +275,198 @@ def is_comment_line(line):
     return __regex_is_comment_line.match(line) is not None
 
 
+def has_comment(line):
+    """Returns TRUE if the current line contains a comment or is part of
+       a block comment."""
+    return __regex_has_comment.match(line) is not None
+
+
 def trailing_operator(line):
     """Returns TRUE if the current line ends with an operatorsuch as ? or :"""
     return __regex_trailing_operator.match(line) is not None
 
 
+def has_xxx_mark(line):
+    """Returns TRUE if the current line contains 'xxx'."""
+    return __regex_has_xxx_mark.match(line) is not None
+
+
+def filter_comments(current_line, keep=False):
+    """remove all of the c-style comments in a line"""
+    STATE_NORMAL = 0
+    STATE_COMMENT_SLASH = 1
+    STATE_COMMENT_CONTENTS = 3
+    STATE_COMMENT_END_SLASH = 4
+
+    state = STATE_NORMAL
+    sanitized_line = ''
+    check_state = STATE_NORMAL
+    only_whitespace = True
+
+    if keep:
+        check_state = STATE_COMMENT_CONTENTS
+
+    for c in current_line:
+        if c == '/':
+            if state == STATE_NORMAL:
+                state = STATE_COMMENT_SLASH
+            elif state == STATE_COMMENT_SLASH:
+                # This is for c++ style comments.  We will warn later
+                return sanitized_line[:1]
+            elif state == STATE_COMMENT_END_SLASH:
+                c = ''
+                state = STATE_NORMAL
+        elif c == '*':
+            if only_whitespace:
+                # just assume this is a continuation from the previous line
+                # as a comment
+                state = STATE_COMMENT_END_SLASH
+            elif state == STATE_COMMENT_SLASH:
+                state = STATE_COMMENT_CONTENTS
+                sanitized_line = sanitized_line[:-1]
+            elif state == STATE_COMMENT_CONTENTS:
+                state = STATE_COMMENT_END_SLASH
+        elif state == STATE_COMMENT_END_SLASH:
+            # Need to re-introduce the star from the previous state, since
+            # it may have been clipped by the state check below.
+            c = '*' + c
+            state = STATE_COMMENT_CONTENTS
+        elif state == STATE_COMMENT_SLASH:
+            # Need to re-introduce the slash from the previous state, since
+            # it may have been clipped by the state check below.
+            c = '/' + c
+            state = STATE_NORMAL
+
+        if state != check_state:
+            c = ''
+
+        if not c.isspace():
+            only_whitespace = False
+
+        sanitized_line += c
+
+    return sanitized_line
+
+
+def check_comment_spelling(line):
+    if no_spellcheck or not spellcheck_comments:
+        return False
+
+    comment_words = filter_comments(line, True).replace(':', ' ').split(' ')
+    for word in comment_words:
+        skip = False
+        strword = re.subn(r'\W+', '', word)[0].replace(',', '')
+        if len(strword) and not spell_check_dict.check(strword.lower()):
+            if any([check_char in word
+                    for check_char in ['=', '(', '-', '_', '/', '\'']]):
+                skip = True
+
+            # special case the '.'
+            if '.' in word and not word.endswith('.'):
+                skip = True
+
+            # skip proper nouns and references to macros
+            if strword.isupper() or (strword[0].isupper() and
+                                     strword[1:].islower()):
+                skip = True
+
+            # skip words that start with numbers
+            if strword.startswith(tuple('0123456789')):
+                skip = True
+
+            if not skip:
+                print_warning("Check for spelling mistakes (e.g. \"%s\")"
+                              % strword)
+                return True
+
+    return False
+
+
+def __check_doc_is_listed(text, doctype, docdir, docfile):
+    if doctype == 'rst':
+        beginre = re.compile(r'\+\+\+.*{}/index.rst'.format(docdir))
+        docre = re.compile(r'\n\+.*{}'.format(docfile.replace('.rst', '')))
+    elif doctype == 'automake':
+        beginre = re.compile(r'\+\+\+.*Documentation/automake.mk')
+        docre = re.compile(r'\n\+\t{}/{}'.format(docdir, docfile))
+    else:
+        raise NotImplementedError("Invalid doctype: {}".format(doctype))
+
+    res = beginre.search(text)
+    if res is None:
+        return True
+
+    hunkstart = res.span()[1]
+    hunkre = re.compile(r'\n(---|\+\+\+) (\S+)')
+    res = hunkre.search(text[hunkstart:])
+    if res is None:
+        hunkend = len(text)
+    else:
+        hunkend = hunkstart + res.span()[0]
+
+    hunk = text[hunkstart:hunkend]
+    # find if the file is being added.
+    if docre.search(hunk) is not None:
+        return False
+
+    return True
+
+
+def __check_new_docs(text, doctype):
+    """Check if the documentation is listed properly. If doctype is 'rst' then
+       the index.rst is checked. If the doctype is 'automake' then automake.mk
+       is checked. Returns TRUE if the new file is not listed."""
+    failed = False
+    new_docs = __regex_added_doc_rst.findall(text)
+    for doc in new_docs:
+        docpathname = doc.split(' ')[2]
+        gitdocdir, docfile = os.path.split(docpathname.rstrip('\n'))
+        if docfile == "index.rst":
+            continue
+
+        if gitdocdir.startswith('a/'):
+            docdir = gitdocdir.replace('a/', '', 1)
+        else:
+            docdir = gitdocdir
+
+        if __check_doc_is_listed(text, doctype, docdir, docfile):
+            if doctype == 'rst':
+                print_warning("New doc {} not listed in {}/index.rst".format(
+                              docfile, docdir))
+            elif doctype == 'automake':
+                print_warning("New doc {} not listed in "
+                              "Documentation/automake.mk".format(docfile))
+            else:
+                raise NotImplementedError("Invalid doctype: {}".format(
+                                          doctype))
+
+            failed = True
+
+    return failed
+
+
+def check_doc_docs_automake(text):
+    return __check_new_docs(text, 'automake')
+
+
+def check_new_docs_index(text):
+    return __check_new_docs(text, 'rst')
+
+
+file_checks = [
+        {'regex': __regex_added_doc_rst,
+         'check': check_new_docs_index},
+        {'regex': __regex_added_doc_rst,
+         'check': check_doc_docs_automake}
+]
+
 checks = [
     {'regex': None,
-     'match_name':
-     lambda x: not any([fmt in x for fmt in line_length_blacklist]),
-     'check': lambda x: line_length_check(x),
-     'print': lambda: print_warning("Line length is >79-characters long")},
+     'match_name': lambda x: not line_length_blacklist.search(x),
+     'check': lambda x: line_length_check(x)},
 
     {'regex': None,
-     'match_name':
-     lambda x: not any([fmt in x for fmt in leading_whitespace_blacklist]),
+     'match_name': lambda x: not leading_whitespace_blacklist.search(x),
      'check': lambda x: not leading_whitespace_is_spaces(x),
      'print': lambda: print_warning("Line has non-spaces leading whitespace")},
 
@@ -257,6 +495,15 @@ checks = [
      'check': lambda x: trailing_operator(x),
      'print':
      lambda: print_error("Line has '?' or ':' operator at end of line")},
+
+    {'regex': '(\.c|\.h)(\.in)?$', 'match_name': None,
+     'prereq': lambda x: has_comment(x),
+     'check': lambda x: has_xxx_mark(x),
+     'print': lambda: print_warning("Comment with 'xxx' marker")},
+
+    {'regex': '(\.c|\.h)(\.in)?$', 'match_name': None,
+     'prereq': lambda x: has_comment(x),
+     'check': lambda x: check_comment_spelling(x)},
 ]
 
 
@@ -296,15 +543,16 @@ checks += [
 
 def regex_operator_factory(operator):
     regex = re.compile(r'^[^#][^"\']*[^ "]%s[^ "\'][^"]*' % operator)
-    return lambda x: regex.search(x) is not None
+    return lambda x: regex.search(filter_comments(x)) is not None
 
 
 infix_operators = \
-    [re.escape(op) for op in ['/', '%', '<<', '>>', '<=', '>=', '==', '!=',
+    [re.escape(op) for op in ['%', '<<', '>>', '<=', '>=', '==', '!=',
             '^', '|', '&&', '||', '?:', '=', '+=', '-=', '*=', '/=', '%=',
             '&=', '^=', '|=', '<<=', '>>=']] \
     + ['[^<" ]<[^=" ]', '[^->" ]>[^=" ]', '[^ !()/"]\*[^/]', '[^ !&()"]&',
-       '[^" +(]\+[^"+;]', '[^" -(]-[^"->;]', '[^" <>=!^|+\-*/%&]=[^"=]']
+       '[^" +(]\+[^"+;]', '[^" -(]-[^"->;]', '[^" <>=!^|+\-*/%&]=[^"=]',
+       '[^* ]/[^* ]']
 checks += [
     {'regex': '(\.c|\.h)(\.in)?$', 'match_name': None,
      'prereq': lambda x: not is_comment_line(x),
@@ -338,7 +586,8 @@ def run_checks(current_file, line, lineno):
         if 'prereq' in check and not check['prereq'](line):
             continue
         if check['check'](line):
-            check['print']()
+            if 'print' in check:
+                check['print']()
             print_line = True
 
     if print_line:
@@ -349,8 +598,20 @@ def run_checks(current_file, line, lineno):
         print("%s\n" % line)
 
 
+def run_file_checks(text):
+    """Runs the various checks for the text."""
+    for check in file_checks:
+        if check['regex'].search(text) is not None:
+            check['check'](text)
+
+
 def ovs_checkpatch_parse(text, filename):
     global print_file_name, total_line, checking_file
+
+    PARSE_STATE_HEADING = 0
+    PARSE_STATE_DIFF_HEADER = 1
+    PARSE_STATE_CHANGE_BODY = 2
+
     lineno = 0
     signatures = []
     co_authors = []
@@ -380,18 +641,18 @@ def ovs_checkpatch_parse(text, filename):
             continue
 
         if checking_file:
-            parse = 2
+            parse = PARSE_STATE_CHANGE_BODY
 
-        if parse == 1:
+        if parse == PARSE_STATE_DIFF_HEADER:
             match = hunks.match(line)
             if match:
-                parse = parse + 1
+                parse = PARSE_STATE_CHANGE_BODY
                 current_file = match.group(2)[2:]
                 print_file_name = current_file
             continue
-        elif parse == 0:
+        elif parse == PARSE_STATE_HEADING:
             if scissors.match(line):
-                parse = parse + 1
+                parse = PARSE_STATE_DIFF_HEADER
                 if not skip_signoff_check:
                     if len(signatures) == 0:
                         print_error("No signatures found.")
@@ -410,7 +671,7 @@ def ovs_checkpatch_parse(text, filename):
                 print_error(
                     "Remove Gerrit Change-Id's before submitting upstream.")
                 print("%d: %s\n" % (lineno, line))
-        elif parse == 2:
+        elif parse == PARSE_STATE_CHANGE_BODY:
             newfile = hunks.match(line)
             if newfile:
                 current_file = newfile.group(2)[2:]
@@ -436,6 +697,8 @@ def ovs_checkpatch_parse(text, filename):
             if current_file.startswith('include/linux'):
                 continue
             run_checks(current_file, cmp_line, lineno)
+
+    run_file_checks(text)
     if __errors or __warnings:
         return -1
     return 0
@@ -457,6 +720,7 @@ Check options:
 -b|--skip-block-whitespace     Skips the if/while/for whitespace tests
 -l|--skip-leading-whitespace   Skips the leading whitespace test
 -s|--skip-signoff-lines        Tolerate missing Signed-off-by line
+-S|--spellcheck-comments       Check C comments for possible spelling mistakes
 -t|--skip-trailing-whitespace  Skips the trailing whitespace test"""
           % sys.argv[0])
 
@@ -504,13 +768,14 @@ if __name__ == '__main__':
                                           sys.argv[1:])
         n_patches = int(numeric_options[-1][1:]) if numeric_options else 0
 
-        optlist, args = getopt.getopt(args, 'bhlstf',
+        optlist, args = getopt.getopt(args, 'bhlstfS',
                                       ["check-file",
                                        "help",
                                        "skip-block-whitespace",
                                        "skip-leading-whitespace",
                                        "skip-signoff-lines",
-                                       "skip-trailing-whitespace"])
+                                       "skip-trailing-whitespace",
+                                       "spellcheck-comments"])
     except:
         print("Unknown option encountered. Please rerun with -h for help.")
         sys.exit(-1)
@@ -529,6 +794,12 @@ if __name__ == '__main__':
             skip_trailing_whitespace_check = True
         elif o in ("-f", "--check-file"):
             checking_file = True
+        elif o in ("-S", "--spellcheck-comments"):
+            if no_spellcheck:
+                print("WARNING: The enchant library isn't availble.")
+                print("         Please install python enchant.")
+            else:
+                spellcheck_comments = True
         else:
             print("Unknown option '%s'" % o)
             sys.exit(-1)

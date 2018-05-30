@@ -36,6 +36,7 @@
 #include "openvswitch/dynamic-string.h"
 #include "openvswitch/json.h"
 #include "openvswitch/ofp-actions.h"
+#include "openvswitch/ofp-flow.h"
 #include "openvswitch/ofp-print.h"
 #include "openvswitch/shash.h"
 #include "openvswitch/vconn.h"
@@ -80,6 +81,9 @@ static struct ovsdb_idl *the_idl;
 static struct ovsdb_idl_txn *the_idl_txn;
 OVS_NO_RETURN static void sbctl_exit(int status);
 
+/* --leader-only, --no-leader-only: Only accept the leader in a cluster. */
+static int leader_only = true;
+
 static void sbctl_cmd_init(void);
 OVS_NO_RETURN static void usage(void);
 static void parse_options(int argc, char *argv[], struct shash *local_options);
@@ -96,7 +100,6 @@ main(int argc, char *argv[])
     struct shash local_options;
     unsigned int seqno;
     size_t n_commands;
-    char *args;
 
     set_program_name(argv[0]);
     fatal_ignore_sigpipe();
@@ -105,22 +108,22 @@ main(int argc, char *argv[])
 
     sbctl_cmd_init();
 
-    /* Log our arguments.  This is often valuable for debugging systems. */
-    args = process_escape_args(argv);
-    VLOG(ctl_might_write_to_db(argv) ? VLL_INFO : VLL_DBG, "Called as %s", args);
-
     /* Parse command line. */
+    char *args = process_escape_args(argv);
     shash_init(&local_options);
     parse_options(argc, argv, &local_options);
     commands = ctl_parse_commands(argc - optind, argv + optind, &local_options,
                                   &n_commands);
+    VLOG(ctl_might_write_to_db(commands, n_commands) ? VLL_INFO : VLL_DBG,
+         "Called as %s", args);
 
     if (timeout) {
         time_alarm(timeout);
     }
 
     /* Initialize IDL. */
-    idl = the_idl = ovsdb_idl_create(db, &sbrec_idl_class, false, false);
+    idl = the_idl = ovsdb_idl_create(db, &sbrec_idl_class, false, true);
+    ovsdb_idl_set_leader_only(idl, leader_only);
     run_prerequisites(commands, n_commands, idl);
 
     /* Execute the commands.
@@ -165,6 +168,7 @@ parse_options(int argc, char *argv[], struct shash *local_options)
         OPT_LOCAL,
         OPT_COMMANDS,
         OPT_OPTIONS,
+        OPT_BOOTSTRAP_CA_CERT,
         VLOG_OPTION_ENUMS,
         TABLE_OPTION_ENUMS,
         SSL_OPTION_ENUMS,
@@ -178,9 +182,12 @@ parse_options(int argc, char *argv[], struct shash *local_options)
         {"help", no_argument, NULL, 'h'},
         {"commands", no_argument, NULL, OPT_COMMANDS},
         {"options", no_argument, NULL, OPT_OPTIONS},
+        {"leader-only", no_argument, &leader_only, true},
+        {"no-leader-only", no_argument, &leader_only, false},
         {"version", no_argument, NULL, 'V'},
         VLOG_LONG_OPTIONS,
         STREAM_SSL_LONG_OPTIONS,
+        {"bootstrap-ca-cert", required_argument, NULL, OPT_BOOTSTRAP_CA_CERT},
         TABLE_LONG_OPTIONS,
         {NULL, 0, NULL, 0},
     };
@@ -268,11 +275,18 @@ parse_options(int argc, char *argv[], struct shash *local_options)
         TABLE_OPTION_HANDLERS(&table_style)
         STREAM_SSL_OPTION_HANDLERS
 
+        case OPT_BOOTSTRAP_CA_CERT:
+            stream_ssl_set_ca_cert_file(optarg, true);
+            break;
+
         case '?':
             exit(EXIT_FAILURE);
 
         default:
             abort();
+
+        case 0:
+            break;
         }
     }
     free(short_options);
@@ -316,6 +330,7 @@ Logical flow commands:\n\
 Connection commands:\n\
   get-connection             print the connections\n\
   del-connection             delete the connections\n\
+  [--inactivity-probe=MSECS]\n\
   set-connection TARGET...   set the list of connections to TARGET...\n\
 \n\
 SSL commands:\n\
@@ -325,15 +340,17 @@ SSL commands:\n\
 set the SSL configuration\n\
 \n\
 %s\
+%s\
 \n\
 Options:\n\
   --db=DATABASE               connect to DATABASE\n\
                               (default: %s)\n\
+  --no-leader-only            accept any cluster member, not just the leader\n\
   -t, --timeout=SECS          wait at most SECS seconds\n\
   --dry-run                   do not commit changes to database\n\
   --oneline                   print exactly one line of output per command\n",
            program_name, program_name, ctl_get_db_cmd_usage(),
-           default_sb_db());
+           ctl_list_db_tables_usage(), default_sb_db());
     table_usage();
     vlog_usage();
     printf("\
@@ -342,7 +359,7 @@ Options:\n\
 Other options:\n\
   -h, --help                  display this help message\n\
   -V, --version               display version information\n");
-    stream_usage("database", true, true, false);
+    stream_usage("database", true, true, true);
     exit(EXIT_SUCCESS);
 }
 
@@ -796,7 +813,7 @@ sbctl_dump_openflow(struct vconn *vconn, const struct uuid *uuid, bool stats)
 
             ds_clear(&s);
             if (stats) {
-                ofp_print_flow_stats(&s, fs, NULL, true);
+                ofputil_flow_stats_format(&s, fs, NULL, NULL, true);
             } else {
                 ds_put_format(&s, "%stable=%s%"PRIu8" ",
                               colors.special, colors.end, fs->table_id);
@@ -806,7 +823,8 @@ sbctl_dump_openflow(struct vconn *vconn, const struct uuid *uuid, bool stats)
                 }
 
                 ds_put_format(&s, "%sactions=%s", colors.actions, colors.end);
-                ofpacts_format(fs->ofpacts, fs->ofpacts_len, NULL, &s);
+                struct ofpact_format_params fp = { .s = &s };
+                ofpacts_format(fs->ofpacts, fs->ofpacts_len, &fp);
             }
             printf("    %s\n", ds_cstr(&s));
         }
@@ -951,6 +969,7 @@ pre_connection(struct ctl_context *ctx)
     ovsdb_idl_add_column(ctx->idl, &sbrec_connection_col_target);
     ovsdb_idl_add_column(ctx->idl, &sbrec_connection_col_read_only);
     ovsdb_idl_add_column(ctx->idl, &sbrec_connection_col_role);
+    ovsdb_idl_add_column(ctx->idl, &sbrec_connection_col_inactivity_probe);
 }
 
 static void
@@ -1013,6 +1032,8 @@ insert_connections(struct ctl_context *ctx, char *targets[], size_t n)
     size_t i, conns=0;
     bool read_only = false;
     char *role = "";
+    const char *inactivity_probe = shash_find_data(&ctx->options,
+                                                   "--inactivity-probe");
 
     /* Insert each connection in a new row in Connection table. */
     connections = xmalloc(n * sizeof *connections);
@@ -1035,6 +1056,11 @@ insert_connections(struct ctl_context *ctx, char *targets[], size_t n)
         sbrec_connection_set_target(connections[conns], targets[i]);
         sbrec_connection_set_read_only(connections[conns], read_only);
         sbrec_connection_set_role(connections[conns], role);
+        if (inactivity_probe) {
+            int64_t msecs = atoll(inactivity_probe);
+            sbrec_connection_set_inactivity_probe(connections[conns],
+                                                  &msecs, 1);
+        }
         conns++;
     }
 
@@ -1424,7 +1450,7 @@ static const struct ctl_command_syntax sbctl_commands[] = {
     {"get-connection", 0, 0, "", pre_connection, cmd_get_connection, NULL, "", RO},
     {"del-connection", 0, 0, "", pre_connection, cmd_del_connection, NULL, "", RW},
     {"set-connection", 1, INT_MAX, "TARGET...", pre_connection, cmd_set_connection,
-     NULL, "", RW},
+     NULL, "--inactivity-probe=", RW},
 
     /* SSL commands. */
     {"get-ssl", 0, 0, "", pre_cmd_get_ssl, cmd_get_ssl, NULL, "", RO},
@@ -1440,6 +1466,7 @@ static const struct ctl_command_syntax sbctl_commands[] = {
 static void
 sbctl_cmd_init(void)
 {
-    ctl_init(sbrec_table_classes, tables, cmd_show_tables, sbctl_exit);
+    ctl_init(&sbrec_idl_class, sbrec_table_classes, tables,
+             cmd_show_tables, sbctl_exit);
     ctl_register_commands(sbctl_commands);
 }

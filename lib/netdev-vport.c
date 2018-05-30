@@ -23,6 +23,7 @@
 #include <fcntl.h>
 #include <sys/socket.h>
 #include <net/if.h>
+#include <sys/types.h>
 #include <netinet/in.h>
 #include <netinet/ip6.h>
 #include <sys/ioctl.h>
@@ -427,7 +428,7 @@ set_tunnel_config(struct netdev *dev_, const struct smap *args, char **errp)
     const char *name = netdev_get_name(dev_);
     const char *type = netdev_get_type(dev_);
     struct ds errors = DS_EMPTY_INITIALIZER;
-    bool needs_dst_port, has_csum;
+    bool needs_dst_port, has_csum, has_seq;
     uint16_t dst_proto = 0, src_proto = 0;
     struct netdev_tunnel_config tnl_cfg;
     struct smap_node *node;
@@ -435,6 +436,7 @@ set_tunnel_config(struct netdev *dev_, const struct smap *args, char **errp)
 
     has_csum = strstr(type, "gre") || strstr(type, "geneve") ||
                strstr(type, "stt") || strstr(type, "vxlan");
+    has_seq = strstr(type, "gre");
     memset(&tnl_cfg, 0, sizeof tnl_cfg);
 
     /* Add a default destination port for tunnel ports if none specified. */
@@ -505,6 +507,10 @@ set_tunnel_config(struct netdev *dev_, const struct smap *args, char **errp)
             if (!strcmp(node->value, "true")) {
                 tnl_cfg.csum = true;
             }
+        } else if (!strcmp(node->key, "seq") && has_seq) {
+            if (!strcmp(node->value, "true")) {
+                tnl_cfg.set_seq = true;
+            }
         } else if (!strcmp(node->key, "df_default")) {
             if (!strcmp(node->value, "false")) {
                 tnl_cfg.dont_fragment = false;
@@ -538,6 +544,65 @@ set_tunnel_config(struct netdev *dev_, const struct smap *args, char **errp)
         } else if (!strcmp(node->key, "egress_pkt_mark")) {
             tnl_cfg.egress_pkt_mark = strtoul(node->value, NULL, 10);
             tnl_cfg.set_egress_pkt_mark = true;
+        } else if (!strcmp(node->key, "erspan_idx")) {
+            if (!strcmp(node->value, "flow")) {
+                tnl_cfg.erspan_idx_flow = true;
+            } else {
+                tnl_cfg.erspan_idx_flow = false;
+                tnl_cfg.erspan_idx = strtol(node->value, NULL, 16);
+
+                if (tnl_cfg.erspan_idx & ~ERSPAN_IDX_MASK) {
+                    ds_put_format(&errors, "%s: invalid erspan index: %s\n",
+                                  name, node->value);
+                    err = EINVAL;
+                    goto out;
+                }
+            }
+        } else if (!strcmp(node->key, "erspan_ver")) {
+            if (!strcmp(node->value, "flow")) {
+                tnl_cfg.erspan_ver_flow = true;
+                tnl_cfg.erspan_idx_flow = true;
+                tnl_cfg.erspan_dir_flow = true;
+                tnl_cfg.erspan_hwid_flow = true;
+            } else {
+                tnl_cfg.erspan_ver_flow = false;
+                tnl_cfg.erspan_ver = atoi(node->value);
+
+                if (tnl_cfg.erspan_ver != 1 && tnl_cfg.erspan_ver != 2) {
+                    ds_put_format(&errors, "%s: invalid erspan version: %s\n",
+                                  name, node->value);
+                    err = EINVAL;
+                    goto out;
+                }
+            }
+        } else if (!strcmp(node->key, "erspan_dir")) {
+            if (!strcmp(node->value, "flow")) {
+                tnl_cfg.erspan_dir_flow = true;
+            } else {
+                tnl_cfg.erspan_dir_flow = false;
+                tnl_cfg.erspan_dir = atoi(node->value);
+
+                if (tnl_cfg.erspan_dir != 0 && tnl_cfg.erspan_dir != 1) {
+                    ds_put_format(&errors, "%s: invalid erspan direction: %s\n",
+                                  name, node->value);
+                    err = EINVAL;
+                    goto out;
+                }
+            }
+        } else if (!strcmp(node->key, "erspan_hwid")) {
+            if (!strcmp(node->value, "flow")) {
+                tnl_cfg.erspan_hwid_flow = true;
+            } else {
+                tnl_cfg.erspan_hwid_flow = false;
+                tnl_cfg.erspan_hwid = strtol(node->value, NULL, 16);
+
+                if (tnl_cfg.erspan_hwid & ~(ERSPAN_HWID_MASK >> 4)) {
+                    ds_put_format(&errors, "%s: invalid erspan hardware ID: %s\n",
+                                  name, node->value);
+                    err = EINVAL;
+                    goto out;
+                }
+            }
         } else {
             ds_put_format(&errors, "%s: unknown %s argument '%s'\n", name,
                           type, node->key);
@@ -708,6 +773,10 @@ get_tunnel_config(const struct netdev *dev, struct smap *args)
         smap_add(args, "csum", "true");
     }
 
+    if (tnl_cfg.set_seq) {
+        smap_add(args, "seq", "true");
+    }
+
     enum tunnel_layers layers = tunnel_supported_layers(type, &tnl_cfg);
     if (tnl_cfg.pt_mode != default_pt_mode(layers)) {
         smap_add(args, "packet_type",
@@ -724,6 +793,43 @@ get_tunnel_config(const struct netdev *dev, struct smap *args)
         smap_add_format(args, "egress_pkt_mark",
                         "%"PRIu32, tnl_cfg.egress_pkt_mark);
     }
+
+    if (!strcmp("erspan", type) || !strcmp("ip6erspan", type)) {
+        if (tnl_cfg.erspan_ver_flow) {
+            /* since version number is not determined,
+             * assume print all other as flow
+             */
+            smap_add(args, "erspan_ver", "flow");
+            smap_add(args, "erspan_idx", "flow");
+            smap_add(args, "erspan_dir", "flow");
+            smap_add(args, "erspan_hwid", "flow");
+        } else {
+            smap_add_format(args, "erspan_ver", "%d", tnl_cfg.erspan_ver);
+
+            if (tnl_cfg.erspan_ver == 1) {
+                if (tnl_cfg.erspan_idx_flow) {
+                    smap_add(args, "erspan_idx", "flow");
+                } else {
+                    smap_add_format(args, "erspan_idx", "0x%x",
+                                    tnl_cfg.erspan_idx);
+                }
+            } else if (tnl_cfg.erspan_ver == 2) {
+                if (tnl_cfg.erspan_dir_flow) {
+                    smap_add(args, "erspan_dir", "flow");
+                } else {
+                    smap_add_format(args, "erspan_dir", "%d",
+                                    tnl_cfg.erspan_dir);
+                }
+                if (tnl_cfg.erspan_hwid_flow) {
+                    smap_add(args, "erspan_hwid", "flow");
+                } else {
+                    smap_add_format(args, "erspan_hwid", "0x%x",
+                                    tnl_cfg.erspan_hwid);
+                }
+            }
+        }
+    }
+
     return 0;
 }
 
@@ -906,6 +1012,7 @@ netdev_vport_get_ifindex(const struct netdev *netdev_)
     NULL,                       /* get_carrier_resets */    \
     NULL,                       /* get_miimon */            \
     get_stats,                                              \
+    NULL,                       /* get_custom_stats */      \
                                                             \
     NULL,                       /* get_features */          \
     NULL,                       /* set_advertisements */    \
@@ -966,7 +1073,7 @@ netdev_vport_tunnel_register(void)
         TUNNEL_CLASS("geneve", "genev_sys", netdev_geneve_build_header,
                                             netdev_tnl_push_udp_header,
                                             netdev_geneve_pop_header,
-                                            NULL),
+                                            NETDEV_VPORT_GET_IFINDEX),
         TUNNEL_CLASS("gre", "gre_sys", netdev_gre_build_header,
                                        netdev_gre_push_header,
                                        netdev_gre_pop_header,
@@ -977,6 +1084,18 @@ netdev_vport_tunnel_register(void)
                                            NETDEV_VPORT_GET_IFINDEX),
         TUNNEL_CLASS("lisp", "lisp_sys", NULL, NULL, NULL, NULL),
         TUNNEL_CLASS("stt", "stt_sys", NULL, NULL, NULL, NULL),
+        TUNNEL_CLASS("erspan", "erspan_sys", netdev_erspan_build_header,
+                                             netdev_erspan_push_header,
+                                             netdev_erspan_pop_header,
+                                             NULL),
+        TUNNEL_CLASS("ip6erspan", "ip6erspan_sys", netdev_erspan_build_header,
+                                                   netdev_erspan_push_header,
+                                                   netdev_erspan_pop_header,
+                                                   NULL),
+        TUNNEL_CLASS("ip6gre", "ip6gre_sys", netdev_gre_build_header,
+                                             netdev_gre_push_header,
+                                             netdev_gre_pop_header,
+                                             NULL),
     };
     static struct ovsthread_once once = OVSTHREAD_ONCE_INITIALIZER;
 

@@ -460,7 +460,7 @@ CalculateChecksumNB(const PNET_BUFFER nb,
 
     firstMdlLen = MIN(firstMdlLen, packetLen);
     if (offset < firstMdlLen) {
-        src = (PUCHAR) MmGetSystemAddressForMdlSafe(currentMdl, LowPagePriority);
+        src = (PUCHAR)OvsGetMdlWithLowPriority(currentMdl);
         if (!src) {
             return 0;
         }
@@ -485,7 +485,7 @@ CalculateChecksumNB(const PNET_BUFFER nb,
             mdlLen = MIN(mdlLen, packetLen);
         }
 
-        src = (PUCHAR)MmGetSystemAddressForMdlSafe(currentMdl, LowPagePriority);
+        src = (PUCHAR)OvsGetMdlWithLowPriority(currentMdl);
         if (!src) {
             return 0;
         }
@@ -504,7 +504,7 @@ CalculateChecksumNB(const PNET_BUFFER nb,
         csumDataLen -= csLen;
         currentMdl = NDIS_MDL_LINKAGE(currentMdl);
         if (csumDataLen && currentMdl) {
-            src = MmGetSystemAddressForMdlSafe(currentMdl, LowPagePriority);
+            src = OvsGetMdlWithLowPriority(currentMdl);
             if (!src) {
                 return 0;
             }
@@ -612,7 +612,8 @@ OvsCalculateUDPChecksum(PNET_BUFFER_LIST curNbl,
                         PNET_BUFFER curNb,
                         IPHdr *ipHdr,
                         UDPHdr *udpHdr,
-                        UINT32 packetLength)
+                        UINT32 packetLength,
+                        POVS_PACKET_HDR_INFO layers)
 {
     NDIS_TCP_IP_CHECKSUM_NET_BUFFER_LIST_INFO csumInfo;
     UINT16 checkSum;
@@ -625,16 +626,17 @@ OvsCalculateUDPChecksum(PNET_BUFFER_LIST curNbl,
 
         checkSum = udpHdr->check;
 
-        l4Payload = packetLength - sizeof(EthHdr) - ipHdr->ihl * 4;
+        l4Payload = packetLength - layers->l4Offset;
         udpHdr->check = 0;
         udpHdr->check =
             IPPseudoChecksum((UINT32 *)&ipHdr->saddr,
                              (UINT32 *)&ipHdr->daddr,
                              IPPROTO_UDP, (UINT16)l4Payload);
         udpHdr->check = CalculateChecksumNB(curNb, (UINT16)l4Payload,
-                                            sizeof(EthHdr) + ipHdr->ihl * 4);
+                                            layers->l4Offset);
         if (checkSum != udpHdr->check) {
-            OVS_LOG_TRACE("UDP checksum incorrect.");
+            OVS_LOG_ERROR("UDP checksum incorrect, expected %u, got %u",
+                          udpHdr->check, checkSum);
             return NDIS_STATUS_INVALID_PACKET;
         }
     }
@@ -670,8 +672,7 @@ OvsApplySWChecksumOnNB(POVS_PACKET_HDR_INFO layers,
          curNb = curNb->Next) {
         packetLength = NET_BUFFER_DATA_LENGTH(curNb);
         curMdl = NET_BUFFER_CURRENT_MDL(curNb);
-        bufferStart = (PUINT8)MmGetSystemAddressForMdlSafe(curMdl,
-                                                           LowPagePriority);
+        bufferStart = (PUINT8)OvsGetMdlWithLowPriority(curMdl);
         if (!bufferStart) {
             return NDIS_STATUS_RESOURCES;
         }

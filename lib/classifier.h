@@ -236,7 +236,7 @@
  * The classifier supports versioning for two reasons:
  *
  *     1. Support for versioned modifications makes it possible to perform an
- *        arbitraty series of classifier changes as one atomic transaction,
+ *        arbitrary series of classifier changes as one atomic transaction,
  *        where intermediate versions of the classifier are not visible to any
  *        lookups.  Also, when a rule is added for a future version, or marked
  *        for removal after the current version, such modifications can be
@@ -284,7 +284,7 @@
  *
  * The classifier may safely be accessed by many reader threads concurrently
  * and by a single writer, or by multiple writers when they guarantee mutually
- * exlucive access to classifier modifications.
+ * exclusive access to classifier modifications.
  *
  * Since the classifier rules are RCU protected, the rule destruction after
  * removal from the classifier must be RCU postponed.  Also, when versioning is
@@ -293,7 +293,7 @@
  * ovsrcu_postpone() call to destruct the rule is called from the first RCU
  * callback that removes the rule.
  *
- * Rules that have never been visible to lookups are an exeption to the above
+ * Rules that have never been visible to lookups are an exception to the above
  * rule.  Such rules can be removed immediately, but their destruction must
  * still be RCU postponed, as the rule's visibility attribute may be examined
  * parallel to the rule's removal. */
@@ -387,8 +387,8 @@ const struct cls_rule *classifier_replace(struct classifier *,
                                           ovs_version_t,
                                           const struct cls_conjunction *,
                                           size_t n_conjunctions);
-const struct cls_rule *classifier_remove(struct classifier *,
-                                         const struct cls_rule *);
+bool classifier_remove(struct classifier *, const struct cls_rule *);
+void classifier_remove_assert(struct classifier *, const struct cls_rule *);
 static inline void classifier_defer(struct classifier *);
 static inline void classifier_publish(struct classifier *);
 
@@ -406,6 +406,10 @@ const struct cls_rule *classifier_find_match_exactly(const struct classifier *,
                                                      const struct match *,
                                                      int priority,
                                                      ovs_version_t);
+const struct cls_rule *classifier_find_minimatch_exactly(
+    const struct classifier *, const struct minimatch *,
+    int priority, ovs_version_t);
+
 bool classifier_is_empty(const struct classifier *);
 int classifier_count(const struct classifier *);
 

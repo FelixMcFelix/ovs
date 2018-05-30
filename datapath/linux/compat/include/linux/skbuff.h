@@ -21,6 +21,35 @@ int pskb_expand_head(struct sk_buff *skb, int nhead, int ntail,
 #define ignore_df local_df
 #endif
 
+
+#ifndef HAVE_NULL_COMPUTE_PSEUDO
+static inline __wsum null_compute_pseudo(struct sk_buff *skb, int proto)
+{
+	return 0;
+}
+#endif
+
+#ifndef HAVE_SKB_CHECKSUM_CONVERT
+static inline bool __skb_checksum_convert_check(struct sk_buff *skb)
+{
+	return (skb->ip_summed == CHECKSUM_NONE && skb->csum_valid);
+}
+
+static inline void __skb_checksum_convert(struct sk_buff *skb,
+					  __sum16 check, __wsum pseudo)
+{
+	skb->csum = ~pseudo;
+	skb->ip_summed = CHECKSUM_COMPLETE;
+}
+
+#define skb_checksum_try_convert(skb, proto, check, compute_pseudo)	\
+do {									\
+	if (__skb_checksum_convert_check(skb))				\
+		__skb_checksum_convert(skb, check,			\
+				       compute_pseudo(skb, proto));	\
+} while (0)
+
+#endif
 #ifndef HAVE_SKB_COPY_FROM_LINEAR_DATA_OFFSET
 static inline void skb_copy_from_linear_data_offset(const struct sk_buff *skb,
 						    const int offset, void *to,
@@ -212,13 +241,6 @@ static inline int skb_orphan_frags(struct sk_buff *skb, gfp_t gfp_mask)
 #define skb_get_hash skb_get_rxhash
 #endif /* HAVE_SKB_GET_HASH */
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3,8,0)
-static inline void skb_tx_error(struct sk_buff *skb)
-{
-	return;
-}
-#endif /* LINUX_VERSION_CODE < KERNEL_VERSION(3,8,0) */
-
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3,14,0)
 #define skb_zerocopy_headlen rpl_skb_zerocopy_headlen
 unsigned int rpl_skb_zerocopy_headlen(const struct sk_buff *from);
@@ -396,6 +418,17 @@ static inline void *skb_put_zero(struct sk_buff *skb, unsigned int len)
 	memset(tmp, 0, len);
 
 	return tmp;
+}
+#endif
+
+#ifndef HAVE_SKB_GSO_IPXIP6
+#define SKB_GSO_IPXIP6 (1 << 10)
+#endif
+
+#ifndef HAVE_SKB_SET_INNER_IPPROTO
+static inline void skb_set_inner_ipproto(struct sk_buff *skb,
+					 __u8 ipproto)
+{
 }
 #endif
 

@@ -34,6 +34,7 @@
 #include "row.h"
 #include "server.h"
 #include "simap.h"
+#include "storage.h"
 #include "stream.h"
 #include "table.h"
 #include "timeval.h"
@@ -57,12 +58,16 @@ static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
 /* Sessions. */
 static struct ovsdb_jsonrpc_session *ovsdb_jsonrpc_session_create(
     struct ovsdb_jsonrpc_remote *, struct jsonrpc_session *, bool);
+static void ovsdb_jsonrpc_session_preremove_db(struct ovsdb_jsonrpc_remote *,
+                                               struct ovsdb *);
 static void ovsdb_jsonrpc_session_run_all(struct ovsdb_jsonrpc_remote *);
 static void ovsdb_jsonrpc_session_wait_all(struct ovsdb_jsonrpc_remote *);
 static void ovsdb_jsonrpc_session_get_memory_usage_all(
     const struct ovsdb_jsonrpc_remote *, struct simap *usage);
 static void ovsdb_jsonrpc_session_close_all(struct ovsdb_jsonrpc_remote *);
-static void ovsdb_jsonrpc_session_reconnect_all(struct ovsdb_jsonrpc_remote *);
+static void ovsdb_jsonrpc_session_reconnect_all(struct ovsdb_jsonrpc_remote *,
+                                                bool force,
+                                                const char *comment);
 static void ovsdb_jsonrpc_session_set_all_options(
     struct ovsdb_jsonrpc_remote *, const struct ovsdb_jsonrpc_options *);
 static bool ovsdb_jsonrpc_active_session_get_status(
@@ -79,10 +84,12 @@ static void ovsdb_jsonrpc_session_send(struct ovsdb_jsonrpc_session *,
 /* Triggers. */
 static void ovsdb_jsonrpc_trigger_create(struct ovsdb_jsonrpc_session *,
                                          struct ovsdb *,
-                                         struct json *id, struct json *params);
+                                         struct jsonrpc_msg *request);
 static struct ovsdb_jsonrpc_trigger *ovsdb_jsonrpc_trigger_find(
     struct ovsdb_jsonrpc_session *, const struct json *id, size_t hash);
 static void ovsdb_jsonrpc_trigger_complete(struct ovsdb_jsonrpc_trigger *);
+static void ovsdb_jsonrpc_trigger_preremove_db(struct ovsdb_jsonrpc_session *,
+                                               struct ovsdb *);
 static void ovsdb_jsonrpc_trigger_complete_all(struct ovsdb_jsonrpc_session *);
 static void ovsdb_jsonrpc_trigger_complete_done(
     struct ovsdb_jsonrpc_session *);
@@ -99,6 +106,8 @@ static struct jsonrpc_msg *ovsdb_jsonrpc_monitor_cancel(
     struct ovsdb_jsonrpc_session *,
     struct json_array *params,
     const struct json *request_id);
+static void ovsdb_jsonrpc_monitor_preremove_db(struct ovsdb_jsonrpc_session *,
+                                               struct ovsdb *);
 static void ovsdb_jsonrpc_monitor_remove_all(struct ovsdb_jsonrpc_session *);
 static void ovsdb_jsonrpc_monitor_flush_all(struct ovsdb_jsonrpc_session *);
 static bool ovsdb_jsonrpc_monitor_needs_flush(struct ovsdb_jsonrpc_session *);
@@ -157,34 +166,29 @@ ovsdb_jsonrpc_server_create(bool read_only)
 bool
 ovsdb_jsonrpc_server_add_db(struct ovsdb_jsonrpc_server *svr, struct ovsdb *db)
 {
-    /* The OVSDB protocol doesn't have a way to notify a client that a
-     * database has been added.  If some client tried to use the database
-     * that we're adding and failed, then forcing it to reconnect seems like
-     * a reasonable way to make it try again.
-     *
-     * If this is too big of a hammer in practice, we could be more selective,
-     * e.g. disconnect only connections that actually tried to use a database
-     * with 'db''s name. */
-    ovsdb_jsonrpc_server_reconnect(svr, svr->read_only);
-
+    ovsdb_jsonrpc_server_reconnect(
+        svr, false, xasprintf("adding %s database", db->name));
     return ovsdb_server_add_db(&svr->up, db);
 }
 
-/* Removes 'db' from the set of databases served out by 'svr'.  Returns
- * true if successful, false if there is no database associated with 'db'. */
-bool
+/* Removes 'db' from the set of databases served out by 'svr'.
+ *
+ * 'comment' should be a human-readable reason for removing the database.  This
+ * function frees it. */
+void
 ovsdb_jsonrpc_server_remove_db(struct ovsdb_jsonrpc_server *svr,
-                               struct ovsdb *db)
+                               struct ovsdb *db, char *comment)
 {
-    /* There might be pointers to 'db' from 'svr', such as monitors or
-     * outstanding transactions.  Disconnect all JSON-RPC connections to avoid
-     * accesses to freed memory.
-     *
-     * If this is too big of a hammer in practice, we could be more selective,
-     * e.g. disconnect only connections that actually reference 'db'. */
-    ovsdb_jsonrpc_server_reconnect(svr, svr->read_only);
+    struct shash_node *node;
+    SHASH_FOR_EACH (node, &svr->remotes) {
+        struct ovsdb_jsonrpc_remote *remote = node->data;
 
-    return ovsdb_server_remove_db(&svr->up, db);
+        ovsdb_jsonrpc_session_preremove_db(remote, db);
+    }
+
+    ovsdb_jsonrpc_server_reconnect(svr, false, comment);
+
+    ovsdb_server_remove_db(&svr->up, db);
 }
 
 void
@@ -333,25 +337,38 @@ ovsdb_jsonrpc_server_free_remote_status(
     free(status->locks_lost);
 }
 
-/* Forces all of the JSON-RPC sessions managed by 'svr' to disconnect and
- * reconnect. */
+/* Makes all of the JSON-RPC sessions managed by 'svr' disconnect.  (They
+ * will then generally reconnect.).  Uses 'comment' as a human-readable comment
+ * for logging.  Frees 'comment'.
+ *
+ * If 'force' is true, disconnects all sessions.  Otherwise, disconnects only
+ * sesions that aren't database change aware. */
 void
-ovsdb_jsonrpc_server_reconnect(struct ovsdb_jsonrpc_server *svr, bool read_only)
+ovsdb_jsonrpc_server_reconnect(struct ovsdb_jsonrpc_server *svr, bool force,
+                               char *comment)
 {
     struct shash_node *node;
 
-    svr->read_only = read_only;
     SHASH_FOR_EACH (node, &svr->remotes) {
         struct ovsdb_jsonrpc_remote *remote = node->data;
 
-        ovsdb_jsonrpc_session_reconnect_all(remote);
+        ovsdb_jsonrpc_session_reconnect_all(remote, force, comment);
     }
+
+    free(comment);
 }
 
-bool
-ovsdb_jsonrpc_server_is_read_only(struct ovsdb_jsonrpc_server *svr)
+void
+ovsdb_jsonrpc_server_set_read_only(struct ovsdb_jsonrpc_server *svr,
+                                   bool read_only)
 {
-    return svr->read_only;
+    if (svr->read_only != read_only) {
+        svr->read_only = read_only;
+        ovsdb_jsonrpc_server_reconnect(svr, false,
+                                       xstrdup(read_only
+                                               ? "making server read-only"
+                                               : "making server read/write"));
+    }
 }
 
 void
@@ -423,6 +440,20 @@ struct ovsdb_jsonrpc_session {
     struct ovsdb_session up;
     struct ovsdb_jsonrpc_remote *remote;
 
+    /* RFC 7047 does not contemplate how to alert clients to changes to the set
+     * of databases, e.g. databases that are added or removed while the
+     * database server is running.  Traditionally, ovsdb-server disconnects all
+     * of its clients when this happens; a well-written client will reassess
+     * what is available from the server upon reconnection.
+     *
+     * OVS 2.9 introduces a way for clients to monitor changes to the databases
+     * being served, through the Database table in the _Server database that
+     * OVSDB adds in this version.  ovsdb-server suppresses the connection
+     * close for clients that identify themselves as taking advantage of this
+     * mechanism.  When this member is true, it indicates that the client
+     * requested such suppression. */
+    bool db_change_aware;
+
     /* Triggers. */
     struct hmap triggers;       /* Hmap of "struct ovsdb_jsonrpc_trigger"s. */
 
@@ -467,6 +498,20 @@ ovsdb_jsonrpc_session_create(struct ovsdb_jsonrpc_remote *remote,
     remote->server->n_sessions++;
 
     return s;
+}
+
+/* Database 'db' is about to be removed from the database server.  To prepare,
+ * this function removes all references to 'db' from 'remote'. */
+static void
+ovsdb_jsonrpc_session_preremove_db(struct ovsdb_jsonrpc_remote *remote,
+                                   struct ovsdb *db)
+{
+    struct ovsdb_jsonrpc_session *s;
+
+    LIST_FOR_EACH (s, node, &remote->sessions) {
+        ovsdb_jsonrpc_monitor_preremove_db(s, db);
+        ovsdb_jsonrpc_trigger_preremove_db(s, db);
+    }
 }
 
 static void
@@ -597,17 +642,28 @@ ovsdb_jsonrpc_session_close_all(struct ovsdb_jsonrpc_remote *remote)
     }
 }
 
-/* Forces all of the JSON-RPC sessions managed by 'remote' to disconnect and
- * reconnect. */
+/* Makes all of the JSON-RPC sessions managed by 'remote' disconnect.  (They
+ * will then generally reconnect.).  'comment' should be a human-readable
+ * explanation of the reason for disconnection, for use in log messages.
+ *
+ * If 'force' is true, disconnects all sessions.  Otherwise, disconnects only
+ * sesions that aren't database change aware. */
 static void
-ovsdb_jsonrpc_session_reconnect_all(struct ovsdb_jsonrpc_remote *remote)
+ovsdb_jsonrpc_session_reconnect_all(struct ovsdb_jsonrpc_remote *remote,
+                                    bool force, const char *comment)
 {
     struct ovsdb_jsonrpc_session *s, *next;
 
     LIST_FOR_EACH_SAFE (s, next, node, &remote->sessions) {
-        jsonrpc_session_force_reconnect(s->js);
-        if (!jsonrpc_session_is_alive(s->js)) {
-            ovsdb_jsonrpc_session_close(s);
+        if (force || !s->db_change_aware) {
+            jsonrpc_session_force_reconnect(s->js);
+            if (jsonrpc_session_is_connected(s->js)) {
+                VLOG_INFO("%s: disconnecting (%s)",
+                          jsonrpc_session_get_name(s->js), comment);
+            }
+            if (!jsonrpc_session_is_alive(s->js)) {
+                ovsdb_jsonrpc_session_close(s);
+            }
         }
     }
 }
@@ -716,7 +772,7 @@ ovsdb_jsonrpc_lookup_db(const struct ovsdb_jsonrpc_session *s,
         goto error;
     }
 
-    db_name = params->elems[0]->u.string;
+    db_name = params->elems[0]->string;
     db = shash_find_data(&s->up.server->dbs, db_name);
     if (!db) {
         error = ovsdb_syntax_error(
@@ -726,12 +782,21 @@ ovsdb_jsonrpc_lookup_db(const struct ovsdb_jsonrpc_session *s,
         goto error;
     }
 
+    if (!db->schema) {
+        error = ovsdb_error("database not available",
+                            "%s request specifies database %s which is not "
+                            "yet available because it has not completed "
+                            "joining its cluster",
+                            request->method, db_name);
+        goto error;
+    }
+
     *replyp = NULL;
     return db;
 
 error:
-    *replyp = jsonrpc_create_error(ovsdb_error_to_json(error), request->id);
-    ovsdb_error_destroy(error);
+    *replyp = jsonrpc_create_error(ovsdb_error_to_json_free(error),
+                                   request->id);
     return NULL;
 }
 
@@ -781,7 +846,6 @@ ovsdb_jsonrpc_session_lock(struct ovsdb_jsonrpc_session *s,
                            enum ovsdb_lock_mode mode)
 {
     struct ovsdb_lock_waiter *waiter;
-    struct jsonrpc_msg *reply;
     struct ovsdb_error *error;
     struct ovsdb_session *victim;
     const char *lock_name;
@@ -820,9 +884,7 @@ ovsdb_jsonrpc_session_lock(struct ovsdb_jsonrpc_session *s,
     return jsonrpc_create_reply(result, request->id);
 
 error:
-    reply = jsonrpc_create_error(ovsdb_error_to_json(error), request->id);
-    ovsdb_error_destroy(error);
-    return reply;
+    return jsonrpc_create_error(ovsdb_error_to_json_free(error), request->id);
 }
 
 static void
@@ -853,11 +915,21 @@ ovsdb_jsonrpc_session_unlock__(struct ovsdb_lock_waiter *waiter)
 }
 
 static struct jsonrpc_msg *
+syntax_error_reply(const struct jsonrpc_msg *request, const char *details)
+{
+    struct ovsdb_error *error = ovsdb_syntax_error(
+        request->params, NULL, "%s: %s", request->method, details);
+    struct jsonrpc_msg *msg = jsonrpc_create_error(ovsdb_error_to_json(error),
+                                                   request->id);
+    ovsdb_error_destroy(error);
+    return msg;
+}
+
+static struct jsonrpc_msg *
 ovsdb_jsonrpc_session_unlock(struct ovsdb_jsonrpc_session *s,
                              struct jsonrpc_msg *request)
 {
     struct ovsdb_lock_waiter *waiter;
-    struct jsonrpc_msg *reply;
     struct ovsdb_error *error;
     const char *lock_name;
 
@@ -867,37 +939,36 @@ ovsdb_jsonrpc_session_unlock(struct ovsdb_jsonrpc_session *s,
 
     error = ovsdb_jsonrpc_session_parse_lock_name(request, &lock_name);
     if (error) {
-        goto error;
+        return jsonrpc_create_error(ovsdb_error_to_json_free(error),
+                                    request->id);
     }
 
     /* Report error if this session has not issued a "lock" or "steal" for this
      * lock. */
     waiter = ovsdb_session_get_lock_waiter(&s->up, lock_name);
     if (!waiter) {
-        error = ovsdb_syntax_error(
-            request->params, NULL, "\"unlock\" without \"lock\" or \"steal\"");
-        goto error;
+        return syntax_error_reply(request,
+                                  "\"unlock\" without \"lock\" or \"steal\"");
     }
 
     ovsdb_jsonrpc_session_unlock__(waiter);
 
     return jsonrpc_create_reply(json_object_create(), request->id);
-
-error:
-    reply = jsonrpc_create_error(ovsdb_error_to_json(error), request->id);
-    ovsdb_error_destroy(error);
-    return reply;
 }
 
 static struct jsonrpc_msg *
-execute_transaction(struct ovsdb_jsonrpc_session *s, struct ovsdb *db,
-                    struct jsonrpc_msg *request)
+ovsdb_jsonrpc_session_set_db_change_aware(struct ovsdb_jsonrpc_session *s,
+                                          const struct jsonrpc_msg *request)
 {
-    ovsdb_jsonrpc_trigger_create(s, db, request->id, request->params);
-    request->id = NULL;
-    request->params = NULL;
-    jsonrpc_msg_destroy(request);
-    return NULL;
+    const struct json_array *params = json_array(request->params);
+    if (params->n != 1
+        || (params->elems[0]->type != JSON_TRUE &&
+            params->elems[0]->type != JSON_FALSE)) {
+        return syntax_error_reply(request, "true or false parameter expected");
+    }
+
+    s->db_change_aware = json_boolean(params->elems[0]);
+    return jsonrpc_create_reply(json_object_create(), request->id);
 }
 
 static void
@@ -906,10 +977,11 @@ ovsdb_jsonrpc_session_got_request(struct ovsdb_jsonrpc_session *s,
 {
     struct jsonrpc_msg *reply;
 
-    if (!strcmp(request->method, "transact")) {
+    if (!strcmp(request->method, "transact") ||
+        !strcmp(request->method, "convert")) {
         struct ovsdb *db = ovsdb_jsonrpc_lookup_db(s, request, &reply);
         if (!reply) {
-            reply = execute_transaction(s, db, request);
+            ovsdb_jsonrpc_trigger_create(s, db, request);
         }
     } else if (!strcmp(request->method, "monitor") ||
                (monitor_cond_enable__ && !strcmp(request->method,
@@ -960,6 +1032,8 @@ ovsdb_jsonrpc_session_got_request(struct ovsdb_jsonrpc_session *s,
         reply = ovsdb_jsonrpc_session_lock(s, request, OVSDB_LOCK_STEAL);
     } else if (!strcmp(request->method, "unlock")) {
         reply = ovsdb_jsonrpc_session_unlock(s, request);
+    } else if (!strcmp(request->method, "set_db_change_aware")) {
+        reply = ovsdb_jsonrpc_session_set_db_change_aware(s, request);
     } else if (!strcmp(request->method, "echo")) {
         reply = jsonrpc_create_reply(json_clone(request->params), request->id);
     } else {
@@ -980,7 +1054,7 @@ execute_cancel(struct ovsdb_jsonrpc_session *s, struct jsonrpc_msg *request)
         struct ovsdb_jsonrpc_trigger *t;
         struct json *id;
 
-        id = request->params->u.array.elems[0];
+        id = request->params->array.elems[0];
         t = ovsdb_jsonrpc_trigger_find(s, id, json_hash(id, 0));
         if (t) {
             ovsdb_jsonrpc_trigger_complete(t);
@@ -1019,36 +1093,39 @@ struct ovsdb_jsonrpc_trigger {
 
 static void
 ovsdb_jsonrpc_trigger_create(struct ovsdb_jsonrpc_session *s, struct ovsdb *db,
-                             struct json *id, struct json *params)
+                             struct jsonrpc_msg *request)
 {
-    struct ovsdb_jsonrpc_trigger *t;
-    size_t hash;
-
     /* Check for duplicate ID. */
-    hash = json_hash(id, 0);
-    t = ovsdb_jsonrpc_trigger_find(s, id, hash);
+    size_t hash = json_hash(request->id, 0);
+    struct ovsdb_jsonrpc_trigger *t
+        = ovsdb_jsonrpc_trigger_find(s, request->id, hash);
     if (t) {
-        struct jsonrpc_msg *msg;
-
-        msg = jsonrpc_create_error(json_string_create("duplicate request ID"),
-                                   id);
-        ovsdb_jsonrpc_session_send(s, msg);
-        json_destroy(id);
-        json_destroy(params);
+        ovsdb_jsonrpc_session_send(
+            s, syntax_error_reply(request, "duplicate request ID"));
+        jsonrpc_msg_destroy(request);
         return;
     }
 
     /* Insert into trigger table. */
     t = xmalloc(sizeof *t);
-    ovsdb_trigger_init(&s->up, db, &t->trigger, params, time_msec(),
-                       s->read_only, s->remote->role,
-                       jsonrpc_session_get_id(s->js));
-    t->id = id;
+    bool disconnect_all = ovsdb_trigger_init(
+        &s->up, db, &t->trigger, request, time_msec(), s->read_only,
+        s->remote->role, jsonrpc_session_get_id(s->js));
+    t->id = json_clone(request->id);
     hmap_insert(&s->triggers, &t->hmap_node, hash);
 
     /* Complete early if possible. */
     if (ovsdb_trigger_is_complete(&t->trigger)) {
         ovsdb_jsonrpc_trigger_complete(t);
+    }
+
+    if (disconnect_all) {
+        /* The message below is currently the only reason to disconnect all
+         * clients. */
+        ovsdb_jsonrpc_server_reconnect(s->remote->server, false,
+                                       xasprintf("committed %s database "
+                                                 "schema conversion",
+                                                 db->name));
     }
 }
 
@@ -1075,17 +1152,15 @@ ovsdb_jsonrpc_trigger_complete(struct ovsdb_jsonrpc_trigger *t)
     s = CONTAINER_OF(t->trigger.session, struct ovsdb_jsonrpc_session, up);
 
     if (jsonrpc_session_is_connected(s->js)) {
-        struct jsonrpc_msg *reply;
-        struct json *result;
-
-        result = ovsdb_trigger_steal_result(&t->trigger);
-        if (result) {
-            reply = jsonrpc_create_reply(result, t->id);
-        } else {
-            reply = jsonrpc_create_error(json_string_create("canceled"),
-                                         t->id);
+        bool complete = ovsdb_trigger_is_complete(&t->trigger);
+        if (s->db_change_aware && !complete) {
+            ovsdb_trigger_cancel(&t->trigger, "closing JSON-RPC session");
+            complete = true;
         }
-        ovsdb_jsonrpc_session_send(s, reply);
+        if (complete) {
+            struct jsonrpc_msg *reply = ovsdb_trigger_steal_reply(&t->trigger);
+            ovsdb_jsonrpc_session_send(s, reply);
+        }
     }
 
     json_destroy(t->id);
@@ -1095,22 +1170,40 @@ ovsdb_jsonrpc_trigger_complete(struct ovsdb_jsonrpc_trigger *t)
 }
 
 static void
-ovsdb_jsonrpc_trigger_complete_all(struct ovsdb_jsonrpc_session *s)
+ovsdb_jsonrpc_trigger_remove__(struct ovsdb_jsonrpc_session *s,
+                               struct ovsdb *db)
 {
     struct ovsdb_jsonrpc_trigger *t, *next;
     HMAP_FOR_EACH_SAFE (t, next, hmap_node, &s->triggers) {
-        ovsdb_jsonrpc_trigger_complete(t);
+        if (!db || t->trigger.db == db) {
+            ovsdb_jsonrpc_trigger_complete(t);
+        }
     }
+}
+
+/* Database 'db' is about to be removed from the database server.  To prepare,
+ * this function removes all references from triggers in 's' to 'db'. */
+static void
+ovsdb_jsonrpc_trigger_preremove_db(struct ovsdb_jsonrpc_session *s,
+                                   struct ovsdb *db)
+{
+    ovs_assert(db);
+    ovsdb_jsonrpc_trigger_remove__(s, db);
+}
+
+/* Removes all triggers from 's'. */
+static void
+ovsdb_jsonrpc_trigger_complete_all(struct ovsdb_jsonrpc_session *s)
+{
+    ovsdb_jsonrpc_trigger_remove__(s, NULL);
 }
 
 static void
 ovsdb_jsonrpc_trigger_complete_done(struct ovsdb_jsonrpc_session *s)
 {
-    while (!ovs_list_is_empty(&s->up.completions)) {
-        struct ovsdb_jsonrpc_trigger *t
-            = CONTAINER_OF(s->up.completions.next,
-                           struct ovsdb_jsonrpc_trigger, trigger.node);
-        ovsdb_jsonrpc_trigger_complete(t);
+    struct ovsdb_jsonrpc_trigger *trigger, *next;
+    LIST_FOR_EACH_SAFE (trigger, next, trigger.node, &s->up.completions) {
+        ovsdb_jsonrpc_trigger_complete(trigger);
     }
 }
 
@@ -1210,16 +1303,16 @@ ovsdb_jsonrpc_parse_monitor_request(
                                       "array of column names expected");
         }
 
-        for (i = 0; i < columns->u.array.n; i++) {
+        for (i = 0; i < columns->array.n; i++) {
             const struct ovsdb_column *column;
             const char *s;
 
-            if (columns->u.array.elems[i]->type != JSON_STRING) {
+            if (columns->array.elems[i]->type != JSON_STRING) {
                 return ovsdb_syntax_error(columns, NULL,
                                           "array of column names expected");
             }
 
-            s = columns->u.array.elems[i]->u.string;
+            s = columns->array.elems[i]->string;
             column = shash_find_data(&table->schema->columns, s);
             if (!column) {
                 return ovsdb_syntax_error(columns, NULL, "%s is not a valid "
@@ -1274,8 +1367,8 @@ ovsdb_jsonrpc_monitor_create(struct ovsdb_jsonrpc_session *s, struct ovsdb *db,
         error = ovsdb_syntax_error(params, NULL, "invalid parameters");
         goto error;
     }
-    monitor_id = params->u.array.elems[1];
-    monitor_requests = params->u.array.elems[2];
+    monitor_id = params->array.elems[1];
+    monitor_requests = params->array.elems[2];
     if (monitor_requests->type != JSON_OBJECT) {
         error = ovsdb_syntax_error(monitor_requests, NULL,
                                    "monitor-requests must be object");
@@ -1316,7 +1409,7 @@ ovsdb_jsonrpc_monitor_create(struct ovsdb_jsonrpc_session *s, struct ovsdb *db,
         /* Parse columns. */
         mr_value = node->data;
         if (mr_value->type == JSON_ARRAY) {
-            const struct json_array *array = &mr_value->u.array;
+            const struct json_array *array = &mr_value->array;
 
             for (i = 0; i < array->n; i++) {
                 error = ovsdb_jsonrpc_parse_monitor_request(m->dbmon,
@@ -1358,12 +1451,10 @@ ovsdb_jsonrpc_monitor_create(struct ovsdb_jsonrpc_session *s, struct ovsdb *db,
 
 error:
     if (m) {
-        ovsdb_jsonrpc_monitor_destroy(m);
+        ovsdb_jsonrpc_monitor_destroy(m, false);
     }
 
-    json = ovsdb_error_to_json(error);
-    ovsdb_error_destroy(error);
-    return jsonrpc_create_error(json, request_id);
+    return jsonrpc_create_error(ovsdb_error_to_json_free(error), request_id);
 }
 
 static struct ovsdb_error *
@@ -1406,21 +1497,28 @@ ovsdb_jsonrpc_monitor_cond_change(struct ovsdb_jsonrpc_session *s,
     struct ovsdb_jsonrpc_monitor *m;
     struct json *monitor_cond_change_reqs;
     struct shash_node *node;
-    struct json *json;
 
     if (json_array(params)->n != 3) {
         error = ovsdb_syntax_error(params, NULL, "invalid parameters");
         goto error;
     }
 
-    m = ovsdb_jsonrpc_monitor_find(s, params->u.array.elems[0]);
+    m = ovsdb_jsonrpc_monitor_find(s, params->array.elems[0]);
     if (!m) {
-        error = ovsdb_syntax_error(request_id, NULL,
+        error = ovsdb_syntax_error(params->array.elems[0], NULL,
                                    "unknown monitor session");
         goto error;
     }
 
-    monitor_cond_change_reqs = params->u.array.elems[2];
+    const struct json *new_monitor_id = params->array.elems[1];
+    bool changing_id = !json_equal(m->monitor_id, new_monitor_id);
+    if (changing_id && ovsdb_jsonrpc_monitor_find(s, new_monitor_id)) {
+        error = ovsdb_syntax_error(new_monitor_id, NULL,
+                                   "duplicate monitor ID");
+        goto error;
+    }
+
+    monitor_cond_change_reqs = params->array.elems[2];
     if (monitor_cond_change_reqs->type != JSON_OBJECT) {
         error =
             ovsdb_syntax_error(NULL, NULL,
@@ -1448,7 +1546,7 @@ ovsdb_jsonrpc_monitor_cond_change(struct ovsdb_jsonrpc_session *s,
 
         mr_value = node->data;
         if (mr_value->type == JSON_ARRAY) {
-            const struct json_array *array = &mr_value->u.array;
+            const struct json_array *array = &mr_value->array;
 
             for (i = 0; i < array->n; i++) {
                 error = ovsdb_jsonrpc_parse_monitor_cond_change_request(
@@ -1466,11 +1564,12 @@ ovsdb_jsonrpc_monitor_cond_change(struct ovsdb_jsonrpc_session *s,
         }
     }
 
-    /* Change monitor id */
-    hmap_remove(&s->monitors, &m->node);
-    json_destroy(m->monitor_id);
-    m->monitor_id = json_clone(params->u.array.elems[1]);
-    hmap_insert(&s->monitors, &m->node, json_hash(m->monitor_id, 0));
+    if (changing_id) {
+        hmap_remove(&s->monitors, &m->node);
+        json_destroy(m->monitor_id);
+        m->monitor_id = json_clone(new_monitor_id);
+        hmap_insert(&s->monitors, &m->node, json_hash(m->monitor_id, 0));
+    }
 
     /* Send the new update, if any,  represents the difference from the old
      * condition and the new one. */
@@ -1490,10 +1589,7 @@ ovsdb_jsonrpc_monitor_cond_change(struct ovsdb_jsonrpc_session *s,
     return jsonrpc_create_reply(json_object_create(), request_id);
 
 error:
-
-    json = ovsdb_error_to_json(error);
-    ovsdb_error_destroy(error);
-    return jsonrpc_create_error(json, request_id);
+    return jsonrpc_create_error(ovsdb_error_to_json_free(error), request_id);
 }
 
 static struct jsonrpc_msg *
@@ -1512,19 +1608,36 @@ ovsdb_jsonrpc_monitor_cancel(struct ovsdb_jsonrpc_session *s,
             return jsonrpc_create_error(json_string_create("unknown monitor"),
                                         request_id);
         } else {
-            ovsdb_jsonrpc_monitor_destroy(m);
+            ovsdb_jsonrpc_monitor_destroy(m, false);
             return jsonrpc_create_reply(json_object_create(), request_id);
         }
     }
 }
 
+/* Database 'db' is about to be removed from the database server.  To prepare,
+ * this function removes all references from monitors in 's' to 'db'. */
+static void
+ovsdb_jsonrpc_monitor_preremove_db(struct ovsdb_jsonrpc_session *s,
+                                   struct ovsdb *db)
+{
+    ovs_assert(db);
+
+    struct ovsdb_jsonrpc_monitor *m, *next;
+    HMAP_FOR_EACH_SAFE (m, next, node, &s->monitors) {
+        if (m->db == db) {
+            ovsdb_jsonrpc_monitor_destroy(m, true);
+        }
+    }
+}
+
+/* Cancels all monitors in 's'. */
 static void
 ovsdb_jsonrpc_monitor_remove_all(struct ovsdb_jsonrpc_session *s)
 {
     struct ovsdb_jsonrpc_monitor *m, *next;
 
     HMAP_FOR_EACH_SAFE (m, next, node, &s->monitors) {
-        ovsdb_jsonrpc_monitor_destroy(m);
+        ovsdb_jsonrpc_monitor_destroy(m, false);
     }
 }
 
@@ -1556,8 +1669,19 @@ ovsdb_jsonrpc_monitor_needs_flush(struct ovsdb_jsonrpc_session *s)
 }
 
 void
-ovsdb_jsonrpc_monitor_destroy(struct ovsdb_jsonrpc_monitor *m)
+ovsdb_jsonrpc_monitor_destroy(struct ovsdb_jsonrpc_monitor *m,
+                              bool notify_cancellation)
 {
+    if (notify_cancellation) {
+        struct ovsdb_jsonrpc_session *s = m->session;
+        if (jsonrpc_session_is_connected(s->js) && s->db_change_aware) {
+            struct jsonrpc_msg *notify = jsonrpc_create_notify(
+                "monitor_canceled",
+                json_array_create_1(json_clone(m->monitor_id)));
+            ovsdb_jsonrpc_session_send(s, notify);
+        }
+    }
+
     json_destroy(m->monitor_id);
     hmap_remove(&m->session->monitors, &m->node);
     ovsdb_monitor_remove_jsonrpc_monitor(m->dbmon, m, m->unflushed);

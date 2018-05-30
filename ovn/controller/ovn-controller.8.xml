@@ -43,6 +43,8 @@
       the Northbound and Southbound databases.
     </p>
     <xi:include href="lib/ssl.xml" xmlns:xi="http://www.w3.org/2003/XInclude"/>
+    <xi:include href="lib/ssl-bootstrap.xml" xmlns:xi="http://www.w3.org/2003/XInclude"/>
+    <xi:include href="lib/ssl-peer-ca-cert.xml" xmlns:xi="http://www.w3.org/2003/XInclude"/>
 
     <h2>Other Options</h2>
 
@@ -55,10 +57,9 @@
       information from the local Open vSwitch's ovsdb-server instance.
       The default location is <code>db.sock</code> in the local Open
       vSwitch's "run" directory.  It may be overridden by specifying the
-      <var>ovs-database</var> argument in one of the following forms:
+      <var>ovs-database</var> argument as an OVSDB active or passive
+      connection method, as described in <code>ovsdb</code>(7).
     </p>
-    <xi:include href="ovsdb/remote-active.xml" xmlns:xi="http://www.w3.org/2003/XInclude"/>
-    <xi:include href="ovsdb/remote-passive.xml" xmlns:xi="http://www.w3.org/2003/XInclude"/>
 
     <p>
       <code>ovn-controller</code> assumes it gets configuration
@@ -150,6 +151,13 @@
         or <code>false</code> to disable. Depending on the capabilities of the
         network interface card, enabling encapsulation checksum may incur
         performance loss. In such cases, encapsulation checksums can be disabled.
+      </dd>
+
+      <dt><code>external_ids:ovn-cms-options</code></dt>
+      <dd>
+        A list of options that will be consumed by the CMS Plugin and which
+        specific to this particular chassis. An example would be:
+        <code>cms_option1,cms_option2:foo</code>.
       </dd>
     </dl>
 
@@ -295,6 +303,53 @@
           within the integration bridge.  Its value is the name of the OVN
           logical patch port that it implements.
         </p>
+      </dd>
+    </dl>
+
+    <h1>OVN Southbound Database Usage</h1>
+
+    <p>
+      <code>ovn-controller</code> reads from much of the
+      <code>OVN_Southbound</code> database to guide its operation.
+      <code>ovn-controller</code> also writes to the following tables:
+    </p>
+
+    <dl>
+      <dt><code>Chassis</code></dt>
+      <dd>
+        Upon startup, <code>ovn-controller</code> creates a row in this table
+        to represent its own chassis.  Upon graceful termination, e.g. with
+        <code>ovs-appctl -t ovn-controller exit</code> (but not
+        <code>SIGTERM</code>), <code>ovn-controller</code> removes its row.
+      </dd>
+
+      <dt><code>Encap</code></dt>
+      <dd>
+        Upon startup, <code>ovn-controller</code> creates a row or rows in this
+        table that represent the tunnel encapsulations by which its chassis can
+        be reached, and points its <code>Chassis</code> row to them.  Upon
+        graceful termination, <code>ovn-controller</code> removes these rows.
+      </dd>
+
+      <dt><code>Port_Binding</code></dt>
+      <dd>
+        At runtime, <code>ovn-controller</code> sets the <code>chassis</code>
+        columns of ports that are resident on its chassis to point to its
+        <code>Chassis</code> row, and, conversely, clears the
+        <code>chassis</code> column of ports that point to its
+        <code>Chassis</code> row but are no longer resident on its chassis.
+        The <code>chassis</code> column has a weak reference type, so when
+        <code>ovn-controller</code> gracefully exits and removes its
+        <code>Chassis</code> row, the database server automatically clears any
+        remaining references to that row.
+      </dd>
+
+      <dt><code>MAC_Binding</code></dt>
+      <dd>
+        At runtime, <code>ovn-controller</code> updates the
+        <code>MAC_Binding</code> table as instructed by <code>put_arp</code>
+        and <code>put_nd</code> logical actions.  These changes persist beyond
+        the lifetime of <code>ovn-controller</code>.
       </dd>
     </dl>
 

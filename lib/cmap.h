@@ -140,7 +140,7 @@ size_t cmap_replace(struct cmap *, struct cmap_node *old_node,
 #define CMAP_FOR_EACH_WITH_HASH(NODE, MEMBER, HASH, CMAP)   \
     CMAP_NODE_FOR_EACH(NODE, MEMBER, cmap_find(CMAP, HASH))
 #define CMAP_FOR_EACH_WITH_HASH_PROTECTED(NODE, MEMBER, HASH, CMAP)     \
-    CMAP_NODE_FOR_EACH_PROTECTED(NODE, MEMBER, cmap_find_locked(CMAP, HASH))
+    CMAP_NODE_FOR_EACH_PROTECTED(NODE, MEMBER, cmap_find_protected(CMAP, HASH))
 
 const struct cmap_node *cmap_find(const struct cmap *, uint32_t hash);
 struct cmap_node *cmap_find_protected(const struct cmap *, uint32_t hash);
@@ -189,13 +189,12 @@ unsigned long cmap_find_batch(const struct cmap *cmap, unsigned long map,
  *         int extra_data;
  *     };
  *
- *     struct cmap_cursor cursor;
- *     struct my_node *iter;
  *     struct cmap my_map;
+ *     struct my_node *my_node;
  *
- *     cmap_init(&cmap);
+ *     cmap_init(&my_map);
  *     ...add data...
- *     CMAP_FOR_EACH (my_node, cmap_node, &cursor, &cmap) {
+ *     CMAP_FOR_EACH (my_node, cmap_node, &my_map) {
  *         ...operate on my_node...
  *     }
  *
@@ -233,10 +232,19 @@ struct cmap_cursor {
 struct cmap_cursor cmap_cursor_start(const struct cmap *);
 void cmap_cursor_advance(struct cmap_cursor *);
 
-#define CMAP_FOR_EACH(NODE, MEMBER, CMAP)                       \
-    for (struct cmap_cursor cursor__ = cmap_cursor_start(CMAP); \
-         CMAP_CURSOR_FOR_EACH__(NODE, &cursor__, MEMBER);       \
+/* Generate a unique name for the cursor with the __COUNTER__ macro to
+ * allow nesting of CMAP_FOR_EACH loops. */
+#define CURSOR_JOIN2(x,y) x##y
+#define CURSOR_JOIN(x, y) CURSOR_JOIN2(x,y)
+
+#define CMAP_FOR_EACH__(NODE, MEMBER, CMAP, CURSOR_NAME)           \
+    for (struct cmap_cursor CURSOR_NAME = cmap_cursor_start(CMAP); \
+         CMAP_CURSOR_FOR_EACH__(NODE, &CURSOR_NAME, MEMBER);       \
         )
+
+#define CMAP_FOR_EACH(NODE, MEMBER, CMAP) \
+          CMAP_FOR_EACH__(NODE, MEMBER, CMAP, \
+                CURSOR_JOIN(cursor_, __COUNTER__))
 
 static inline struct cmap_node *cmap_first(const struct cmap *);
 

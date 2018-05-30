@@ -18,6 +18,7 @@
 #include "vconn-provider.h"
 #include <errno.h>
 #include <inttypes.h>
+#include <sys/types.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <stdlib.h>
@@ -28,6 +29,7 @@
 #include "openflow/nicira-ext.h"
 #include "openflow/openflow.h"
 #include "openvswitch/dynamic-string.h"
+#include "openvswitch/ofp-bundle.h"
 #include "openvswitch/ofp-errors.h"
 #include "openvswitch/ofp-msgs.h"
 #include "openvswitch/ofp-print.h"
@@ -495,7 +497,7 @@ vcs_recv_hello(struct vconn *vconn)
             ofpbuf_delete(b);
             return;
         } else {
-            char *s = ofp_to_string(b->data, b->size, NULL, 1);
+            char *s = ofp_to_string(b->data, b->size, NULL, NULL, 1);
             VLOG_WARN_RL(&bad_ofmsg_rl,
                          "%s: received message while expecting hello: %s",
                          vconn->name, s);
@@ -569,6 +571,7 @@ vconn_connect(struct vconn *vconn)
             break;
 
         case VCS_DISCONNECTED:
+            ovs_assert(vconn->error != 0);
             return vconn->error;
 
         default:
@@ -641,7 +644,8 @@ do_recv(struct vconn *vconn, struct ofpbuf **msgp)
     if (!retval) {
         COVERAGE_INC(vconn_received);
         if (VLOG_IS_DBG_ENABLED()) {
-            char *s = ofp_to_string((*msgp)->data, (*msgp)->size, NULL, 1);
+            char *s = ofp_to_string((*msgp)->data, (*msgp)->size,
+                                    NULL, NULL, 1);
             VLOG_DBG_RL(&ofmsg_rl, "%s: received: %s", vconn->name, s);
             free(s);
         }
@@ -681,7 +685,7 @@ do_send(struct vconn *vconn, struct ofpbuf *msg)
         COVERAGE_INC(vconn_sent);
         retval = (vconn->vclass->send)(vconn, msg);
     } else {
-        char *s = ofp_to_string(msg->data, msg->size, NULL, 1);
+        char *s = ofp_to_string(msg->data, msg->size, NULL, NULL, 1);
         retval = (vconn->vclass->send)(vconn, msg);
         if (retval != EAGAIN) {
             VLOG_DBG_RL(&ofmsg_rl, "%s: sent (%s): %s",
@@ -957,7 +961,8 @@ recv_flow_stats_reply(struct vconn *vconn, ovs_be32 send_xid,
             error = ofptype_decode(&type, reply->data);
             if (error || type != OFPTYPE_FLOW_STATS_REPLY) {
                 VLOG_WARN_RL(&rl, "received bad reply: %s",
-                             ofp_to_string(reply->data, reply->size, NULL, 1));
+                             ofp_to_string(reply->data, reply->size,
+                                           NULL, NULL, 1));
                 return EPROTO;
             }
         }
@@ -1403,10 +1408,6 @@ pvconn_close(struct pvconn *pvconn)
 /* Tries to accept a new connection on 'pvconn'.  If successful, stores the new
  * connection in '*new_vconn' and returns 0.  Otherwise, returns a positive
  * errno value.
- *
- * The new vconn will automatically negotiate an OpenFlow protocol version
- * acceptable to both peers on the connection.  The version negotiated will be
- * no lower than 'min_version' and no higher than 'max_version'.
  *
  * pvconn_accept() will not block waiting for a connection.  If no connection
  * is ready to be accepted, it returns EAGAIN immediately. */

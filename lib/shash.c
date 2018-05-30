@@ -143,8 +143,7 @@ shash_add_once(struct shash *sh, const char *name, const void *data)
 void
 shash_add_assert(struct shash *sh, const char *name, const void *data)
 {
-    bool added OVS_UNUSED = shash_add_once(sh, name, data);
-    ovs_assert(added);
+    ovs_assert(shash_add_once(sh, name, data));
 }
 
 /* Searches for 'name' in 'sh'.  If it does not already exist, adds it along
@@ -161,6 +160,29 @@ shash_replace(struct shash *sh, const char *name, const void *data)
         shash_add_nocopy__(sh, xstrdup(name), data, hash);
         return NULL;
     } else {
+        void *old_data = node->data;
+        node->data = CONST_CAST(void *, data);
+        return old_data;
+    }
+}
+
+/* Searches for 'name' in 'sh'.  If it does not already exist, adds it along
+ * with 'data' and returns NULL.  If it does already exist, replaces its data
+ * by 'data' and returns the data that it formerly contained.
+ *
+ * Takes ownership of 'name'. */
+void *
+shash_replace_nocopy(struct shash *sh, char *name, const void *data)
+{
+    size_t hash = hash_name(name);
+    struct shash_node *node;
+
+    node = shash_find__(sh, name, strlen(name), hash);
+    if (!node) {
+        shash_add_nocopy__(sh, name, data, hash);
+        return NULL;
+    } else {
+        free(name);
         void *old_data = node->data;
         node->data = CONST_CAST(void *, data);
         return old_data;

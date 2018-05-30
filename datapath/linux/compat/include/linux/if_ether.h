@@ -19,6 +19,18 @@
 #define ETH_P_8021AD    0x88A8          /* 802.1ad Service VLAN         */
 #endif
 
+#ifndef ETH_P_NSH
+#define ETH_P_NSH       0x894F          /* Network Service Header */
+#endif
+
+#ifndef ETH_P_ERSPAN
+#define ETH_P_ERSPAN	0x88BE		/* ERSPAN TYPE II */
+#endif
+
+#ifndef ETH_P_ERSPAN2
+#define ETH_P_ERSPAN2	0x22EB		/* ERSPAN version 2 (type III)	*/
+#endif
+
 #define inner_eth_hdr rpl_inner_eth_hdr
 static inline struct ethhdr *inner_eth_hdr(const struct sk_buff *skb)
 {

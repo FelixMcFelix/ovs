@@ -81,8 +81,13 @@ struct stt_dev {
 #define STT_PROTO_TCP		BIT(3)
 #define STT_PROTO_TYPES		(STT_PROTO_IPV4 | STT_PROTO_TCP)
 
+#ifdef HAVE_SKB_GSO_UDP
 #define SUPPORTED_GSO_TYPES (SKB_GSO_TCPV4 | SKB_GSO_UDP | SKB_GSO_DODGY | \
 			     SKB_GSO_TCPV6)
+#else
+#define SUPPORTED_GSO_TYPES (SKB_GSO_TCPV4 | SKB_GSO_DODGY | \
+			     SKB_GSO_TCPV6)
+#endif
 
 /* The length and offset of a fragment are encoded in the sequence number.
  * STT_SEQ_LEN_SHIFT is the left shift needed to store the length.
@@ -234,9 +239,7 @@ static void copy_skb_metadata(struct sk_buff *to, struct sk_buff *from)
 	to->priority = from->priority;
 	to->mark = from->mark;
 	to->vlan_tci = from->vlan_tci;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,10,0)
 	to->vlan_proto = from->vlan_proto;
-#endif
 	skb_copy_secmark(to, from);
 }
 
@@ -757,10 +760,8 @@ static int stt_can_offload(struct sk_buff *skb, __be16 l3_proto, u8 l4_proto)
 	if (skb->len + STT_HEADER_LEN + sizeof(struct iphdr) > 65535)
 		return 0;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,10,0)
 	if (skb_vlan_tag_present(skb) && skb->vlan_proto != htons(ETH_P_8021Q))
 		return 0;
-#endif
 	return 1;
 }
 
@@ -787,7 +788,6 @@ static struct sk_buff *handle_offloads(struct sk_buff *skb, int min_headroom)
 {
 	int err;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,10,0)
 	if (skb_vlan_tag_present(skb) && skb->vlan_proto != htons(ETH_P_8021Q)) {
 
 		min_headroom += VLAN_HLEN;
@@ -807,7 +807,6 @@ static struct sk_buff *handle_offloads(struct sk_buff *skb, int min_headroom)
 			goto error;
 		}
 	}
-#endif
 
 	if (skb_is_gso(skb)) {
 		struct sk_buff *nskb;
@@ -1310,7 +1309,7 @@ static bool validate_checksum(struct sk_buff *skb)
 static bool set_offloads(struct sk_buff *skb)
 {
 	struct stthdr *stth = stt_hdr(skb);
-	unsigned short gso_type;
+	unsigned int gso_type = 0;
 	int l3_header_size;
 	int l4_header_size;
 	u16 csum_offset;
@@ -1351,7 +1350,9 @@ static bool set_offloads(struct sk_buff *skb)
 	case STT_PROTO_IPV4:
 		/* UDP/IPv4 */
 		csum_offset = offsetof(struct udphdr, check);
+#ifdef HAVE_SKB_GSO_UDP
 		gso_type = SKB_GSO_UDP;
+#endif
 		l3_header_size = sizeof(struct iphdr);
 		l4_header_size = sizeof(struct udphdr);
 		skb->protocol = htons(ETH_P_IP);
@@ -1359,7 +1360,9 @@ static bool set_offloads(struct sk_buff *skb)
 	default:
 		/* UDP/IPv6 */
 		csum_offset = offsetof(struct udphdr, check);
+#ifdef HAVE_SKB_GSO_UDP
 		gso_type = SKB_GSO_UDP;
+#endif
 		l3_header_size = sizeof(struct ipv6hdr);
 		l4_header_size = sizeof(struct udphdr);
 		skb->protocol = htons(ETH_P_IPV6);
@@ -1848,7 +1851,12 @@ static const struct net_device_ops stt_netdev_ops = {
 	.ndo_stop               = stt_stop,
 	.ndo_start_xmit         = stt_dev_xmit,
 	.ndo_get_stats64        = ip_tunnel_get_stats64,
+#ifdef  HAVE_RHEL7_MAX_MTU
+	.ndo_size		= sizeof(struct net_device_ops),
+	.extended.ndo_change_mtu = stt_change_mtu,
+#else
 	.ndo_change_mtu         = stt_change_mtu,
+#endif
 	.ndo_validate_addr      = eth_validate_addr,
 	.ndo_set_mac_address    = eth_mac_addr,
 #ifdef USE_UPSTREAM_TUNNEL

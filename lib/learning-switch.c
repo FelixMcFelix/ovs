@@ -19,6 +19,7 @@
 
 #include <errno.h>
 #include <inttypes.h>
+#include <sys/types.h>
 #include <netinet/in.h>
 #include <stdlib.h>
 #include <time.h>
@@ -31,11 +32,16 @@
 #include "mac-learning.h"
 #include "openflow/openflow.h"
 #include "openvswitch/ofp-actions.h"
+#include "openvswitch/ofp-connection.h"
 #include "openvswitch/ofp-errors.h"
+#include "openvswitch/ofp-flow.h"
+#include "openvswitch/ofp-match.h"
 #include "openvswitch/ofp-msgs.h"
 #include "openvswitch/ofp-print.h"
 #include "openvswitch/ofp-util.h"
-#include "openvswitch/ofp-parse.h"
+#include "openvswitch/ofp-packet.h"
+#include "openvswitch/ofp-port.h"
+#include "openvswitch/ofp-switch.h"
 #include "openvswitch/ofpbuf.h"
 #include "openvswitch/vconn.h"
 #include "openvswitch/vlog.h"
@@ -200,7 +206,6 @@ lswitch_handshake(struct lswitch *sw)
         output.max_len = OFP_DEFAULT_MISS_SEND_LEN;
 
         struct ofputil_flow_mod fm = {
-            .match = MATCH_CATCHALL_INITIALIZER,
             .priority = 0,
             .table_id = 0,
             .command = OFPFC_ADD,
@@ -210,8 +215,10 @@ lswitch_handshake(struct lswitch *sw)
             .ofpacts = &output.ofpact,
             .ofpacts_len = sizeof output,
         };
-
+        minimatch_init_catchall(&fm.match);
         msg = ofputil_encode_flow_mod(&fm, protocol);
+        minimatch_destroy(&fm.match);
+
         error = rconn_send(sw->rconn, msg, NULL);
         if (error) {
             VLOG_INFO_RL(&rl, "%s: failed to add default flow (%s)",
@@ -298,7 +305,7 @@ lswitch_run(struct lswitch *sw)
     rconn_run(sw->rconn);
 
     if (sw->state == S_CONNECTING) {
-        if (rconn_get_version(sw->rconn) != -1) {
+        if (rconn_is_connected(sw->rconn)) {
             lswitch_handshake(sw);
             sw->state = S_FEATURES_REPLY;
         }
@@ -368,7 +375,7 @@ lswitch_process_packet(struct lswitch *sw, const struct ofpbuf *msg)
     } else if (type == OFPTYPE_FLOW_REMOVED) {
         /* Nothing to do. */
     } else if (VLOG_IS_DBG_ENABLED()) {
-        char *s = ofp_to_string(msg->data, msg->size, NULL, 2);
+        char *s = ofp_to_string(msg->data, msg->size, NULL, NULL, 2);
         VLOG_DBG_RL(&rl, "%016llx: OpenFlow packet ignored: %s",
                     sw->datapath_id, s);
         free(s);
@@ -589,10 +596,15 @@ process_packet_in(struct lswitch *sw, const struct ofp_header *oh)
             .ofpacts = ofpacts.data,
             .ofpacts_len = ofpacts.size,
         };
-        match_init(&fm.match, &flow, &sw->wc);
-        ofputil_normalize_match_quiet(&fm.match);
+
+        struct match match;
+        match_init(&match, &flow, &sw->wc);
+        ofputil_normalize_match_quiet(&match);
+        minimatch_init(&fm.match, &match);
 
         struct ofpbuf *buffer = ofputil_encode_flow_mod(&fm, sw->protocol);
+
+        minimatch_destroy(&fm.match);
 
         queue_tx(sw, buffer);
 
@@ -612,7 +624,7 @@ process_packet_in(struct lswitch *sw, const struct ofp_header *oh)
 static void
 process_echo_request(struct lswitch *sw, const struct ofp_header *rq)
 {
-    queue_tx(sw, make_echo_reply(rq));
+    queue_tx(sw, ofputil_encode_echo_reply(rq));
 }
 
 static ofp_port_t

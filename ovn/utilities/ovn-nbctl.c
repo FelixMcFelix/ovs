@@ -76,6 +76,9 @@ static struct ovsdb_idl *the_idl;
 static struct ovsdb_idl_txn *the_idl_txn;
 OVS_NO_RETURN static void nbctl_exit(int status);
 
+/* --leader-only, --no-leader-only: Only accept the leader in a cluster. */
+static int leader_only = true;
+
 static void nbctl_cmd_init(void);
 OVS_NO_RETURN static void usage(void);
 static void parse_options(int argc, char *argv[], struct shash *local_options);
@@ -94,7 +97,6 @@ main(int argc, char *argv[])
     struct shash local_options;
     unsigned int seqno;
     size_t n_commands;
-    char *args;
 
     set_program_name(argv[0]);
     fatal_ignore_sigpipe();
@@ -103,16 +105,14 @@ main(int argc, char *argv[])
 
     nbctl_cmd_init();
 
-    /* Log our arguments.  This is often valuable for debugging systems. */
-    args = process_escape_args(argv);
-    VLOG(ctl_might_write_to_db(argv) ? VLL_INFO : VLL_DBG,
-         "Called as %s", args);
-
     /* Parse command line. */
+    char *args = process_escape_args(argv);
     shash_init(&local_options);
     parse_options(argc, argv, &local_options);
     commands = ctl_parse_commands(argc - optind, argv + optind, &local_options,
                                   &n_commands);
+    VLOG(ctl_might_write_to_db(commands, n_commands) ? VLL_INFO : VLL_DBG,
+         "Called as %s", args);
 
     if (timeout) {
         time_alarm(timeout);
@@ -120,6 +120,7 @@ main(int argc, char *argv[])
 
     /* Initialize IDL. */
     idl = the_idl = ovsdb_idl_create(db, &nbrec_idl_class, true, false);
+    ovsdb_idl_set_leader_only(idl, leader_only);
     run_prerequisites(commands, n_commands, idl);
 
     /* Execute the commands.
@@ -182,6 +183,8 @@ parse_options(int argc, char *argv[], struct shash *local_options)
         {"help", no_argument, NULL, 'h'},
         {"commands", no_argument, NULL, OPT_COMMANDS},
         {"options", no_argument, NULL, OPT_OPTIONS},
+        {"leader-only", no_argument, &leader_only, true},
+        {"no-leader-only", no_argument, &leader_only, false},
         {"version", no_argument, NULL, 'V'},
         VLOG_LONG_OPTIONS,
         STREAM_SSL_LONG_OPTIONS,
@@ -300,6 +303,9 @@ parse_options(int argc, char *argv[], struct shash *local_options)
 
         default:
             abort();
+
+        case 0:
+            break;
         }
     }
     free(short_options);
@@ -333,12 +339,22 @@ Logical switch commands:\n\
   ls-list                   print the names of all logical switches\n\
 \n\
 ACL commands:\n\
-  [--log] [--severity=SEVERITY] [--name=NAME] [--may-exist]\n\
-  acl-add SWITCH DIRECTION PRIORITY MATCH ACTION\n\
-                            add an ACL to SWITCH\n\
-  acl-del SWITCH [DIRECTION [PRIORITY MATCH]]\n\
-                            remove ACLs from SWITCH\n\
-  acl-list SWITCH           print ACLs for SWITCH\n\
+  [--type={switch | port-group}] [--log] [--severity=SEVERITY] [--name=NAME] [--may-exist]\n\
+  acl-add {SWITCH | PORTGROUP} DIRECTION PRIORITY MATCH ACTION\n\
+                            add an ACL to SWITCH/PORTGROUP\n\
+  [--type={switch | port-group}]\n\
+  acl-del {SWITCH | PORTGROUP} [DIRECTION [PRIORITY MATCH]]\n\
+                            remove ACLs from SWITCH/PORTGROUP\n\
+  [--type={switch | port-group}]\n\
+  acl-list {SWITCH | PORTGROUP}\n\
+                            print ACLs for SWITCH\n\
+\n\
+QoS commands:\n\
+  qos-add SWITCH DIRECTION PRIORITY MATCH [rate=RATE [burst=BURST]] [dscp=DSCP]\n\
+                            add an QoS rule to SWITCH\n\
+  qos-del SWITCH [DIRECTION [PRIORITY MATCH]]\n\
+                            remove QoS rules from SWITCH\n\
+  qos-list SWITCH           print QoS rules for SWITCH\n\
 \n\
 Logical switch port commands:\n\
   lsp-add SWITCH PORT       add logical port PORT on SWITCH\n\
@@ -439,6 +455,7 @@ DHCP Options commands:\n\
 Connection commands:\n\
   get-connection             print the connections\n\
   del-connection             delete the connections\n\
+  [--inactivity-probe=MSECS]\n\
   set-connection TARGET...   set the list of connections to TARGET...\n\
 \n\
 SSL commands:\n\
@@ -448,6 +465,7 @@ SSL commands:\n\
 set the SSL configuration\n\
 \n\
 %s\
+%s\
 \n\
 Synchronization command (use with --wait=sb|hv):\n\
   sync                     wait even for earlier changes to take effect\n\
@@ -456,13 +474,14 @@ Options:\n\
   --db=DATABASE               connect to DATABASE\n\
                               (default: %s)\n\
   --no-wait, --wait=none      do not wait for OVN reconfiguration (default)\n\
+  --no-leader-only            accept any cluster member, not just the leader\n\
   --wait=sb                   wait for southbound database update\n\
   --wait=hv                   wait for all chassis to catch up\n\
   -t, --timeout=SECS          wait at most SECS seconds\n\
   --dry-run                   do not commit changes to database\n\
   --oneline                   print exactly one line of output per command\n",
            program_name, program_name, ctl_get_db_cmd_usage(),
-           default_nb_db());
+           ctl_list_db_tables_usage(), default_nb_db());
     table_usage();
     vlog_usage();
     printf("\
@@ -471,7 +490,7 @@ Options:\n\
 Other options:\n\
   -h, --help                  display this help message\n\
   -V, --version               display version information\n");
-    stream_usage("database", true, true, false);
+    stream_usage("database", true, true, true);
     exit(EXIT_SUCCESS);
 }
 
@@ -579,6 +598,36 @@ lb_by_name_or_uuid(struct ctl_context *ctx, const char *id, bool must_exist)
     return lb;
 }
 
+static const struct nbrec_port_group *
+pg_by_name_or_uuid(struct ctl_context *ctx, const char *id, bool must_exist)
+{
+    const struct nbrec_port_group *pg = NULL;
+
+    struct uuid pg_uuid;
+    bool is_uuid = uuid_from_string(&pg_uuid, id);
+    if (is_uuid) {
+        pg = nbrec_port_group_get_for_uuid(ctx->idl, &pg_uuid);
+    }
+
+    if (!pg) {
+        const struct nbrec_port_group *iter;
+
+        NBREC_PORT_GROUP_FOR_EACH (iter, ctx->idl) {
+            if (!strcmp(iter->name, id)) {
+                pg = iter;
+                break;
+            }
+        }
+    }
+
+    if (!pg && must_exist) {
+        ctl_fatal("%s: port group %s not found", id,
+                  is_uuid ? "UUID" : "name");
+    }
+
+    return pg;
+}
+
 static void
 print_alias(const struct smap *external_ids, const char *key, struct ds *s)
 {
@@ -586,6 +635,38 @@ print_alias(const struct smap *external_ids, const char *key, struct ds *s)
     if (alias && alias[0]) {
         ds_put_format(s, " (aka %s)", alias);
     }
+}
+
+/* gateway_chassis ordering
+ *  */
+static int
+compare_chassis_prio_(const void *gc1_, const void *gc2_)
+{
+    const struct nbrec_gateway_chassis *const *gc1p = gc1_;
+    const struct nbrec_gateway_chassis *const *gc2p = gc2_;
+    const struct nbrec_gateway_chassis *gc1 = *gc1p;
+    const struct nbrec_gateway_chassis *gc2 = *gc2p;
+
+    int prio_diff = gc2->priority - gc1->priority;
+    if (!prio_diff) {
+        return strcmp(gc2->name, gc1->name);
+    }
+    return prio_diff;
+}
+
+static const struct nbrec_gateway_chassis **
+get_ordered_gw_chassis_prio_list(const struct nbrec_logical_router_port *lrp)
+{
+    const struct nbrec_gateway_chassis **gcs;
+    int i;
+
+    gcs = xmalloc(sizeof *gcs * lrp->n_gateway_chassis);
+    for (i = 0; i < lrp->n_gateway_chassis; i++) {
+        gcs[i] = lrp->gateway_chassis[i];
+    }
+
+    qsort(gcs, lrp->n_gateway_chassis, sizeof *gcs, compare_chassis_prio_);
+    return gcs;
 }
 
 /* Given pointer to logical router, this routine prints the router
@@ -613,6 +694,20 @@ print_lr(const struct nbrec_logical_router *lr, struct ds *s)
                         lrp->networks[j]);
             }
             ds_put_cstr(s, "]\n");
+        }
+
+        if (lrp->n_gateway_chassis) {
+            const struct nbrec_gateway_chassis **gcs;
+
+            gcs = get_ordered_gw_chassis_prio_list(lrp);
+            ds_put_cstr(s, "        gateway chassis: [");
+            for (size_t j = 0; j < lrp->n_gateway_chassis; j++) {
+                const struct nbrec_gateway_chassis *gc = gcs[j];
+                ds_put_format(s, "%s ", gc->chassis_name);
+            }
+            ds_chomp(s, ' ');
+            ds_put_cstr(s, "]\n");
+            free(gcs);
         }
     }
 
@@ -780,19 +875,19 @@ static void
 nbctl_ls_list(struct ctl_context *ctx)
 {
     const struct nbrec_logical_switch *ls;
-    struct smap lswitches;
+    struct smap switches;
 
-    smap_init(&lswitches);
+    smap_init(&switches);
     NBREC_LOGICAL_SWITCH_FOR_EACH(ls, ctx->idl) {
-        smap_add_format(&lswitches, ls->name, UUID_FMT " (%s)",
+        smap_add_format(&switches, ls->name, UUID_FMT " (%s)",
                         UUID_ARGS(&ls->header_.uuid), ls->name);
     }
-    const struct smap_node **nodes = smap_sort(&lswitches);
-    for (size_t i = 0; i < smap_count(&lswitches); i++) {
+    const struct smap_node **nodes = smap_sort(&switches);
+    for (size_t i = 0; i < smap_count(&switches); i++) {
         const struct smap_node *node = nodes[i];
         ds_put_format(&ctx->output, "%s\n", node->value);
     }
-    smap_destroy(&lswitches);
+    smap_destroy(&switches);
     free(nodes);
 }
 
@@ -1342,22 +1437,54 @@ acl_cmp(const void *acl1_, const void *acl2_)
 }
 
 static void
+acl_cmd_get_pg_or_ls(struct ctl_context *ctx,
+                     const struct nbrec_logical_switch **ls,
+                     const struct nbrec_port_group **pg)
+{
+    const char *opt_type = shash_find_data(&ctx->options, "--type");
+    if (!opt_type) {
+        *pg = pg_by_name_or_uuid(ctx, ctx->argv[1], false);
+        *ls = ls_by_name_or_uuid(ctx, ctx->argv[1], false);
+        if (*pg && *ls) {
+            ctl_fatal("Same name '%s' exists in both port-groups and "
+                      "logical switches. Specify --type=port-group or "
+                      "switch, or use a UUID.", ctx->argv[1]);
+        }
+        if (!*pg && !*ls) {
+            ctl_fatal("'%s' is not found for port-group or switch.",
+                      ctx->argv[1]);
+        }
+    } else if (!strcmp(opt_type, "port-group")) {
+        *pg = pg_by_name_or_uuid(ctx, ctx->argv[1], true);
+        *ls = NULL;
+    } else if (!strcmp(opt_type, "switch")) {
+        *ls = ls_by_name_or_uuid(ctx, ctx->argv[1], true);
+        *pg = NULL;
+    } else {
+        ctl_fatal("Invalid value '%s' for option --type", opt_type);
+    }
+}
+
+static void
 nbctl_acl_list(struct ctl_context *ctx)
 {
-    const struct nbrec_logical_switch *ls;
+    const struct nbrec_logical_switch *ls = NULL;
+    const struct nbrec_port_group *pg = NULL;
     const struct nbrec_acl **acls;
     size_t i;
 
-    ls = ls_by_name_or_uuid(ctx, ctx->argv[1], true);
+    acl_cmd_get_pg_or_ls(ctx, &ls, &pg);
+    size_t n_acls = pg ? pg->n_acls : ls->n_acls;
+    struct nbrec_acl **nb_acls = pg ? pg->acls : ls->acls;
 
-    acls = xmalloc(sizeof *acls * ls->n_acls);
-    for (i = 0; i < ls->n_acls; i++) {
-        acls[i] = ls->acls[i];
+    acls = xmalloc(sizeof *acls * n_acls);
+    for (i = 0; i < n_acls; i++) {
+        acls[i] = nb_acls[i];
     }
 
-    qsort(acls, ls->n_acls, sizeof *acls, acl_cmp);
+    qsort(acls, n_acls, sizeof *acls, acl_cmp);
 
-    for (i = 0; i < ls->n_acls; i++) {
+    for (i = 0; i < n_acls; i++) {
         const struct nbrec_acl *acl = acls[i];
         ds_put_format(&ctx->output, "%10s %5"PRId64" (%s) %s",
                       acl->direction, acl->priority, acl->match,
@@ -1377,6 +1504,26 @@ nbctl_acl_list(struct ctl_context *ctx)
     }
 
     free(acls);
+}
+
+static int
+qos_cmp(const void *qos1_, const void *qos2_)
+{
+    const struct nbrec_qos *const *qos1p = qos1_;
+    const struct nbrec_qos *const *qos2p = qos2_;
+    const struct nbrec_qos *qos1 = *qos1p;
+    const struct nbrec_qos *qos2 = *qos2p;
+
+    int dir1 = dir_encode(qos1->direction);
+    int dir2 = dir_encode(qos2->direction);
+
+    if (dir1 != dir2) {
+        return dir1 < dir2 ? -1 : 1;
+    } else if (qos1->priority != qos2->priority) {
+        return qos1->priority > qos2->priority ? -1 : 1;
+    } else {
+        return strcmp(qos1->match, qos2->match);
+    }
 }
 
 static const char *
@@ -1407,10 +1554,11 @@ parse_priority(const char *arg)
 static void
 nbctl_acl_add(struct ctl_context *ctx)
 {
-    const struct nbrec_logical_switch *ls;
+    const struct nbrec_logical_switch *ls = NULL;
+    const struct nbrec_port_group *pg = NULL;
     const char *action = ctx->argv[5];
 
-    ls = ls_by_name_or_uuid(ctx, ctx->argv[1], true);
+    acl_cmd_get_pg_or_ls(ctx, &ls, &pg);
 
     const char *direction = parse_direction(ctx->argv[2]);
     int64_t priority = parse_priority(ctx->argv[3]);
@@ -1447,9 +1595,11 @@ nbctl_acl_add(struct ctl_context *ctx)
         nbrec_acl_set_name(acl, name);
     }
 
-    /* Check if same acl already exists for the ls */
-    for (size_t i = 0; i < ls->n_acls; i++) {
-        if (!acl_cmp(&ls->acls[i], &acl)) {
+    /* Check if same acl already exists for the ls/portgroup */
+    size_t n_acls = pg ? pg->n_acls : ls->n_acls;
+    struct nbrec_acl **acls = pg ? pg->acls : ls->acls;
+    for (size_t i = 0; i < n_acls; i++) {
+        if (!acl_cmp(&acls[i], &acl)) {
             bool may_exist = shash_find(&ctx->options, "--may-exist") != NULL;
             if (!may_exist) {
                 ctl_fatal("Same ACL already existed on the ls %s.",
@@ -1459,45 +1609,64 @@ nbctl_acl_add(struct ctl_context *ctx)
         }
     }
 
-    /* Insert the acl into the logical switch. */
-    nbrec_logical_switch_verify_acls(ls);
-    struct nbrec_acl **new_acls = xmalloc(sizeof *new_acls * (ls->n_acls + 1));
-    nullable_memcpy(new_acls, ls->acls, sizeof *new_acls * ls->n_acls);
-    new_acls[ls->n_acls] = acl;
-    nbrec_logical_switch_set_acls(ls, new_acls, ls->n_acls + 1);
+    /* Insert the acl into the logical switch/port group. */
+    struct nbrec_acl **new_acls = xmalloc(sizeof *new_acls * (n_acls + 1));
+    nullable_memcpy(new_acls, acls, sizeof *new_acls * n_acls);
+    new_acls[n_acls] = acl;
+    if (pg) {
+        nbrec_port_group_verify_acls(pg);
+        nbrec_port_group_set_acls(pg, new_acls, n_acls + 1);
+    } else {
+        nbrec_logical_switch_verify_acls(ls);
+        nbrec_logical_switch_set_acls(ls, new_acls, n_acls + 1);
+    }
     free(new_acls);
 }
 
 static void
 nbctl_acl_del(struct ctl_context *ctx)
 {
-    const struct nbrec_logical_switch *ls;
-    ls = ls_by_name_or_uuid(ctx, ctx->argv[1], true);
+    const struct nbrec_logical_switch *ls = NULL;
+    const struct nbrec_port_group *pg = NULL;
+
+    acl_cmd_get_pg_or_ls(ctx, &ls, &pg);
 
     if (ctx->argc == 2) {
         /* If direction, priority, and match are not specified, delete
          * all ACLs. */
-        nbrec_logical_switch_verify_acls(ls);
-        nbrec_logical_switch_set_acls(ls, NULL, 0);
+        if (pg) {
+            nbrec_port_group_verify_acls(pg);
+            nbrec_port_group_set_acls(pg, NULL, 0);
+        } else {
+            nbrec_logical_switch_verify_acls(ls);
+            nbrec_logical_switch_set_acls(ls, NULL, 0);
+        }
         return;
     }
 
     const char *direction = parse_direction(ctx->argv[2]);
 
+    size_t n_acls = pg ? pg->n_acls : ls->n_acls;
+    struct nbrec_acl **acls = pg ? pg->acls : ls->acls;
     /* If priority and match are not specified, delete all ACLs with the
      * specified direction. */
     if (ctx->argc == 3) {
-        struct nbrec_acl **new_acls = xmalloc(sizeof *new_acls * ls->n_acls);
+        struct nbrec_acl **new_acls = xmalloc(sizeof *new_acls * n_acls);
 
-        int n_acls = 0;
-        for (size_t i = 0; i < ls->n_acls; i++) {
-            if (strcmp(direction, ls->acls[i]->direction)) {
-                new_acls[n_acls++] = ls->acls[i];
+        int n_new_acls = 0;
+        for (size_t i = 0; i < n_acls; i++) {
+            if (strcmp(direction, acls[i]->direction)) {
+                new_acls[n_new_acls++] = acls[i];
             }
         }
 
-        nbrec_logical_switch_verify_acls(ls);
-        nbrec_logical_switch_set_acls(ls, new_acls, n_acls);
+        if (pg) {
+            nbrec_port_group_verify_acls(pg);
+            nbrec_port_group_set_acls(pg, new_acls, n_new_acls);
+        } else {
+            nbrec_logical_switch_verify_acls(ls);
+            nbrec_logical_switch_set_acls(ls, new_acls, n_new_acls);
+        }
         free(new_acls);
         return;
     }
@@ -1509,18 +1678,220 @@ nbctl_acl_del(struct ctl_context *ctx)
     }
 
     /* Remove the matching rule. */
-    for (size_t i = 0; i < ls->n_acls; i++) {
-        struct nbrec_acl *acl = ls->acls[i];
+    for (size_t i = 0; i < n_acls; i++) {
+        struct nbrec_acl *acl = acls[i];
 
         if (priority == acl->priority && !strcmp(ctx->argv[4], acl->match) &&
              !strcmp(direction, acl->direction)) {
             struct nbrec_acl **new_acls
-                = xmemdup(ls->acls, sizeof *new_acls * ls->n_acls);
-            new_acls[i] = ls->acls[ls->n_acls - 1];
-            nbrec_logical_switch_verify_acls(ls);
-            nbrec_logical_switch_set_acls(ls, new_acls,
-                                          ls->n_acls - 1);
+                = xmemdup(acls, sizeof *new_acls * n_acls);
+            new_acls[i] = acls[n_acls - 1];
+            if (pg) {
+                nbrec_port_group_verify_acls(pg);
+                nbrec_port_group_set_acls(pg, new_acls,
+                                          n_acls - 1);
+            } else {
+                nbrec_logical_switch_verify_acls(ls);
+                nbrec_logical_switch_set_acls(ls, new_acls,
+                                              n_acls - 1);
+            }
             free(new_acls);
+            return;
+        }
+    }
+}
+
+static void
+nbctl_qos_list(struct ctl_context *ctx)
+{
+    const struct nbrec_logical_switch *ls;
+    const struct nbrec_qos **qos_rules;
+    size_t i;
+
+    ls = ls_by_name_or_uuid(ctx, ctx->argv[1], true);
+
+    qos_rules = xmalloc(sizeof *qos_rules * ls->n_qos_rules);
+    for (i = 0; i < ls->n_qos_rules; i++) {
+        qos_rules[i] = ls->qos_rules[i];
+    }
+
+    qsort(qos_rules, ls->n_qos_rules, sizeof *qos_rules, qos_cmp);
+
+    for (i = 0; i < ls->n_qos_rules; i++) {
+        const struct nbrec_qos *qos_rule = qos_rules[i];
+        ds_put_format(&ctx->output, "%10s %5"PRId64" (%s)",
+                      qos_rule->direction, qos_rule->priority,
+                      qos_rule->match);
+        for (size_t j = 0; j < qos_rule->n_bandwidth; j++) {
+            if (!strcmp(qos_rule->key_bandwidth[j], "rate")) {
+                ds_put_format(&ctx->output, " rate=%"PRId64"",
+                              qos_rule->value_bandwidth[j]);
+            }
+        }
+        for (size_t j = 0; j < qos_rule->n_bandwidth; j++) {
+            if (!strcmp(qos_rule->key_bandwidth[j], "burst")) {
+                ds_put_format(&ctx->output, " burst=%"PRId64"",
+                              qos_rule->value_bandwidth[j]);
+            }
+        }
+        for (size_t j = 0; j < qos_rule->n_action; j++) {
+            if (!strcmp(qos_rule->key_action[j], "dscp")) {
+                ds_put_format(&ctx->output, " dscp=%"PRId64"",
+                              qos_rule->value_action[j]);
+            }
+        }
+        ds_put_cstr(&ctx->output, "\n");
+    }
+
+    free(qos_rules);
+}
+
+static void
+nbctl_qos_add(struct ctl_context *ctx)
+{
+    const struct nbrec_logical_switch *ls
+        = ls_by_name_or_uuid(ctx, ctx->argv[1], true);
+    const char *direction = parse_direction(ctx->argv[2]);
+    int64_t priority = parse_priority(ctx->argv[3]);
+    int64_t dscp = -1;
+    int64_t rate = 0;
+    int64_t burst = 0;
+
+    for (int i = 5; i < ctx->argc; i++) {
+        if (!strncmp(ctx->argv[i], "dscp=", 5)) {
+            if (!ovs_scan(ctx->argv[i] + 5, "%"SCNd64, &dscp)
+                || dscp < 0 || dscp > 63) {
+                ctl_fatal("%s: dscp must in range 0...63.", ctx->argv[i] + 5);
+                return;
+            }
+        }
+        else if (!strncmp(ctx->argv[i], "rate=", 5)) {
+            if (!ovs_scan(ctx->argv[i] + 5, "%"SCNd64, &rate)
+                || rate < 1 || rate > UINT32_MAX) {
+                ctl_fatal("%s: rate must in range 1...4294967295.",
+                          ctx->argv[i] + 5);
+                return;
+            }
+        }
+        else if (!strncmp(ctx->argv[i], "burst=", 6)) {
+            if (!ovs_scan(ctx->argv[i] + 6, "%"SCNd64, &burst)
+                || burst < 1 || burst > UINT32_MAX) {
+                ctl_fatal("%s: burst must in range 1...4294967295.",
+                          ctx->argv[i] + 6);
+                return;
+            }
+        } else {
+            ctl_fatal("%s: must be start of \"dscp=\", \"rate=\", \"burst=\".",
+                      ctx->argv[i]);
+            return;
+        }
+    }
+
+    /* Validate rate and dscp. */
+    if (-1 == dscp && !rate) {
+        ctl_fatal("One of the rate or dscp must be configured.");
+        return;
+    }
+
+    /* Create the qos. */
+    struct nbrec_qos *qos = nbrec_qos_insert(ctx->txn);
+    nbrec_qos_set_priority(qos, priority);
+    nbrec_qos_set_direction(qos, direction);
+    nbrec_qos_set_match(qos, ctx->argv[4]);
+    if (-1 != dscp) {
+        const char *dscp_key = "dscp";
+        nbrec_qos_set_action(qos, &dscp_key, &dscp, 1);
+    }
+    if (rate) {
+        const char *bandwidth_key[2] = {"rate", "burst"};
+        const int64_t bandwidth_value[2] = {rate, burst};
+        size_t n_bandwidth = 1;
+        if (burst) {
+            n_bandwidth = 2;
+        }
+        nbrec_qos_set_bandwidth(qos, bandwidth_key, bandwidth_value,
+                                n_bandwidth);
+    }
+
+    /* Check if same qos rule already exists for the ls */
+    for (size_t i = 0; i < ls->n_qos_rules; i++) {
+        if (!qos_cmp(&ls->qos_rules[i], &qos)) {
+            bool may_exist = shash_find(&ctx->options, "--may-exist") != NULL;
+            if (!may_exist) {
+                ctl_fatal("Same qos already existed on the ls %s.",
+                          ctx->argv[1]);
+            }
+            return;
+        }
+    }
+
+    /* Insert the qos rule the logical switch. */
+    nbrec_logical_switch_verify_qos_rules(ls);
+    struct nbrec_qos **new_qos_rules
+        = xmalloc(sizeof *new_qos_rules * (ls->n_qos_rules + 1));
+    nullable_memcpy(new_qos_rules,
+                    ls->qos_rules, sizeof *new_qos_rules * ls->n_qos_rules);
+    new_qos_rules[ls->n_qos_rules] = qos;
+    nbrec_logical_switch_set_qos_rules(ls, new_qos_rules,
+                                       ls->n_qos_rules + 1);
+    free(new_qos_rules);
+}
+
+static void
+nbctl_qos_del(struct ctl_context *ctx)
+{
+    const struct nbrec_logical_switch *ls
+        = ls_by_name_or_uuid(ctx, ctx->argv[1], true);
+
+    if (ctx->argc == 2) {
+        /* If direction, priority, and match are not specified, delete
+         * all QoS rules. */
+        nbrec_logical_switch_verify_qos_rules(ls);
+        nbrec_logical_switch_set_qos_rules(ls, NULL, 0);
+        return;
+    }
+
+    const char *direction = parse_direction(ctx->argv[2]);
+
+    /* If priority and match are not specified, delete all qos_rules with the
+     * specified direction. */
+    if (ctx->argc == 3) {
+        struct nbrec_qos **new_qos_rules
+            = xmalloc(sizeof *new_qos_rules * ls->n_qos_rules);
+
+        int n_qos_rules = 0;
+        for (size_t i = 0; i < ls->n_qos_rules; i++) {
+            if (strcmp(direction, ls->qos_rules[i]->direction)) {
+                new_qos_rules[n_qos_rules++] = ls->qos_rules[i];
+            }
+        }
+
+        nbrec_logical_switch_verify_qos_rules(ls);
+        nbrec_logical_switch_set_qos_rules(ls, new_qos_rules, n_qos_rules);
+        free(new_qos_rules);
+        return;
+    }
+
+    int64_t priority = parse_priority(ctx->argv[3]);
+
+    if (ctx->argc == 4) {
+        ctl_fatal("cannot specify priority without match");
+    }
+
+    /* Remove the matching rule. */
+    for (size_t i = 0; i < ls->n_qos_rules; i++) {
+        struct nbrec_qos *qos = ls->qos_rules[i];
+
+        if (priority == qos->priority && !strcmp(ctx->argv[4], qos->match) &&
+             !strcmp(direction, qos->direction)) {
+            struct nbrec_qos **new_qos_rules
+                = xmemdup(ls->qos_rules,
+                          sizeof *new_qos_rules * ls->n_qos_rules);
+            new_qos_rules[i] = ls->qos_rules[ls->n_qos_rules - 1];
+            nbrec_logical_switch_verify_qos_rules(ls);
+            nbrec_logical_switch_set_qos_rules(ls, new_qos_rules,
+                                          ls->n_qos_rules - 1);
+            free(new_qos_rules);
             return;
         }
     }
@@ -1538,7 +1909,6 @@ nbctl_lb_add(struct ctl_context *ctx)
 
     const char *lb_proto;
     bool is_update_proto = false;
-    bool is_vip_with_port = true;
 
     if (ctx->argc == 4) {
         /* Default protocol. */
@@ -1554,46 +1924,22 @@ nbctl_lb_add(struct ctl_context *ctx)
     }
 
     struct sockaddr_storage ss_vip;
-    char *error;
-    error = ipv46_parse(lb_vip, PORT_OPTIONAL, &ss_vip);
-    if (error) {
-        free(error);
+    if (!inet_parse_active(lb_vip, 0, &ss_vip)) {
         ctl_fatal("%s: should be an IP address (or an IP address "
                   "and a port number with : as a separator).", lb_vip);
     }
 
-    char lb_vip_normalized[INET6_ADDRSTRLEN + 8];
-    char normalized_ip[INET6_ADDRSTRLEN];
-    if (ss_vip.ss_family == AF_INET) {
-        struct sockaddr_in *sin = ALIGNED_CAST(struct sockaddr_in *, &ss_vip);
-        inet_ntop(AF_INET, &sin->sin_addr, normalized_ip,
-                  sizeof normalized_ip);
-        if (sin->sin_port) {
-            is_vip_with_port = true;
-            snprintf(lb_vip_normalized, sizeof lb_vip_normalized, "%s:%d",
-                     normalized_ip, ntohs(sin->sin_port));
-        } else {
-            is_vip_with_port = false;
-            ovs_strlcpy(lb_vip_normalized, normalized_ip,
-                        sizeof lb_vip_normalized);
-        }
+    struct ds lb_vip_normalized_ds = DS_EMPTY_INITIALIZER;
+    uint16_t lb_vip_port = ss_get_port(&ss_vip);
+    if (lb_vip_port) {
+        ss_format_address(&ss_vip, &lb_vip_normalized_ds);
+        ds_put_format(&lb_vip_normalized_ds, ":%d", lb_vip_port);
     } else {
-        struct sockaddr_in6 *sin6 = ALIGNED_CAST(struct sockaddr_in6 *,
-                                                 &ss_vip);
-        inet_ntop(AF_INET6, &sin6->sin6_addr, normalized_ip,
-                  sizeof normalized_ip);
-        if (sin6->sin6_port) {
-            is_vip_with_port = true;
-            snprintf(lb_vip_normalized, sizeof lb_vip_normalized, "[%s]:%d",
-                     normalized_ip, ntohs(sin6->sin6_port));
-        } else {
-            is_vip_with_port = false;
-            ovs_strlcpy(lb_vip_normalized, normalized_ip,
-                        sizeof lb_vip_normalized);
-        }
+        ss_format_address_nobracks(&ss_vip, &lb_vip_normalized_ds);
     }
+    const char *lb_vip_normalized = ds_cstr(&lb_vip_normalized_ds);
 
-    if (!is_vip_with_port && is_update_proto) {
+    if (!lb_vip_port && is_update_proto) {
         ctl_fatal("Protocol is unnecessary when no port of vip "
                   "is given.");
     }
@@ -1604,17 +1950,13 @@ nbctl_lb_add(struct ctl_context *ctx)
             token != NULL; token = strtok_r(NULL, ",", &save_ptr)) {
         struct sockaddr_storage ss_dst;
 
-        error = ipv46_parse(token, is_vip_with_port
-                ? PORT_REQUIRED
-                : PORT_FORBIDDEN,
-                &ss_dst);
-
-        if (error) {
-            free(error);
-            if (is_vip_with_port) {
+        if (lb_vip_port) {
+            if (!inet_parse_active(token, -1, &ss_dst)) {
                 ctl_fatal("%s: should be an IP address and a port "
-                        "number with : as a separator.", token);
-            } else {
+                          "number with : as a separator.", token);
+            }
+        } else {
+            if (!inet_parse_address(token, &ss_dst)) {
                 ctl_fatal("%s: should be an IP address.", token);
             }
         }
@@ -1655,6 +1997,7 @@ nbctl_lb_add(struct ctl_context *ctx)
             nbrec_load_balancer_verify_vips(lb);
             nbrec_load_balancer_set_vips(lb, &lb->vips);
             ds_destroy(&lb_ips_new);
+            ds_destroy(&lb_vip_normalized_ds);
             return;
         }
     }
@@ -1667,6 +2010,8 @@ nbctl_lb_add(struct ctl_context *ctx)
             lb_vip_normalized, ds_cstr(&lb_ips_new));
     nbrec_load_balancer_set_vips(lb, &lb->vips);
     ds_destroy(&lb_ips_new);
+
+    ds_destroy(&lb_vip_normalized_ds);
 }
 
 static void
@@ -1708,38 +2053,18 @@ static void
 lb_info_add_smap(const struct nbrec_load_balancer *lb,
                  struct smap *lbs, int vip_width)
 {
-    struct ds key = DS_EMPTY_INITIALIZER;
-    struct ds val = DS_EMPTY_INITIALIZER;
-    char *error, *protocol;
-
     const struct smap_node **nodes = smap_sort(&lb->vips);
     if (nodes) {
+        struct ds val = DS_EMPTY_INITIALIZER;
         for (int i = 0; i < smap_count(&lb->vips); i++) {
             const struct smap_node *node = nodes[i];
-            protocol = lb->protocol;
 
             struct sockaddr_storage ss;
-            error = ipv46_parse(node->key, PORT_OPTIONAL, &ss);
-            if (error) {
-                VLOG_WARN("%s", error);
-                free(error);
+            if (!inet_parse_active(node->key, 0, &ss)) {
                 continue;
             }
 
-            if (ss.ss_family == AF_INET) {
-                struct sockaddr_in *sin = ALIGNED_CAST(struct sockaddr_in *,
-                                                       &ss);
-                if (!sin->sin_port) {
-                    protocol = "tcp/udp";
-                }
-            } else {
-                struct sockaddr_in6 *sin6 = ALIGNED_CAST(struct sockaddr_in6 *,
-                                                         &ss);
-                if (!sin6->sin6_port) {
-                    protocol = "tcp/udp";
-                }
-            }
-
+            char *protocol = ss_get_port(&ss) ? lb->protocol : "tcp/udp";
             i == 0 ? ds_put_format(&val,
                         UUID_FMT "    %-20.16s%-11.7s%-*.*s%s",
                         UUID_ARGS(&lb->header_.uuid),
@@ -1752,11 +2077,8 @@ lb_info_add_smap(const struct nbrec_load_balancer *lb,
                         node->key, node->value);
         }
 
-        ds_put_format(&key, "%-20.16s", lb->name);
-        smap_add(lbs, ds_cstr(&key), ds_cstr(&val));
-
-        ds_destroy(&key);
-        ds_destroy(&val);
+        smap_add_nocopy(lbs, xasprintf("%-20.16s", lb->name),
+                        ds_steal_cstr(&val));
         free(nodes);
     }
 }
@@ -2826,23 +3148,6 @@ nbctl_lrp_del_gateway_chassis(struct ctl_context *ctx)
               chassis_name, ctx->argv[1]);
 }
 
-/* gateway_chassis ordering
- *  */
-static int
-compare_chassis_prio_(const void *gc1_, const void *gc2_)
-{
-    const struct nbrec_gateway_chassis *const *gc1p = gc1_;
-    const struct nbrec_gateway_chassis *const *gc2p = gc2_;
-    const struct nbrec_gateway_chassis *gc1 = *gc1p;
-    const struct nbrec_gateway_chassis *gc2 = *gc2p;
-
-    int prio_diff = gc2->priority - gc1->priority;
-    if (!prio_diff) {
-        return strcmp(gc2->name, gc1->name);
-    }
-    return prio_diff;
-}
-
 /* Print a list of gateway chassis. */
 static void
 nbctl_lrp_get_gateway_chassis(struct ctl_context *ctx)
@@ -2853,13 +3158,7 @@ nbctl_lrp_get_gateway_chassis(struct ctl_context *ctx)
     size_t i;
 
     lrp = lrp_by_name_or_uuid(ctx, id, true);
-
-    gcs = xmalloc(sizeof *gcs * lrp->n_gateway_chassis);
-    for (i = 0; i < lrp->n_gateway_chassis; i++) {
-        gcs[i] = lrp->gateway_chassis[i];
-    }
-
-    qsort(gcs, lrp->n_gateway_chassis, sizeof *gcs, compare_chassis_prio_);
+    gcs = get_ordered_gw_chassis_prio_list(lrp);
 
     for (i = 0; i < lrp->n_gateway_chassis; i++) {
         const struct nbrec_gateway_chassis *gc = gcs[i];
@@ -3258,6 +3557,7 @@ pre_connection(struct ctl_context *ctx)
 {
     ovsdb_idl_add_column(ctx->idl, &nbrec_nb_global_col_connections);
     ovsdb_idl_add_column(ctx->idl, &nbrec_connection_col_target);
+    ovsdb_idl_add_column(ctx->idl, &nbrec_connection_col_inactivity_probe);
 }
 
 static void
@@ -3311,6 +3611,8 @@ insert_connections(struct ctl_context *ctx, char *targets[], size_t n)
     const struct nbrec_nb_global *nb_global = nbrec_nb_global_first(ctx->idl);
     struct nbrec_connection **connections;
     size_t i, conns=0;
+    const char *inactivity_probe = shash_find_data(&ctx->options,
+                                                   "--inactivity-probe");
 
     /* Insert each connection in a new row in Connection table. */
     connections = xmalloc(n * sizeof *connections);
@@ -3322,6 +3624,11 @@ insert_connections(struct ctl_context *ctx, char *targets[], size_t n)
 
         connections[conns] = nbrec_connection_insert(ctx->txn);
         nbrec_connection_set_target(connections[conns], targets[i]);
+        if (inactivity_probe) {
+            int64_t msecs = atoll(inactivity_probe);
+            nbrec_connection_set_inactivity_probe(connections[conns],
+                                                  &msecs, 1);
+        }
         conns++;
     }
 
@@ -3708,11 +4015,21 @@ static const struct ctl_command_syntax nbctl_commands[] = {
     { "ls-list", 0, 0, "", NULL, nbctl_ls_list, NULL, "", RO },
 
     /* acl commands. */
-    { "acl-add", 5, 6, "SWITCH DIRECTION PRIORITY MATCH ACTION", NULL,
-      nbctl_acl_add, NULL, "--log,--may-exist,--name=,--severity=", RW },
-    { "acl-del", 1, 4, "SWITCH [DIRECTION [PRIORITY MATCH]]", NULL,
-      nbctl_acl_del, NULL, "", RW },
-    { "acl-list", 1, 1, "SWITCH", NULL, nbctl_acl_list, NULL, "", RO },
+    { "acl-add", 5, 6, "{SWITCH | PORTGROUP} DIRECTION PRIORITY MATCH ACTION",
+      NULL, nbctl_acl_add, NULL,
+      "--log,--may-exist,--type=,--name=,--severity=", RW },
+    { "acl-del", 1, 4, "{SWITCH | PORTGROUP} [DIRECTION [PRIORITY MATCH]]",
+      NULL, nbctl_acl_del, NULL, "--type=", RW },
+    { "acl-list", 1, 1, "{SWITCH | PORTGROUP}",
+      NULL, nbctl_acl_list, NULL, "--type=", RO },
+
+    /* qos commands. */
+    { "qos-add", 5, 7,
+      "SWITCH DIRECTION PRIORITY MATCH [rate=RATE [burst=BURST]] [dscp=DSCP]",
+      NULL, nbctl_qos_add, NULL, "--may-exist", RW },
+    { "qos-del", 1, 4, "SWITCH [DIRECTION [PRIORITY MATCH]]", NULL,
+      nbctl_qos_del, NULL, "", RW },
+    { "qos-list", 1, 1, "SWITCH", NULL, nbctl_qos_list, NULL, "", RO },
 
     /* logical switch port commands. */
     { "lsp-add", 2, 4, "SWITCH PORT [PARENT] [TAG]", NULL, nbctl_lsp_add,
@@ -3825,7 +4142,7 @@ static const struct ctl_command_syntax nbctl_commands[] = {
     {"get-connection", 0, 0, "", pre_connection, cmd_get_connection, NULL, "", RO},
     {"del-connection", 0, 0, "", pre_connection, cmd_del_connection, NULL, "", RW},
     {"set-connection", 1, INT_MAX, "TARGET...", pre_connection, cmd_set_connection,
-     NULL, "", RW},
+     NULL, "--inactivity-probe=", RW},
 
     /* SSL commands. */
     {"get-ssl", 0, 0, "", pre_cmd_get_ssl, cmd_get_ssl, NULL, "", RO},
@@ -3841,6 +4158,6 @@ static const struct ctl_command_syntax nbctl_commands[] = {
 static void
 nbctl_cmd_init(void)
 {
-    ctl_init(nbrec_table_classes, tables, NULL, nbctl_exit);
+    ctl_init(&nbrec_idl_class, nbrec_table_classes, tables, NULL, nbctl_exit);
     ctl_register_commands(nbctl_commands);
 }

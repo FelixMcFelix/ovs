@@ -17,6 +17,8 @@
 
 #include "bundle.h"
 
+#include <sys/types.h>
+#include <netinet/in.h>
 #include <arpa/inet.h>
 #include <inttypes.h>
 
@@ -28,7 +30,7 @@
 #include "openvswitch/meta-flow.h"
 #include "openvswitch/ofp-actions.h"
 #include "openvswitch/ofp-errors.h"
-#include "openvswitch/ofp-util.h"
+#include "openvswitch/ofp-port.h"
 #include "openvswitch/ofpbuf.h"
 #include "openvswitch/vlog.h"
 #include "util.h"

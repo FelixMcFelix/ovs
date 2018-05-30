@@ -40,7 +40,7 @@ Build requirements
 In addition to the requirements described in :doc:`general`, building Open
 vSwitch with DPDK will require the following:
 
-- DPDK 17.05.2
+- DPDK 17.11.2
 
 - A `DPDK supported NIC`_
 
@@ -69,9 +69,9 @@ Install DPDK
 #. Download the `DPDK sources`_, extract the file and set ``DPDK_DIR``::
 
        $ cd /usr/src/
-       $ wget http://fast.dpdk.org/rel/dpdk-17.05.2.tar.xz
-       $ tar xf dpdk-17.05.2.tar.xz
-       $ export DPDK_DIR=/usr/src/dpdk-stable-17.05.2
+       $ wget http://fast.dpdk.org/rel/dpdk-17.11.2.tar.xz
+       $ tar xf dpdk-17.11.2.tar.xz
+       $ export DPDK_DIR=/usr/src/dpdk-stable-17.11.2
        $ cd $DPDK_DIR
 
 #. (Optional) Configure DPDK as a shared library
@@ -208,7 +208,8 @@ Open vSwitch should be started as described in :doc:`general` with the
 exception of ovs-vswitchd, which requires some special configuration to enable
 DPDK functionality. DPDK configuration arguments can be passed to ovs-vswitchd
 via the ``other_config`` column of the ``Open_vSwitch`` table. At a minimum,
-the ``dpdk-init`` option must be set to ``true``. For example::
+the ``dpdk-init`` option must be set to either ``true`` or ``try``.
+For example::
 
     $ export PATH=$PATH:/usr/local/share/openvswitch/scripts
     $ export DB_SOCK=/usr/local/var/run/openvswitch/db.sock
@@ -219,8 +220,12 @@ There are many other configuration options, the most important of which are
 listed below. Defaults will be provided for all values not explicitly set.
 
 ``dpdk-init``
-  Specifies whether OVS should initialize and support DPDK ports. This is a
-  boolean, and defaults to false.
+  Specifies whether OVS should initialize and support DPDK ports. This field
+  can either be ``true`` or ``try``.
+  A value of ``true`` will cause the ovs-vswitchd process to abort on
+  initialization failure.
+  A value of ``try`` will imply that the ovs-vswitchd process should
+  continue running even if the EAL initialization fails.
 
 ``dpdk-lcore-mask``
   Specifies the CPU cores on which dpdk lcore threads should be spawned and
@@ -256,6 +261,22 @@ See the section ``Performance Tuning`` for important DPDK customizations.
 
 Validating
 ----------
+
+DPDK support can be confirmed by validating the ``dpdk_initialized`` boolean
+value from the ovsdb.  A value of ``true`` means that the DPDK EAL
+initialization succeeded::
+
+  $ ovs-vsctl get Open_vSwitch . dpdk_initialized
+  true
+
+Additionally, the library version linked to ovs-vswitchd can be confirmed
+with either the ovs-vswitchd logs, or by running either of the commands::
+
+  $ ovs-vswitchd --version
+  ovs-vswitchd (Open vSwitch) 2.9.0
+  DPDK 17.11.0
+  $ ovs-vsctl get Open_vSwitch . dpdk_version
+  "DPDK 17.11.0"
 
 At this point you can use ovs-vsctl to set up bridges and other Open vSwitch
 features. Seeing as we've configured the DPDK datapath, we will use DPDK-type
@@ -395,7 +416,7 @@ Compiler Optimizations
 
 The default compiler optimization level is ``-O2``. Changing this to more
 aggressive compiler optimization such as ``-O3 -march=native`` with
-gcc (verified on 5.3.1) can produce performance gains though not siginificant.
+gcc (verified on 5.3.1) can produce performance gains though not significant.
 ``-march=native`` will produce optimized code on local machine and should be
 used when software compilation is done on Testbed.
 
@@ -518,6 +539,8 @@ The above command sets the number of rx queues for DPDK physical interface.
 The rx queues are assigned to pmd threads on the same NUMA node in a
 round-robin fashion.
 
+.. _dpdk-queues-sizes:
+
 DPDK Physical Port Queue Sizes
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -568,6 +591,64 @@ not needed i.e. jumbo frames are not needed, it can be forced off by adding
 chains of descriptors it will make more individual virtio descriptors available
 for rx to the guest using dpdkvhost ports and this can improve performance.
 
+Output Packet Batching
+~~~~~~~~~~~~~~~~~~~~~~
+
+To make advantage of batched transmit functions, OVS collects packets in
+intermediate queues before sending when processing a batch of received packets.
+Even if packets are matched by different flows, OVS uses a single send
+operation for all packets destined to the same output port.
+
+Furthermore, OVS is able to buffer packets in these intermediate queues for a
+configurable amount of time to reduce the frequency of send bursts at medium
+load levels when the packet receive rate is high, but the receive batch size
+still very small. This is particularly beneficial for packets transmitted to
+VMs using an interrupt-driven virtio driver, where the interrupt overhead is
+significant for the OVS PMD, the host operating system and the guest driver.
+
+The ``tx-flush-interval`` parameter can be used to specify the time in
+microseconds OVS should wait between two send bursts to a given port (default
+is ``0``). When the intermediate queue fills up before that time is over, the
+buffered packet batch is sent immediately::
+
+    $ ovs-vsctl set Open_vSwitch . other_config:tx-flush-interval=50
+
+This parameter influences both throughput and latency, depending on the traffic
+load on the port. In general lower values decrease latency while higher values
+may be useful to achieve higher throughput.
+
+Low traffic (``packet rate < 1 / tx-flush-interval``) should not experience
+any significant latency or throughput increase as packets are forwarded
+immediately.
+
+At intermediate load levels
+(``1 / tx-flush-interval < packet rate < 32 / tx-flush-interval``) traffic
+should experience an average latency increase of up to
+``1 / 2 * tx-flush-interval`` and a possible throughput improvement.
+
+Very high traffic (``packet rate >> 32 / tx-flush-interval``) should experience
+the average latency increase equal to ``32 / (2 * packet rate)``. Most send
+batches in this case will contain the maximum number of packets (``32``).
+
+A ``tx-burst-interval`` value of ``50`` microseconds has shown to provide a
+good performance increase in a ``PHY-VM-PHY`` scenario on ``x86`` system for
+interrupt-driven guests while keeping the latency increase at a reasonable
+level:
+
+  https://mail.openvswitch.org/pipermail/ovs-dev/2017-December/341628.html
+
+.. note::
+  Throughput impact of this option significantly depends on the scenario and
+  the traffic patterns. For example: ``tx-burst-interval`` value of ``50``
+  microseconds shows performance degradation in ``PHY-VM-PHY`` with bonded PHY
+  scenario while testing with ``256 - 1024`` packet flows:
+
+    https://mail.openvswitch.org/pipermail/ovs-dev/2017-December/341700.html
+
+The average number of packets per output batch can be checked in PMD stats::
+
+    $ ovs-appctl dpif-netdev/pmd-stats-show
+
 Limitations
 ------------
 
@@ -583,7 +664,19 @@ Limitations
   The latest list of validated firmware versions can be found in the `DPDK
   release notes`_.
 
-.. _DPDK release notes: http://dpdk.org/doc/guides/rel_notes/release_17_05.html
+.. _DPDK release notes: http://dpdk.org/doc/guides/rel_notes/release_17_11.html
+
+- Upper bound MTU: DPDK device drivers differ in how the L2 frame for a
+  given MTU value is calculated e.g. i40e driver includes 2 x vlan headers in
+  MTU overhead, em driver includes 1 x vlan header, ixgbe driver does not
+  include a vlan  header in overhead. Currently it is not possible for OVS
+  DPDK to know what upper bound MTU value is supported for a given device.
+  As such OVS DPDK must provision for the case where the L2 frame for a given
+  MTU includes 2 x vlan headers. This reduces the upper bound MTU value for
+  devices that do not include vlan headers in their L2 frames by 8 bytes e.g.
+  ixgbe devices upper bound MTU is reduced from 9710 to 9702. This work
+  around is temporary and is expected to be removed once a method is provided
+  by DPDK to query the upper bound MTU value for a given device.
 
 Reporting Bugs
 --------------

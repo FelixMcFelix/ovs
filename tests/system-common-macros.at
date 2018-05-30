@@ -179,12 +179,13 @@ m4_define([ADD_OVS_TUNNEL],
    ]
 )
 
-# ADD_OVS_TUNNEL6([type], [bridge], [port], [remote-addr], [overlay-addr])
+# ADD_OVS_TUNNEL6([type], [bridge], [port], [remote-addr], [overlay-addr],
+#                 [tunnel-args])
 #
 # Same as ADD_OVS_TUNNEL, but drops MTU enough for the IPv6 underlay.
 #
 m4_define([ADD_OVS_TUNNEL6],
-   [ADD_OVS_TUNNEL([$1], [$2], [$3], [$4], [$5])
+   [ADD_OVS_TUNNEL([$1], [$2], [$3], [$4], [$5], [$6])
     AT_CHECK([ip link set dev $2 mtu 1430])
    ]
 )
@@ -296,6 +297,11 @@ m4_define([OVS_CHECK_GRE],
     [AT_SKIP_IF([! ip link add foo type gretap help 2>&1 | grep gretap >/dev/null])
      OVS_CHECK_FIREWALL()])
 
+# OVS_CHECK_ERSPAN()
+m4_define([OVS_CHECK_ERSPAN],
+    [AT_SKIP_IF([! ip link add foo type erspan help 2>&1 | grep erspan >/dev/null])
+     OVS_CHECK_FIREWALL()])
+
 # OVS_CHECK_GRE_L3()
 m4_define([OVS_CHECK_GRE_L3],
     [AT_SKIP_IF([! ip link add foo type gre help 2>&1 | grep "gre " >/dev/null])
@@ -319,3 +325,7 @@ m4_define([OVS_CHECK_8021AD],
 # OVS_CHECK_IPROUTE_ENCAP()
 m4_define([OVS_CHECK_IPROUTE_ENCAP],
     [AT_SKIP_IF([! ip route help 2>&1 |grep encap >/dev/null])])
+
+# OVS_CHECK_CT_CLEAR()
+m4_define([OVS_CHECK_CT_CLEAR],
+    [AT_SKIP_IF([! grep -q "Datapath supports ct_clear action" ovs-vswitchd.log])])

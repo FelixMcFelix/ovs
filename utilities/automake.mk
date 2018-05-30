@@ -31,13 +31,13 @@ check_SCRIPTS += \
 	utilities/ovs-appctl-bashcomp.bash \
 	utilities/ovs-vsctl-bashcomp.bash
 
-EXTRA_DIST += utilities/ovs-sim.in utilities/ovs-sim.1.xml
-noinst_man_MANS += utilities/ovs-sim.1
+EXTRA_DIST += utilities/ovs-sim.in
 noinst_SCRIPTS += utilities/ovs-sim
 
 utilities/ovs-lib: $(top_builddir)/config.status
 
 EXTRA_DIST += \
+	utilities/gdb/ovs_gdb.py \
 	utilities/ovs-appctl-bashcomp.bash \
 	utilities/ovs-check-dead-ifs.in \
 	utilities/ovs-ctl.in \
@@ -91,7 +91,6 @@ CLEANFILES += \
 	utilities/ovs-pki \
 	utilities/ovs-pki.8 \
 	utilities/ovs-sim \
-	utilities/ovs-sim.1 \
 	utilities/ovs-tcpdump \
 	utilities/ovs-tcpdump.8 \
 	utilities/ovs-tcpundump \
@@ -146,6 +145,7 @@ endif
 
 FLAKE8_PYFILES += utilities/ovs-pcap.in \
 	utilities/checkpatch.py utilities/ovs-dev.py \
-	utilities/ovs-tcpdump.in
+	utilities/ovs-tcpdump.in \
+	utilities/ovs-pipegen.py
 
 include utilities/bugtool/automake.mk

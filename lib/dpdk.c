@@ -22,8 +22,10 @@
 #include <sys/stat.h>
 #include <getopt.h>
 
+#include <rte_errno.h>
 #include <rte_log.h>
 #include <rte_memzone.h>
+#include <rte_version.h>
 #ifdef DPDK_PDUMP
 #include <rte_mempool.h>
 #include <rte_pdump.h>
@@ -35,12 +37,16 @@
 #include "openvswitch/dynamic-string.h"
 #include "openvswitch/vlog.h"
 #include "smap.h"
+#include "vswitch-idl.h"
 
 VLOG_DEFINE_THIS_MODULE(dpdk);
 
 static FILE *log_stream = NULL;       /* Stream for DPDK log redirection */
 
 static char *vhost_sock_dir = NULL;   /* Location of vhost-user sockets */
+static bool vhost_iommu_enabled = false; /* Status of vHost IOMMU support */
+static bool dpdk_initialized = false; /* Indicates successful initialization
+                                       * of DPDK. */
 
 static int
 process_vhost_flags(char *flag, const char *default_val, int size,
@@ -270,20 +276,22 @@ static ssize_t
 dpdk_log_write(void *c OVS_UNUSED, const char *buf, size_t size)
 {
     char *str = xmemdup0(buf, size);
+    static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(600, 600);
+    static struct vlog_rate_limit dbg_rl = VLOG_RATE_LIMIT_INIT(600, 600);
 
     switch (rte_log_cur_msg_loglevel()) {
         case RTE_LOG_DEBUG:
-            VLOG_DBG("%s", str);
+            VLOG_DBG_RL(&dbg_rl, "%s", str);
             break;
         case RTE_LOG_INFO:
         case RTE_LOG_NOTICE:
-            VLOG_INFO("%s", str);
+            VLOG_INFO_RL(&rl, "%s", str);
             break;
         case RTE_LOG_WARNING:
-            VLOG_WARN("%s", str);
+            VLOG_WARN_RL(&rl, "%s", str);
             break;
         case RTE_LOG_ERR:
-            VLOG_ERR("%s", str);
+            VLOG_ERR_RL(&rl, "%s", str);
             break;
         case RTE_LOG_CRIT:
         case RTE_LOG_ALERT:
@@ -302,7 +310,7 @@ static cookie_io_functions_t dpdk_log_func = {
     .write = dpdk_log_write,
 };
 
-static void
+static bool
 dpdk_init__(const struct smap *ovs_other_config)
 {
     char **argv = NULL, **argv_to_release = NULL;
@@ -344,6 +352,11 @@ dpdk_init__(const struct smap *ovs_other_config)
     } else {
         vhost_sock_dir = sock_dir_subcomponent;
     }
+
+    vhost_iommu_enabled = smap_get_bool(ovs_other_config,
+                                        "vhost-iommu-support", false);
+    VLOG_INFO("IOMMU support for vhost-user-client %s.",
+               vhost_iommu_enabled ? "enabled" : "disabled");
 
     argv = grow_argv(&argv, 0, 1);
     argc = 1;
@@ -413,9 +426,6 @@ dpdk_init__(const struct smap *ovs_other_config)
 
     /* Make sure things are initialized ... */
     result = rte_eal_init(argc, argv);
-    if (result < 0) {
-        ovs_abort(result, "Cannot init EAL");
-    }
     argv_release(argv, argv_to_release, argc);
 
     /* Set the main thread affinity back to pre rte_eal_init() value */
@@ -425,6 +435,11 @@ dpdk_init__(const struct smap *ovs_other_config)
         if (err) {
             VLOG_ERR("Thread setaffinity error %d", err);
         }
+    }
+
+    if (result < 0) {
+        VLOG_EMER("Unable to initialize DPDK: %s", ovs_strerror(rte_errno));
+        return false;
     }
 
     rte_memzone_dump(stdout);
@@ -450,6 +465,7 @@ dpdk_init__(const struct smap *ovs_other_config)
 
     /* Finally, register the dpdk classes */
     netdev_dpdk_register();
+    return true;
 }
 
 void
@@ -461,19 +477,30 @@ dpdk_init(const struct smap *ovs_other_config)
         return;
     }
 
-    if (smap_get_bool(ovs_other_config, "dpdk-init", false)) {
+    const char *dpdk_init_val = smap_get_def(ovs_other_config, "dpdk-init",
+                                             "false");
+
+    bool try_only = !strcmp(dpdk_init_val, "try");
+    if (!strcmp(dpdk_init_val, "true") || try_only) {
         static struct ovsthread_once once_enable = OVSTHREAD_ONCE_INITIALIZER;
 
         if (ovsthread_once_start(&once_enable)) {
+            VLOG_INFO("Using %s", rte_version());
             VLOG_INFO("DPDK Enabled - initializing...");
-            dpdk_init__(ovs_other_config);
-            enabled = true;
-            VLOG_INFO("DPDK Enabled - initialized");
+            enabled = dpdk_init__(ovs_other_config);
+            if (enabled) {
+                VLOG_INFO("DPDK Enabled - initialized");
+            } else if (!try_only) {
+                ovs_abort(rte_errno, "Cannot init EAL");
+            }
             ovsthread_once_done(&once_enable);
+        } else {
+            VLOG_ERR_ONCE("DPDK Initialization Failed.");
         }
     } else {
         VLOG_INFO_ONCE("DPDK Disabled - Use other_config:dpdk-init to enable");
     }
+    dpdk_initialized = enabled;
 }
 
 const char *
@@ -482,10 +509,31 @@ dpdk_get_vhost_sock_dir(void)
     return vhost_sock_dir;
 }
 
+bool
+dpdk_vhost_iommu_enabled(void)
+{
+    return vhost_iommu_enabled;
+}
+
 void
 dpdk_set_lcore_id(unsigned cpu)
 {
     /* NON_PMD_CORE_ID is reserved for use by non pmd threads. */
     ovs_assert(cpu != NON_PMD_CORE_ID);
     RTE_PER_LCORE(_lcore_id) = cpu;
+}
+
+void
+print_dpdk_version(void)
+{
+    puts(rte_version());
+}
+
+void
+dpdk_status(const struct ovsrec_open_vswitch *cfg)
+{
+    if (cfg) {
+        ovsrec_open_vswitch_set_dpdk_initialized(cfg, dpdk_initialized);
+        ovsrec_open_vswitch_set_dpdk_version(cfg, rte_version());
+    }
 }

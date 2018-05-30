@@ -16,6 +16,8 @@
 
 #include <config.h>
 #include "netflow.h"
+#include <sys/types.h>
+#include <netinet/in.h>
 #include <arpa/inet.h>
 #include <errno.h>
 #include <stdlib.h>
@@ -360,7 +362,7 @@ netflow_set_options(struct netflow *nf,
     nf->add_id_to_iface = nf_options->add_id_to_iface;
 
     collectors_destroy(nf->collectors);
-    collectors_create(&nf_options->collectors, 0, &nf->collectors);
+    collectors_create(&nf_options->collectors, -1, &nf->collectors);
 
     old_timeout = nf->active_timeout;
     if (nf_options->active_timeout >= 0) {

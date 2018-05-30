@@ -196,15 +196,9 @@ x2nrealloc(void *p, size_t *n, size_t s)
     return xrealloc(p, *n * s);
 }
 
-/* The desired minimum alignment for an allocated block of memory. */
-#define MEM_ALIGN MAX(sizeof(void *), 8)
-BUILD_ASSERT_DECL(IS_POW2(MEM_ALIGN));
-BUILD_ASSERT_DECL(CACHE_LINE_SIZE >= MEM_ALIGN);
-
-/* Allocates and returns 'size' bytes of memory in dedicated cache lines.  That
- * is, the memory block returned will not share a cache line with other data,
- * avoiding "false sharing".  (The memory returned will not be at the start of
- * a cache line, though, so don't assume such alignment.)
+/* Allocates and returns 'size' bytes of memory aligned to a cache line and in
+ * dedicated cache lines.  That is, the memory block returned will not share a
+ * cache line with other data, avoiding "false sharing".
  *
  * Use free_cacheline() to free the returned memory block. */
 void *
@@ -221,28 +215,37 @@ xmalloc_cacheline(size_t size)
     }
     return p;
 #else
-    void **payload;
-    void *base;
-
     /* Allocate room for:
      *
-     *     - Up to CACHE_LINE_SIZE - 1 bytes before the payload, so that the
-     *       start of the payload doesn't potentially share a cache line.
+     *     - Header padding: Up to CACHE_LINE_SIZE - 1 bytes, to allow the
+     *       pointer to be aligned exactly sizeof(void *) bytes before the
+     *       beginning of a cache line.
      *
-     *     - A payload consisting of a void *, followed by padding out to
-     *       MEM_ALIGN bytes, followed by 'size' bytes of user data.
+     *     - Pointer: A pointer to the start of the header padding, to allow us
+     *       to free() the block later.
      *
-     *     - Space following the payload up to the end of the cache line, so
-     *       that the end of the payload doesn't potentially share a cache line
-     *       with some following block. */
-    base = xmalloc((CACHE_LINE_SIZE - 1)
-                   + ROUND_UP(MEM_ALIGN + size, CACHE_LINE_SIZE));
-
-    /* Locate the payload and store a pointer to the base at the beginning. */
-    payload = (void **) ROUND_UP((uintptr_t) base, CACHE_LINE_SIZE);
-    *payload = base;
-
-    return (char *) payload + MEM_ALIGN;
+     *     - User data: 'size' bytes.
+     *
+     *     - Trailer padding: Enough to bring the user data up to a cache line
+     *       multiple.
+     *
+     * +---------------+---------+------------------------+---------+
+     * | header        | pointer | user data              | trailer |
+     * +---------------+---------+------------------------+---------+
+     * ^               ^         ^
+     * |               |         |
+     * p               q         r
+     *
+     */
+    void *p = xmalloc((CACHE_LINE_SIZE - 1)
+                      + sizeof(void *)
+                      + ROUND_UP(size, CACHE_LINE_SIZE));
+    bool runt = PAD_SIZE((uintptr_t) p, CACHE_LINE_SIZE) < sizeof(void *);
+    void *r = (void *) ROUND_UP((uintptr_t) p + (runt ? CACHE_LINE_SIZE : 0),
+                                CACHE_LINE_SIZE);
+    void **q = (void **) r - 1;
+    *q = p;
+    return r;
 #endif
 }
 
@@ -265,7 +268,8 @@ free_cacheline(void *p)
     free(p);
 #else
     if (p) {
-        free(*(void **) ((uintptr_t) p - MEM_ALIGN));
+        void **q = (void **) p - 1;
+        free(*q);
     }
 #endif
 }
@@ -315,6 +319,19 @@ ovs_strzcpy(char *dst, const char *src, size_t size)
         memcpy(dst, src, len);
         memset(dst + len, '\0', size - len);
     }
+}
+
+/*
+ * Returns true if 'str' ends with given 'suffix'.
+ */
+int
+string_ends_with(const char *str, const char *suffix)
+{
+    int str_len = strlen(str);
+    int suffix_len = strlen(suffix);
+
+    return (str_len >= suffix_len) &&
+           (0 == strcmp(str + (str_len - suffix_len), suffix));
 }
 
 /* Prints 'format' on stderr, formatting it like printf() does.  If 'err_no' is
@@ -700,8 +717,13 @@ str_to_int(const char *s, int base, int *i)
 {
     long long ll;
     bool ok = str_to_llong(s, base, &ll);
+
+    if (!ok || ll < INT_MIN || ll > INT_MAX) {
+        *i = 0;
+        return false;
+    }
     *i = ll;
-    return ok;
+    return true;
 }
 
 bool
@@ -709,8 +731,13 @@ str_to_long(const char *s, int base, long *li)
 {
     long long ll;
     bool ok = str_to_llong(s, base, &ll);
+
+    if (!ok || ll < LONG_MIN || ll > LONG_MAX) {
+        *li = 0;
+        return false;
+    }
     *li = ll;
-    return ok;
+    return true;
 }
 
 bool
@@ -756,6 +783,24 @@ str_to_uint(const char *s, int base, unsigned int *u)
 }
 
 bool
+str_to_ullong(const char *s, int base, unsigned long long *x)
+{
+    int save_errno = errno;
+    char *tail;
+
+    errno = 0;
+    *x = strtoull(s, &tail, base);
+    if (errno == EINVAL || errno == ERANGE || tail == s || *tail != '\0') {
+        errno = save_errno;
+        *x = 0;
+        return false;
+    } else {
+        errno = save_errno;
+        return true;
+    }
+}
+
+bool
 str_to_llong_range(const char *s, int base, long long *begin,
                    long long *end)
 {
@@ -796,34 +841,21 @@ str_to_double(const char *s, double *d)
 
 /* Returns the value of 'c' as a hexadecimal digit. */
 int
-hexit_value(int c)
+hexit_value(unsigned char c)
 {
-    switch (c) {
-    case '0': case '1': case '2': case '3': case '4':
-    case '5': case '6': case '7': case '8': case '9':
-        return c - '0';
+    static const signed char tbl[UCHAR_MAX + 1] = {
+#define TBL(x)                                  \
+        (  x >= '0' && x <= '9' ? x - '0'       \
+         : x >= 'a' && x <= 'f' ? x - 'a' + 0xa \
+         : x >= 'A' && x <= 'F' ? x - 'A' + 0xa \
+         : -1)
+#define TBL0(x)  TBL(x),  TBL((x) + 1),   TBL((x) + 2),   TBL((x) + 3)
+#define TBL1(x) TBL0(x), TBL0((x) + 4),  TBL0((x) + 8),  TBL0((x) + 12)
+#define TBL2(x) TBL1(x), TBL1((x) + 16), TBL1((x) + 32), TBL1((x) + 48)
+        TBL2(0), TBL2(64), TBL2(128), TBL2(192)
+    };
 
-    case 'a': case 'A':
-        return 0xa;
-
-    case 'b': case 'B':
-        return 0xb;
-
-    case 'c': case 'C':
-        return 0xc;
-
-    case 'd': case 'D':
-        return 0xd;
-
-    case 'e': case 'E':
-        return 0xe;
-
-    case 'f': case 'F':
-        return 0xf;
-
-    default:
-        return -1;
-    }
+    return tbl[c];
 }
 
 /* Returns the integer value of the 'n' hexadecimal digits starting at 's', or
@@ -2201,6 +2233,41 @@ xsleep(unsigned int seconds)
     Sleep(seconds * 1000);
 #else
     sleep(seconds);
+#endif
+    ovsrcu_quiesce_end();
+}
+
+/* High resolution sleep. */
+void
+xnanosleep(uint64_t nanoseconds)
+{
+    ovsrcu_quiesce_start();
+#ifndef _WIN32
+    int retval;
+    struct timespec ts_sleep;
+    nsec_to_timespec(nanoseconds, &ts_sleep);
+
+    int error = 0;
+    do {
+        retval = nanosleep(&ts_sleep, NULL);
+        error = retval < 0 ? errno : 0;
+    } while (error == EINTR);
+#else
+    HANDLE timer = CreateWaitableTimer(NULL, FALSE, NULL);
+    if (timer) {
+        LARGE_INTEGER duetime;
+        duetime.QuadPart = -nanoseconds;
+        if (SetWaitableTimer(timer, &duetime, 0, NULL, NULL, FALSE)) {
+            WaitForSingleObject(timer, INFINITE);
+        } else {
+            VLOG_ERR_ONCE("SetWaitableTimer Failed (%s)",
+                           ovs_lasterror_to_string());
+        }
+        CloseHandle(timer);
+    } else {
+        VLOG_ERR_ONCE("CreateWaitableTimer Failed (%s)",
+                       ovs_lasterror_to_string());
+    }
 #endif
     ovsrcu_quiesce_end();
 }

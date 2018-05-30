@@ -513,14 +513,24 @@
 
     <group title="Port State">
       <column name="up">
-        This column is populated by <code>ovn-northd</code>, rather than by the
-        CMS plugin as is most of this database.  When a logical port is bound
-        to a physical location in the OVN Southbound database <ref
-        db="OVN_Southbound" table="Binding"/> table, <code>ovn-northd</code>
-        sets this column to <code>true</code>; otherwise, or if the port
-        becomes unbound later, it sets it to <code>false</code>.  This allows
-        the CMS to wait for a VM's (or container's) networking to become active
-        before it allows the VM (or container) to start.
+        <p>
+          This column is populated by <code>ovn-northd</code>, rather
+          than by the CMS plugin as is most of this database.  When a
+          logical port is bound to a physical location in the OVN
+          Southbound database <ref db="OVN_Southbound"
+          table="Binding"/> table, <code>ovn-northd</code> sets this
+          column to <code>true</code>; otherwise, or if the port
+          becomes unbound later, it sets it to <code>false</code>.
+          This allows the CMS to wait for a VM's (or container's)
+          networking to become active before it allows the VM (or
+          container) to start.
+        </p>
+
+        <p>
+          Logical ports of router type are an exception to this rule.
+          They are considered to be always up, that is this column is
+          always set to <code>true</code>.
+        </p>
       </column>
 
       <column name="enabled">
@@ -912,6 +922,60 @@
     </group>
   </table>
 
+  <table name="Port_Group" title="Port Groups">
+    <p>
+      Each row in this table represents a named group of logical switch ports.
+    </p>
+
+    <p>
+      Port groups may be used in the <ref column="match" table="ACL"/> column
+      of the <ref table="ACL"/> table.  For syntax information, see the details
+      of the expression language used for the <ref column="match"
+      table="Logical_Flow" db="OVN_Southbound"/> column in the <ref
+      table="Logical_Flow" db="OVN_Southbound"/> table of the <ref
+      db="OVN_Southbound"/> database.
+    </p>
+
+    <p>
+      For each port group, there are two address sets generated to the
+      <ref table="Address_Set" db="OVN_Southbound"/> table of the
+      <ref db="OVN_Southbound"/> database, containing the IP addresses
+      of the group of ports, one for IPv4, and the other for IPv6, with
+      <ref column="name" table="Address_Set" db="OVN_Southbound"/> being
+      the <ref column="name" table="Port_Group" db="OVN_Northbound"/>
+      of the <ref table="Port_Group" db="OVN_Northbound"/> followed by
+      a suffix <code>_ip4</code> for IPv4 and <code>_ip6</code> for IPv6.
+      The generated address sets can be used in the same way as regular
+      address sets in the <ref column="match" table="ACL"/> column
+      of the <ref table="ACL"/> table. For syntax information, see the details
+      of the expression language used for the <ref column="match"
+      table="Logical_Flow" db="OVN_Southbound"/> column in the <ref
+      table="Logical_Flow" db="OVN_Southbound"/> table of the <ref
+      db="OVN_Southbound"/> database.
+    </p>
+
+    <column name="name">
+      A name for the port group.  Names are ASCII and must match
+      <code>[a-zA-Z_.][a-zA-Z_.0-9]*</code>.
+    </column>
+
+    <column name="ports">
+      The logical switch ports belonging to the group in uuids.
+    </column>
+
+    <column name="acls">
+      Access control rules that apply to the port group. Applying an ACL
+      to a port group has the same effect as applying the ACL to all logical
+      lswitches that the ports of the port group belong to.
+    </column>
+
+    <group title="Common Columns">
+      <column name="external_ids">
+        See <em>External IDs</em> at the beginning of this document.
+      </column>
+    </group>
+  </table>
+
   <table name="Load_Balancer" title="load balancer">
     <p>
       Each row represents one load balancer.
@@ -941,6 +1005,15 @@
         "[fd0f::1]:8800".  Examples for value are "10.0.0.1, 10.0.0.2" and
         "20.0.0.10:8800, 20.0.0.11:8800".
       </p>
+      <p>
+        When the <code>Load_Balancer</code> is added to the
+        <code>logical_switch</code>, the VIP has to be in a different subnet
+        than the one used for the <code>logical_switch</code>.  Since VIP is
+        in a different subnet, you should connect your logical switch to
+        either a OVN logical router or a real router (this is because the
+        client can now send a packet with VIP as the destination IP address
+        and router's mac address as the destination MAC address).
+      </p>
     </column>
 
     <column name="protocol">
@@ -963,12 +1036,13 @@
   <table name="ACL" title="Access Control List (ACL) rule">
     <p>
       Each row in this table represents one ACL rule for a logical switch
-      that points to it through its <ref column="acls"/> column.  The <ref
-      column="action"/> column for the highest-<ref column="priority"/>
-      matching row in this table determines a packet's treatment.  If no row
-      matches, packets are allowed by default.  (Default-deny treatment is
-      possible: add a rule with <ref column="priority"/> 0, <code>0</code> as
-      <ref column="match"/>, and <code>deny</code> as <ref column="action"/>.)
+      or a port group that points to it through its <ref column="acls"/>
+      column.  The <ref column="action"/> column for the
+      highest-<ref column="priority"/> matching row in this table determines a
+      packet's treatment.  If no row matches, packets are allowed by default.
+      (Default-deny treatment is possible: add a rule with
+      <ref column="priority"/> 0, <code>0</code> as <ref column="match"/>,
+      and <code>deny</code> as <ref column="action"/>.)
     </p>
 
     <column name="priority">
@@ -1042,8 +1116,8 @@
 
         <li>
           <code>reject</code>: Drop the packet, replying with a RST for TCP or
-          ICMP unreachable message for other IP-based protocols.
-          <code>Not implemented--currently treated as drop</code>
+          ICMPv4/ICMPv6 unreachable message for other IPv4/IPv6-based
+          protocols.
         </li>
       </ul>
     </column>
@@ -1254,6 +1328,22 @@
       </ul>
     </column>
 
+    <column name="bandwidth">
+      <p>
+         The bandwidth limit to be performed on the matched packet.
+         Currently only supported in the userspace by dpdk.
+      </p>
+      <ul>
+        <li>
+          <code>rate</code>: The value of rate limit in kbps.
+        </li>
+        <li>
+          <code>burst</code>: The value of burst rate limit in kbps.
+          This is optional and needs to specify the <code>rate</code> first.
+        </li>
+      </ul>
+    </column>
+
     <column name="external_ids">
       See <em>External IDs</em> at the beginning of this document.
     </column>
@@ -1372,6 +1462,26 @@
         Option will be included in RA packet replied by ovn-controller.
         Per RFC 2460, the mtu value is recommended no less than 1280, so
         any mtu value less than 1280 will be considered as no MTU Option.
+      </column>
+
+      <column name="ipv6_ra_configs" key="send_periodic">
+        If set to true, then this router interface will send router
+        advertisements periodically.  The default is false.
+      </column>
+
+      <column name="ipv6_ra_configs" key="max_interval">
+        The maximum number of seconds to wait between sending periodic router
+        advertisements.  This option has no effect if <ref
+        column="ipv6_ra_configs" key="send_periodic"/> is false.  The default
+        is 600.
+      </column>
+
+      <column name="ipv6_ra_configs" key="min_interval">
+        The minimum number of seconds to wait between sending periodic router
+        advertisements.  This option has no effect if <ref
+        column="ipv6_ra_configs" key="send_periodic"/> is false.  The default
+        is one-third of <ref column="ipv6_ra_configs" key="max_interval"/>,
+        i.e. 200 seconds if that key is unset.
       </column>
     </group>
 
@@ -1530,6 +1640,13 @@
         address as the one via which the <ref column="nexthop"/> is reachable.
       </p>
     </column>
+
+    <group title="Common Columns">
+      <column name="external_ids">
+        See <em>External IDs</em> at the beginning of this document.
+      </column>
+    </group>
+
   </table>
 
   <table name="NAT" title="NAT rules">
@@ -1608,6 +1725,13 @@
         port instance on the <code>redirect-chassis</code>.
       </p>
     </column>
+
+    <group title="Common Columns">
+      <column name="external_ids">
+        See <em>External IDs</em> at the beginning of this document.
+      </column>
+    </group>
+
   </table>
 
   <table name="DHCP_Options" title="DHCP options">

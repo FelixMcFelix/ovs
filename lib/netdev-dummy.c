@@ -46,6 +46,8 @@
 
 VLOG_DEFINE_THIS_MODULE(netdev_dummy);
 
+#define C_STATS_SIZE 2
+
 struct reconnect;
 
 struct dummy_packet_stream {
@@ -82,7 +84,7 @@ struct dummy_packet_conn {
     union {
         struct dummy_packet_pconn pconn;
         struct dummy_packet_rconn rconn;
-    } u;
+    };
 };
 
 struct pkt_list_node {
@@ -109,6 +111,7 @@ struct netdev_dummy {
     struct eth_addr hwaddr OVS_GUARDED;
     int mtu OVS_GUARDED;
     struct netdev_stats stats OVS_GUARDED;
+    struct netdev_custom_counter custom_stats[C_STATS_SIZE] OVS_GUARDED;
     enum netdev_flags flags OVS_GUARDED;
     int ifindex OVS_GUARDED;
     int numa_id OVS_GUARDED;
@@ -304,11 +307,11 @@ dummy_packet_conn_get_config(struct dummy_packet_conn *conn, struct smap *args)
 
     switch (conn->type) {
     case PASSIVE:
-        smap_add(args, "pstream", pstream_get_name(conn->u.pconn.pstream));
+        smap_add(args, "pstream", pstream_get_name(conn->pconn.pstream));
         break;
 
     case ACTIVE:
-        smap_add(args, "stream", stream_get_name(conn->u.rconn.rstream->stream));
+        smap_add(args, "stream", stream_get_name(conn->rconn.rstream->stream));
         break;
 
     case NONE:
@@ -321,8 +324,8 @@ static void
 dummy_packet_conn_close(struct dummy_packet_conn *conn)
 {
     int i;
-    struct dummy_packet_pconn *pconn = &conn->u.pconn;
-    struct dummy_packet_rconn *rconn = &conn->u.rconn;
+    struct dummy_packet_pconn *pconn = &conn->pconn;
+    struct dummy_packet_rconn *rconn = &conn->rconn;
 
     switch (conn->type) {
     case PASSIVE:
@@ -369,14 +372,14 @@ dummy_packet_conn_set_config(struct dummy_packet_conn *conn,
     switch (conn->type) {
     case PASSIVE:
         if (pstream &&
-            !strcmp(pstream_get_name(conn->u.pconn.pstream), pstream)) {
+            !strcmp(pstream_get_name(conn->pconn.pstream), pstream)) {
             return;
         }
         dummy_packet_conn_close(conn);
         break;
     case ACTIVE:
         if (stream &&
-            !strcmp(stream_get_name(conn->u.rconn.rstream->stream), stream)) {
+            !strcmp(stream_get_name(conn->rconn.rstream->stream), stream)) {
             return;
         }
         dummy_packet_conn_close(conn);
@@ -389,7 +392,7 @@ dummy_packet_conn_set_config(struct dummy_packet_conn *conn,
     if (pstream) {
         int error;
 
-        error = pstream_open(pstream, &conn->u.pconn.pstream, DSCP_DEFAULT);
+        error = pstream_open(pstream, &conn->pconn.pstream, DSCP_DEFAULT);
         if (error) {
             VLOG_WARN("%s: open failed (%s)", pstream, ovs_strerror(error));
         } else {
@@ -408,11 +411,11 @@ dummy_packet_conn_set_config(struct dummy_packet_conn *conn,
         reconnect_enable(reconnect, time_msec());
         reconnect_set_backoff(reconnect, 100, INT_MAX);
         reconnect_set_probe_interval(reconnect, 0);
-        conn->u.rconn.reconnect = reconnect;
+        conn->rconn.reconnect = reconnect;
         conn->type = ACTIVE;
 
         error = stream_open(stream, &active_stream, DSCP_DEFAULT);
-        conn->u.rconn.rstream = dummy_packet_stream_create(active_stream);
+        conn->rconn.rstream = dummy_packet_stream_create(active_stream);
 
         switch (error) {
         case 0:
@@ -426,7 +429,7 @@ dummy_packet_conn_set_config(struct dummy_packet_conn *conn,
         default:
             reconnect_connect_failed(reconnect, time_msec(), error);
             stream_close(active_stream);
-            conn->u.rconn.rstream->stream = NULL;
+            conn->rconn.rstream->stream = NULL;
             break;
         }
     }
@@ -437,7 +440,7 @@ dummy_pconn_run(struct netdev_dummy *dev)
     OVS_REQUIRES(dev->mutex)
 {
     struct stream *new_stream;
-    struct dummy_packet_pconn *pconn = &dev->conn.u.pconn;
+    struct dummy_packet_pconn *pconn = &dev->conn.pconn;
     int error;
     size_t i;
 
@@ -480,7 +483,7 @@ static void
 dummy_rconn_run(struct netdev_dummy *dev)
 OVS_REQUIRES(dev->mutex)
 {
-    struct dummy_packet_rconn *rconn = &dev->conn.u.rconn;
+    struct dummy_packet_rconn *rconn = &dev->conn.rconn;
 
     switch (reconnect_run(rconn->reconnect, time_msec())) {
     case RECONNECT_CONNECT:
@@ -556,15 +559,15 @@ dummy_packet_conn_wait(struct dummy_packet_conn *conn)
     int i;
     switch (conn->type) {
     case PASSIVE:
-        pstream_wait(conn->u.pconn.pstream);
-        for (i = 0; i < conn->u.pconn.n_streams; i++) {
-            struct dummy_packet_stream *s = conn->u.pconn.streams[i];
+        pstream_wait(conn->pconn.pstream);
+        for (i = 0; i < conn->pconn.n_streams; i++) {
+            struct dummy_packet_stream *s = conn->pconn.streams[i];
             dummy_packet_stream_wait(s);
         }
         break;
     case ACTIVE:
-        if (reconnect_is_connected(conn->u.rconn.reconnect)) {
-            dummy_packet_stream_wait(conn->u.rconn.rstream);
+        if (reconnect_is_connected(conn->rconn.reconnect)) {
+            dummy_packet_stream_wait(conn->rconn.rstream);
         }
         break;
 
@@ -582,18 +585,18 @@ dummy_packet_conn_send(struct dummy_packet_conn *conn,
 
     switch (conn->type) {
     case PASSIVE:
-        for (i = 0; i < conn->u.pconn.n_streams; i++) {
-            struct dummy_packet_stream *s = conn->u.pconn.streams[i];
+        for (i = 0; i < conn->pconn.n_streams; i++) {
+            struct dummy_packet_stream *s = conn->pconn.streams[i];
 
             dummy_packet_stream_send(s, buffer, size);
-            pstream_wait(conn->u.pconn.pstream);
+            pstream_wait(conn->pconn.pstream);
         }
         break;
 
     case ACTIVE:
-        if (reconnect_is_connected(conn->u.rconn.reconnect)) {
-            dummy_packet_stream_send(conn->u.rconn.rstream, buffer, size);
-            dummy_packet_stream_wait(conn->u.rconn.rstream);
+        if (reconnect_is_connected(conn->rconn.reconnect)) {
+            dummy_packet_stream_send(conn->rconn.rstream, buffer, size);
+            dummy_packet_stream_wait(conn->rconn.rstream);
         }
         break;
 
@@ -609,7 +612,7 @@ dummy_netdev_get_conn_state(struct dummy_packet_conn *conn)
     enum dummy_netdev_conn_state state;
 
     if (conn->type == ACTIVE) {
-        if (reconnect_is_connected(conn->u.rconn.reconnect)) {
+        if (reconnect_is_connected(conn->rconn.reconnect)) {
             state = CONN_STATE_CONNECTED;
         } else {
             state = CONN_STATE_NOT_CONNECTED;
@@ -685,6 +688,13 @@ netdev_dummy_construct(struct netdev *netdev_)
     netdev->requested_n_rxq = netdev_->n_rxq;
     netdev->requested_n_txq = netdev_->n_txq;
     netdev->numa_id = 0;
+
+    memset(&netdev->custom_stats, 0, sizeof(netdev->custom_stats));
+
+    ovs_strlcpy(netdev->custom_stats[0].name,
+                "rx_custom_packets_1", NETDEV_CUSTOM_STATS_NAME_SIZE);
+    ovs_strlcpy(netdev->custom_stats[1].name,
+                "rx_custom_packets_2", NETDEV_CUSTOM_STATS_NAME_SIZE);
 
     dummy_packet_conn_init(&netdev->conn);
 
@@ -982,7 +992,8 @@ netdev_dummy_rxq_dealloc(struct netdev_rxq *rxq_)
 }
 
 static int
-netdev_dummy_rxq_recv(struct netdev_rxq *rxq_, struct dp_packet_batch *batch)
+netdev_dummy_rxq_recv(struct netdev_rxq *rxq_, struct dp_packet_batch *batch,
+                      int *qfill)
 {
     struct netdev_rxq_dummy *rx = netdev_rxq_dummy_cast(rxq_);
     struct netdev_dummy *netdev = netdev_dummy_cast(rx->up.netdev);
@@ -1021,10 +1032,17 @@ netdev_dummy_rxq_recv(struct netdev_rxq *rxq_, struct dp_packet_batch *batch)
     ovs_mutex_lock(&netdev->mutex);
     netdev->stats.rx_packets++;
     netdev->stats.rx_bytes += dp_packet_size(packet);
+    netdev->custom_stats[0].value++;
+    netdev->custom_stats[1].value++;
     ovs_mutex_unlock(&netdev->mutex);
 
     batch->packets[0] = packet;
     batch->count = 1;
+
+    if (qfill) {
+        *qfill = -ENOTSUP;
+    }
+
     return 0;
 }
 
@@ -1062,16 +1080,16 @@ netdev_dummy_rxq_drain(struct netdev_rxq *rxq_)
 
 static int
 netdev_dummy_send(struct netdev *netdev, int qid OVS_UNUSED,
-                  struct dp_packet_batch *batch, bool may_steal,
+                  struct dp_packet_batch *batch,
                   bool concurrent_txq OVS_UNUSED)
 {
     struct netdev_dummy *dev = netdev_dummy_cast(netdev);
     int error = 0;
 
     struct dp_packet *packet;
-    DP_PACKET_BATCH_FOR_EACH(packet, batch) {
+    DP_PACKET_BATCH_FOR_EACH(i, packet, batch) {
         const void *buffer = dp_packet_data(packet);
-        size_t size = dp_packet_get_send_len(packet);
+        size_t size = dp_packet_size(packet);
 
         if (batch->packets[i]->packet_type != htonl(PT_ETH)) {
             error = EPFNOSUPPORT;
@@ -1132,7 +1150,7 @@ netdev_dummy_send(struct netdev *netdev, int qid OVS_UNUSED,
         ovs_mutex_unlock(&dev->mutex);
     }
 
-    dp_packet_delete_batch(batch, may_steal);
+    dp_packet_delete_batch(batch, true);
 
     return error;
 }
@@ -1209,6 +1227,31 @@ netdev_dummy_get_stats(const struct netdev *netdev, struct netdev_stats *stats)
     stats->tx_bytes = dev->stats.tx_bytes;
     stats->rx_packets = dev->stats.rx_packets;
     stats->rx_bytes = dev->stats.rx_bytes;
+    ovs_mutex_unlock(&dev->mutex);
+
+    return 0;
+}
+
+static int
+netdev_dummy_get_custom_stats(const struct netdev *netdev,
+                             struct netdev_custom_stats *custom_stats)
+{
+    int i;
+
+    struct netdev_dummy *dev = netdev_dummy_cast(netdev);
+
+    custom_stats->size = 2;
+    custom_stats->counters =
+            (struct netdev_custom_counter *) xcalloc(C_STATS_SIZE,
+                    sizeof(struct netdev_custom_counter));
+
+    ovs_mutex_lock(&dev->mutex);
+    for (i = 0 ; i < C_STATS_SIZE ; i++) {
+        custom_stats->counters[i].value = dev->custom_stats[i].value;
+        ovs_strlcpy(custom_stats->counters[i].name,
+                    dev->custom_stats[i].name,
+                    NETDEV_CUSTOM_STATS_NAME_SIZE);
+    }
     ovs_mutex_unlock(&dev->mutex);
 
     return 0;
@@ -1383,6 +1426,7 @@ netdev_dummy_update_flags(struct netdev *netdev_,
     NULL,                       /* get_carrier_resets */        \
     NULL,                       /* get_miimon */                \
     netdev_dummy_get_stats,                                     \
+    netdev_dummy_get_custom_stats,                              \
                                                                 \
     NULL,                       /* get_features */              \
     NULL,                       /* set_advertisements */        \
@@ -1482,10 +1526,17 @@ eth_from_flow(const char *s, size_t packet_size)
     }
 
     packet = dp_packet_new(0);
-    if (!flow_compose(packet, &flow, packet_size)) {
-        dp_packet_delete(packet);
-        packet = NULL;
-    };
+    if (packet_size) {
+        flow_compose(packet, &flow, NULL, 0);
+        if (dp_packet_size(packet) < packet_size) {
+            packet_expand(packet, &flow, packet_size);
+        } else if (dp_packet_size(packet) > packet_size){
+            dp_packet_delete(packet);
+            packet = NULL;
+        }
+    } else {
+        flow_compose(packet, &flow, NULL, 64);
+    }
 
     ofpbuf_uninit(&odp_key);
     return packet;

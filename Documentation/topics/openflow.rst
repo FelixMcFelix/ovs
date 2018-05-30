@@ -44,7 +44,7 @@ The primary approach to compatibility is to abstract most of the details of the
 differences from the core code, by adding a protocol layer that translates
 between OF1.x and a slightly higher-level abstract representation.  The core of
 this approach is the many ``struct ofputil_*`` structures in
-``include/openvswitch/ofp-util.h``.
+``include/openvswitch/ofp-*.h``.
 
 As a consequence of this approach, OVS cannot use OpenFlow protocol definitions
 that closely resemble those in the OpenFlow specification, because
@@ -159,14 +159,6 @@ in OVS.
   (EXT-187)
   (optional for OF1.4+)
 
-* Role Status
-
-  Already implemented as a 1.4 feature.
-
-  (EXT-191)
-
-  (required for OF1.4+)
-
 * Flow entry eviction
 
   OVS has flow eviction functionality.  ``table_mod OFPTC_EVICTION``,
@@ -180,22 +172,6 @@ in OVS.
 * Vacancy events
 
   (EXT-192-v)
-
-  (optional for OF1.4+)
-
-* Bundle
-
-  Transactional modification.  OpenFlow 1.4 requires to support
-  ``flow_mods`` and ``port_mods`` in a bundle if bundle is supported.
-  (Not related to OVS's 'ofbundle' stuff.)
-
-  Implemented as an OpenFlow 1.4 feature.  Only flow_mods and port_mods are
-  supported in a bundle.  If the bundle includes port mods, it may not specify
-  the ``OFPBF_ATOMIC`` flag.  Nevertheless, port mods and flow mods in a bundle
-  are always applied in order and consecutive flow mods between port mods are
-  made available to lookups atomically.
-
-  (EXT-230)
 
   (optional for OF1.4+)
 
@@ -213,20 +189,6 @@ in OVS.
 
   (optional for OF1.4+)
 
-* Bad flow entry priority error
-
-  Probably not so useful to the software switch.
-
-  (EXT-236)
-
-  (optional for OF1.4+)
-
-* Set async config error
-
-  (EXT-237)
-
-  (optional for OF1.4+)
-
 * PBB UCA header field
 
   See comment on Provider Backbone Bridge in section about OpenFlow 1.3.
@@ -234,12 +196,6 @@ in OVS.
   (EXT-256)
 
   (optional for OF1.4+)
-
-* Multipart timeout error
-
-  (EXT-264)
-
-  (required for OF1.4+)
 
 OpenFlow 1.4 only
 -----------------
@@ -295,14 +251,6 @@ definitive as OpenFlow 1.5 is not yet published.
 * Egress Tables
 
   (EXT-306)
-
-  (optional for OF1.5+)
-
-* Packet Type aware pipeline
-
-  Prototype for OVS was done during specification.
-
-  (EXT-112)
 
   (optional for OF1.5+)
 

@@ -102,9 +102,11 @@ Q: How do I configure a DPDK port as an access port?
 
     A: Firstly, you must have a DPDK-enabled version of Open vSwitch.
 
-    If your version is DPDK-enabled it will support the other-config:dpdk-init
-    configuration in the database and will display lines with "EAL:..." during
-    startup when other_config:dpdk-init is set to 'true'.
+    If your version is DPDK-enabled it may support the dpdk_version and
+    dpdk_initialized keys in the configuration database.  Earlier versions
+    of Open vSwitch only supported the other-config:dpdk-init key in the
+    configuration in the database.  All versions will display lines with
+    "EAL:..." during startup when other_config:dpdk-init is set to 'true'.
 
     Secondly, when adding a DPDK port, unlike a system port, the type for the
     interface and valid dpdk-devargs must be specified. For example::
@@ -191,8 +193,24 @@ Q: How do I configure mirroring of all traffic to a GRE tunnel?
 
 Q: Does Open vSwitch support ERSPAN?
 
-    A: No.  As an alternative, Open vSwitch supports mirroring to a GRE tunnel
-    (see above).
+    A: Yes. ERSPAN version I and version II over IPv4 GRE and
+    IPv6 GRE tunnel are supported.  See ovs-fields(7) for matching
+    and setting ERSPAN fields.
+
+    ::
+
+        $ ovs-vsctl add-br br0
+        $ #For ERSPAN type 2 (version I)
+        $ ovs-vsctl add-port br0 at_erspan0 -- \
+                set int at_erspan0 type=erspan options:key=1 \
+                options:remote_ip=172.31.1.1 \
+                options:erspan_ver=1 options:erspan_idx=1
+        $ #For ERSPAN type 3 (version II)
+        $ ovs-vsctl add-port br0 at_erspan0 -- \
+                set int at_erspan0 type=erspan options:key=1 \
+                options:remote_ip=172.31.1.1 \
+                options:erspan_ver=2 options:erspan_dir=1 \
+                options:erspan_hwid=4
 
 Q: How do I connect two bridges?
 

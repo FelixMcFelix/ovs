@@ -20,6 +20,7 @@
 #include "hash.h"
 #include "openvswitch/json.h"
 #include "packets.h"
+#include "util.h"
 #include "uuid.h"
 
 static struct smap_node *smap_add__(struct smap *, char *, void *,
@@ -107,9 +108,18 @@ smap_add_ipv6(struct smap *smap, const char *key, struct in6_addr *addr)
 }
 
 /* Searches for 'key' in 'smap'.  If it does not already exists, adds it.
- * Otherwise, changes its value to 'value'. */
+ * Otherwise, changes its value to 'value'.  The caller retains ownership of
+ * 'value'. */
 void
 smap_replace(struct smap *smap, const char *key, const char *value)
+{
+    smap_replace_nocopy(smap, key, xstrdup(value));
+}
+
+/* Searches for 'key' in 'smap'.  If it does not already exists, adds it.
+ * Otherwise, changes its value to 'value'.  Takes ownership of 'value'. */
+void
+smap_replace_nocopy(struct smap *smap, const char *key, char *value)
 {
     size_t  key_len = strlen(key);
     size_t hash = hash_bytes(key, key_len, 0);
@@ -119,9 +129,9 @@ smap_replace(struct smap *smap, const char *key, const char *value)
     node = smap_find__(smap, key, key_len, hash);
     if (node) {
         free(node->value);
-        node->value = xstrdup(value);
+        node->value = value;
     } else {
-        smap_add__(smap, xmemdup0(key, key_len), xstrdup(value), hash);
+        smap_add__(smap, xmemdup0(key, key_len), value, hash);
     }
 }
 
@@ -221,25 +231,37 @@ smap_get_bool(const struct smap *smap, const char *key, bool def)
     }
 }
 
-/* Gets the value associated with 'key' in 'smap' and converts it to an int
- * using atoi().  If 'key' is not in 'smap', returns 'def'. */
+/* Gets the value associated with 'key' in 'smap' and converts it to an int.
+ * If 'key' is not in 'smap' or a valid integer can't be parsed from it's
+ * value, returns 'def'. */
 int
 smap_get_int(const struct smap *smap, const char *key, int def)
 {
     const char *value = smap_get(smap, key);
+    int i_value;
 
-    return value ? atoi(value) : def;
+    if (!value || !str_to_int(value, 10, &i_value)) {
+        return def;
+    }
+
+    return i_value;
 }
 
-/* Gets the value associated with 'key' in 'smap' and converts it to an int
- * using strtoull().  If 'key' is not in 'smap', returns 'def'. */
+/* Gets the value associated with 'key' in 'smap' and converts it to an
+ * unsigned long long.  If 'key' is not in 'smap' or a valid number can't be
+ * parsed from it's value, returns 'def'. */
 unsigned long long int
 smap_get_ullong(const struct smap *smap, const char *key,
                 unsigned long long def)
 {
     const char *value = smap_get(smap, key);
+    unsigned long long ull_value;
 
-    return value ? strtoull(value, NULL, 10) : def;
+    if (!value || !str_to_ullong(value, 10, &ull_value)) {
+        return def;
+    }
+
+    return ull_value;
 }
 
 /* Gets the value associated with 'key' in 'smap' and converts it to a UUID

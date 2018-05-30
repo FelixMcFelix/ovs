@@ -52,13 +52,15 @@ function install_kernel()
 function install_dpdk()
 {
     if [ -n "$DPDK_GIT" ]; then
-        git clone $DPDK_GIT dpdk-stable-$1
-        cd dpdk-stable-$1
+        git clone $DPDK_GIT dpdk-$1
+        cd dpdk-$1
         git checkout tags/v$1
     else
         wget http://fast.dpdk.org/rel/dpdk-$1.tar.gz
         tar xzvf dpdk-$1.tar.gz > /dev/null
-        cd dpdk-stable-$1
+        DIR_NAME=$(tar -tf dpdk-$1.tar.gz | head -1 | cut -f1 -d"/")
+        if [ $DIR_NAME != "dpdk-$1"  ]; then mv $DIR_NAME dpdk-$1; fi
+        cd dpdk-$1
     fi
     find ./ -type f | xargs sed -i 's/max-inline-insns-single=100/max-inline-insns-single=400/'
     find ./ -type f | xargs sed -i 's/-Werror/-Werror -Wno-error=inline/'
@@ -81,20 +83,22 @@ fi
 
 if [ "$DPDK" ]; then
     if [ -z "$DPDK_VER" ]; then
-        DPDK_VER="17.05.2"
+        DPDK_VER="17.11.2"
     fi
     install_dpdk $DPDK_VER
     if [ "$CC" = "clang" ]; then
         # Disregard cast alignment errors until DPDK is fixed
         CFLAGS="$CFLAGS -Wno-cast-align"
     fi
-    EXTRA_OPTS="$EXTRA_OPTS --with-dpdk=./dpdk-stable-$DPDK_VER/build"
+    EXTRA_OPTS="$EXTRA_OPTS --with-dpdk=./dpdk-$DPDK_VER/build"
 elif [ "$CC" != "clang" ]; then
     # DPDK headers currently trigger sparse errors
     SPARSE_FLAGS="$SPARSE_FLAGS -Wsparse-error"
 fi
 
 configure_ovs $EXTRA_OPTS $*
+
+make selinux-policy
 
 # Only build datapath if we are testing kernel w/o running testsuite
 if [ "$KERNEL" ] && [ ! "$TESTSUITE" ] && [ ! "$DPDK" ]; then

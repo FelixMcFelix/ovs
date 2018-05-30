@@ -36,7 +36,6 @@
 #include "command-line.h"
 #include "fatal-signal.h"
 #include "flow.h"
-#include "openvswitch/ofp-util.h"
 #include "ovstest.h"
 #include "ovs-atomic.h"
 #include "ovs-thread.h"
@@ -316,11 +315,13 @@ static ovs_be16 tp_src_values[] = { CONSTANT_HTONS(49362),
                                     CONSTANT_HTONS(80) };
 static ovs_be16 tp_dst_values[] = { CONSTANT_HTONS(6667), CONSTANT_HTONS(22) };
 static struct eth_addr dl_src_values[] = {
-    { { { 0x00, 0x02, 0xe3, 0x0f, 0x80, 0xa4 } } },
-    { { { 0x5e, 0x33, 0x7f, 0x5f, 0x1e, 0x99 } } } };
+    ETH_ADDR_C(00,02,e3,0f,80,a4),
+    ETH_ADDR_C(5e,33,7f,5f,1e,99)
+};
 static struct eth_addr dl_dst_values[] = {
-    { { { 0x4a, 0x27, 0x71, 0xae, 0x64, 0xc1 } } },
-    { { { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff } } } };
+    ETH_ADDR_C(4a,27,71,ae,64,c1),
+    ETH_ADDR_C(ff,ff,ff,ff,ff,ff)
+};
 static uint8_t nw_proto_values[] = { IPPROTO_TCP, IPPROTO_ICMP };
 static uint8_t nw_dscp_values[] = { 48, 0 };
 
@@ -464,9 +465,8 @@ destroy_classifier(struct classifier *cls)
 
     classifier_defer(cls);
     CLS_FOR_EACH (rule, cls_rule, cls) {
-        if (classifier_remove(cls, &rule->cls_rule)) {
-            ovsrcu_postpone(free_rule, rule);
-        }
+        classifier_remove_assert(cls, &rule->cls_rule);
+        ovsrcu_postpone(free_rule, rule);
     }
     classifier_destroy(cls);
 }
@@ -814,7 +814,7 @@ test_single_rule(struct ovs_cmdl_context *ctx OVS_UNUSED)
         compare_classifiers(&cls, 0, OVS_VERSION_MIN, &tcls);
         check_tables(&cls, 1, 1, 0, 0, OVS_VERSION_MIN);
 
-        classifier_remove(&cls, &rule->cls_rule);
+        classifier_remove_assert(&cls, &rule->cls_rule);
         tcls_remove(&tcls, tcls_rule);
         assert(classifier_is_empty(&cls));
         assert(tcls_is_empty(&tcls));
@@ -862,7 +862,7 @@ test_rule_replacement(struct ovs_cmdl_context *ctx OVS_UNUSED)
         compare_classifiers(&cls, 0, OVS_VERSION_MIN, &tcls);
         check_tables(&cls, 1, 1, 0, 0, OVS_VERSION_MIN);
         classifier_defer(&cls);
-        classifier_remove(&cls, &rule2->cls_rule);
+        classifier_remove_assert(&cls, &rule2->cls_rule);
 
         tcls_destroy(&tcls);
         destroy_classifier(&cls);
@@ -1016,7 +1016,7 @@ test_many_rules_in_one_list (struct ovs_cmdl_context *ctx OVS_UNUSED)
                         n_invisible_rules++;
                         removable_rule = &rules[j]->cls_rule;
                     } else {
-                        classifier_remove(&cls, &rules[j]->cls_rule);
+                        classifier_remove_assert(&cls, &rules[j]->cls_rule);
                     }
                     tcls_remove(&tcls, tcls_rules[j]);
                     tcls_rules[j] = NULL;
@@ -1037,7 +1037,7 @@ test_many_rules_in_one_list (struct ovs_cmdl_context *ctx OVS_UNUSED)
                     /* Removable rule is no longer visible. */
                     assert(cls_match);
                     assert(!cls_match_visible_in_version(cls_match, version));
-                    classifier_remove(&cls, removable_rule);
+                    classifier_remove_assert(&cls, removable_rule);
                     n_invisible_rules--;
                 }
             }
@@ -1137,7 +1137,7 @@ test_many_rules_in_one_table(struct ovs_cmdl_context *ctx OVS_UNUSED)
                                                    version);
                 n_invisible_rules++;
             } else {
-                classifier_remove(&cls, &rules[i]->cls_rule);
+                classifier_remove_assert(&cls, &rules[i]->cls_rule);
             }
             compare_classifiers(&cls, n_invisible_rules, version, &tcls);
             check_tables(&cls, i < N_RULES - 1, N_RULES - (i + 1), 0,
@@ -1149,7 +1149,7 @@ test_many_rules_in_one_table(struct ovs_cmdl_context *ctx OVS_UNUSED)
 
         if (versioned) {
             for (i = 0; i < N_RULES; i++) {
-                classifier_remove(&cls, &rules[i]->cls_rule);
+                classifier_remove_assert(&cls, &rules[i]->cls_rule);
                 n_invisible_rules--;
 
                 compare_classifiers(&cls, n_invisible_rules, version, &tcls);
@@ -1248,7 +1248,7 @@ test_many_rules_in_n_tables(int n_tables)
 
             /* Remove rules that are no longer visible. */
             LIST_FOR_EACH_POP (rule, list_node, &list) {
-                classifier_remove(&cls, &rule->cls_rule);
+                classifier_remove_assert(&cls, &rule->cls_rule);
                 n_invisible_rules--;
 
                 compare_classifiers(&cls, n_invisible_rules, version,
@@ -1495,11 +1495,11 @@ benchmark(bool use_wc)
 static uint32_t
 random_value(void)
 {
-    static const uint32_t values[] =
+    static const uint32_t values_[] =
         { 0xffffffff, 0xaaaaaaaa, 0x55555555, 0x80000000,
           0x00000001, 0xface0000, 0x00d00d1e, 0xdeadbeef };
 
-    return values[random_range(ARRAY_SIZE(values))];
+    return values_[random_range(ARRAY_SIZE(values_))];
 }
 
 static bool

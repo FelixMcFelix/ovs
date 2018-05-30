@@ -105,7 +105,7 @@ Still on `host1`, run the following command to create an sFlow configuration
 and attach it to bridge br0::
 
     $ ovs-vsctl -- --id=@sflow create sflow agent=${AGENT_IP} \
-        target="${COLLECTOR_IP}:${COLLECTOR_PORT}" header=${HEADER_BYTES} \
+        target="\"${COLLECTOR_IP}:${COLLECTOR_PORT}\"" header=${HEADER_BYTES} \
         sampling=${SAMPLING_N} polling=${POLLING_SECS} \
           -- set bridge br0 sflow=@sflow
 
@@ -166,6 +166,9 @@ This document is heavily based on content from Neil McKee at InMon:
 - `https://mail.openvswitch.org/pipermail/ovs-dev/2010-July/165245.html
   <https://mail.openvswitch.org/pipermail/ovs-dev/2010-July/165245.html>`__
 
-- `http://blog.sflow.com/2010/01/open-vswitch.html
-  <http://blog.sflow.com/2010/01/open-vswitch.html>`__ (note: the configuration
-  syntax is out of date, but the high-level descriptions are correct)
+- `https://blog.sflow.com/2010/01/open-vswitch.html
+  <https://blog.sflow.com/2010/01/open-vswitch.html>`__
+
+.. note::
+  The configuration syntax is out of date, but the high-level
+  descriptions are correct.

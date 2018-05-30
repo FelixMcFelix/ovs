@@ -16,13 +16,13 @@
 
 #include <config.h>
 #include "packets.h"
+#include <sys/types.h>
+#include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
-#include <netinet/in.h>
 #include <netinet/ip6.h>
 #include <netinet/icmp6.h>
 #include <stdlib.h>
-#include <sys/types.h>
 #include <netdb.h>
 #include "byte-order.h"
 #include "csum.h"
@@ -51,6 +51,13 @@ flow_tnl_src(const struct flow_tnl *tnl)
     return tnl->ip_src ? in6_addr_mapped_ipv4(tnl->ip_src) : tnl->ipv6_src;
 }
 
+/* Returns true if 's' consists entirely of hex digits, false otherwise. */
+static bool
+is_all_hex(const char *s)
+{
+    return s[strspn(s, "0123456789abcdefABCDEF")] == '\0';
+}
+
 /* Parses 's' as a 16-digit hexadecimal number representing a datapath ID.  On
  * success stores the dpid into '*dpidp' and returns true, on failure stores 0
  * into '*dpidp' and returns false.
@@ -59,7 +66,10 @@ flow_tnl_src(const struct flow_tnl *tnl)
 bool
 dpid_from_string(const char *s, uint64_t *dpidp)
 {
-    *dpidp = (strlen(s) == 16 && strspn(s, "0123456789abcdefABCDEF") == 16
+    size_t len = strlen(s);
+    *dpidp = ((len == 16 && is_all_hex(s))
+              || (len <= 18 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')
+                  && is_all_hex(s + 2))
               ? strtoull(s, NULL, 16)
               : 0);
     return *dpidp != 0;
@@ -405,10 +415,10 @@ pop_mpls(struct dp_packet *packet, ovs_be16 ethtype)
 }
 
 void
-encap_nsh(struct dp_packet *packet, const struct ovs_action_encap_nsh *encap)
+push_nsh(struct dp_packet *packet, const struct nsh_hdr *nsh_hdr_src)
 {
     struct nsh_hdr *nsh;
-    size_t length = NSH_BASE_HDR_LEN + encap->mdlen;
+    size_t length = nsh_hdr_len(nsh_hdr_src);
     uint8_t next_proto;
 
     switch (ntohl(packet->packet_type)) {
@@ -429,33 +439,15 @@ encap_nsh(struct dp_packet *packet, const struct ovs_action_encap_nsh *encap)
     }
 
     nsh = (struct nsh_hdr *) dp_packet_push_uninit(packet, length);
-    nsh->ver_flags_ttl_len =
-            htons(((encap->flags << NSH_FLAGS_SHIFT) & NSH_FLAGS_MASK)
-                    | (63 << NSH_TTL_SHIFT)
-                    | ((length >> 2) << NSH_LEN_SHIFT));
-    nsh->md_type = (encap->mdtype << NSH_MDTYPE_SHIFT) & NSH_MDTYPE_MASK;
+    memcpy(nsh, nsh_hdr_src, length);
     nsh->next_proto = next_proto;
-    put_16aligned_be32(&nsh->path_hdr, encap->path_hdr);
-    switch (encap->mdtype) {
-        case NSH_M_TYPE1:
-            nsh->md1 = *ALIGNED_CAST(struct nsh_md1_ctx *, encap->metadata);
-            break;
-        case NSH_M_TYPE2: {
-            /* The MD2 metadata in encap is already padded to 4 bytes. */
-            memcpy(&nsh->md2, encap->metadata, encap->mdlen);
-            break;
-        }
-        default:
-            OVS_NOT_REACHED();
-    }
-
     packet->packet_type = htonl(PT_NSH);
     dp_packet_reset_offsets(packet);
     packet->l3_ofs = 0;
 }
 
 bool
-decap_nsh(struct dp_packet *packet)
+pop_nsh(struct dp_packet *packet)
 {
     struct nsh_hdr *nsh = (struct nsh_hdr *) dp_packet_l3(packet);
     size_t length;
@@ -657,82 +649,6 @@ ip_parse_cidr(const char *s, ovs_be32 *ip, unsigned int *plen)
     if (!error && s[n]) {
         return xasprintf("%s: invalid IP address", s);
     }
-    return error;
-}
-
-/* Parses the string into an IPv4 or IPv6 address.
- * The port flags act as follows:
- * * PORT_OPTIONAL: A port may be present but is not required
- * * PORT_REQUIRED: A port must be present
- * * PORT_FORBIDDEN: A port must not be present
- */
-char * OVS_WARN_UNUSED_RESULT
-ipv46_parse(const char *s, enum port_flags flags, struct sockaddr_storage *ss)
-{
-    char *error = NULL;
-
-    char *copy;
-    copy = xstrdup(s);
-
-    char *addr;
-    char *port;
-    if (*copy == '[') {
-        char *end;
-
-        addr = copy + 1;
-        end = strchr(addr, ']');
-        if (!end) {
-            error = xasprintf("No closing bracket on address %s", s);
-            goto finish;
-        }
-        *end++ = '\0';
-        if (*end == ':') {
-            port = end + 1;
-        } else {
-            port = NULL;
-        }
-    } else {
-        addr = copy;
-        port = strchr(copy, ':');
-        if (port) {
-            if (strchr(port + 1, ':')) {
-                port = NULL;
-            } else {
-                *port++ = '\0';
-            }
-        }
-    }
-
-    if (port && !*port) {
-        error = xasprintf("Port is an empty string");
-        goto finish;
-    }
-
-    if (port && flags == PORT_FORBIDDEN) {
-        error = xasprintf("Port forbidden in address %s", s);
-        goto finish;
-    } else if (!port && flags == PORT_REQUIRED) {
-        error = xasprintf("Port required in address %s", s);
-        goto finish;
-    }
-
-    struct addrinfo hints = {
-        .ai_flags = AI_NUMERICHOST | AI_NUMERICSERV,
-        .ai_family = AF_UNSPEC,
-    };
-    struct addrinfo *res;
-    int status;
-    status = getaddrinfo(addr, port, &hints, &res);
-    if (status) {
-        error = xasprintf("Error parsing address %s: %s",
-                s, gai_strerror(status));
-        goto finish;
-    }
-    memcpy(ss, res->ai_addr, res->ai_addrlen);
-    freeaddrinfo(res);
-
-finish:
-    free(copy);
     return error;
 }
 
@@ -1644,7 +1560,7 @@ compose_nd_ra(struct dp_packet *b,
               const struct in6_addr *ipv6_src, const struct in6_addr *ipv6_dst,
               uint8_t cur_hop_limit, uint8_t mo_flags,
               ovs_be16 router_lt, ovs_be32 reachable_time,
-              ovs_be32 retrans_timer, ovs_be32 mtu)
+              ovs_be32 retrans_timer, uint32_t mtu)
 {
     /* Don't compose Router Advertisement packet with MTU Option if mtu
      * value is 0. */
@@ -1676,7 +1592,7 @@ compose_nd_ra(struct dp_packet *b,
         mtu_opt->type = ND_OPT_MTU;
         mtu_opt->len = 1;
         mtu_opt->reserved = 0;
-        put_16aligned_be32(&mtu_opt->mtu, mtu);
+        put_16aligned_be32(&mtu_opt->mtu, htonl(mtu));
     }
 
     ra->icmph.icmp6_cksum = 0;

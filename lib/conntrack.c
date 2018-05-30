@@ -67,6 +67,15 @@ enum ct_alg_mode {
     CT_TFTP_MODE,
 };
 
+enum ct_alg_ctl_type {
+    CT_ALG_CTL_NONE,
+    CT_ALG_CTL_FTP,
+    CT_ALG_CTL_TFTP,
+    /* SIP is not enabled through Openflow and presently only used as
+     * an example of an alg that allows a wildcard src ip. */
+    CT_ALG_CTL_SIP,
+};
+
 static bool conn_key_extract(struct conntrack *, struct dp_packet *,
                              ovs_be16 dl_type, struct conn_lookup_ctx *,
                              uint16_t zone);
@@ -122,8 +131,8 @@ extract_l3_ipv6(struct conn_key *key, const void *data, size_t size,
                 const char **new_data);
 
 static struct alg_exp_node *
-expectation_lookup(struct hmap *alg_expectations,
-                   const struct conn_key *key, uint32_t basis);
+expectation_lookup(struct hmap *alg_expectations, const struct conn_key *key,
+                   uint32_t basis, bool src_ip_wc);
 
 static int
 repl_ftp_v4_addr(struct dp_packet *pkt, ovs_be32 v4_addr_rep,
@@ -134,13 +143,24 @@ static enum ftp_ctl_pkt
 process_ftp_ctl_v4(struct conntrack *ct,
                    struct dp_packet *pkt,
                    const struct conn *conn_for_expectation,
-                   long long now, ovs_be32 *v4_addr_rep,
+                   ovs_be32 *v4_addr_rep,
                    char **ftp_data_v4_start,
                    size_t *addr_offset_from_ftp_data_start);
 
 static enum ftp_ctl_pkt
 detect_ftp_ctl_type(const struct conn_lookup_ctx *ctx,
                     struct dp_packet *pkt);
+
+static void
+expectation_clean(struct conntrack *ct, const struct conn_key *master_key,
+                  uint32_t basis);
+
+static struct ct_l4_proto *l4_protos[] = {
+    [IPPROTO_TCP] = &ct_proto_tcp,
+    [IPPROTO_UDP] = &ct_proto_other,
+    [IPPROTO_ICMP] = &ct_proto_icmp4,
+    [IPPROTO_ICMPV6] = &ct_proto_icmp6,
+};
 
 static void
 handle_ftp_ctl(struct conntrack *ct, const struct conn_lookup_ctx *ctx,
@@ -150,14 +170,23 @@ handle_ftp_ctl(struct conntrack *ct, const struct conn_lookup_ctx *ctx,
 
 static void
 handle_tftp_ctl(struct conntrack *ct,
+                const struct conn_lookup_ctx *ctx OVS_UNUSED,
+                struct dp_packet *pkt,
                 const struct conn *conn_for_expectation,
-                long long now);
+                long long now OVS_UNUSED,
+                enum ftp_ctl_pkt ftp_ctl OVS_UNUSED, bool nat OVS_UNUSED);
 
-static struct ct_l4_proto *l4_protos[] = {
-    [IPPROTO_TCP] = &ct_proto_tcp,
-    [IPPROTO_UDP] = &ct_proto_other,
-    [IPPROTO_ICMP] = &ct_proto_icmp4,
-    [IPPROTO_ICMPV6] = &ct_proto_icmp6,
+typedef void (*alg_helper)(struct conntrack *ct,
+                           const struct conn_lookup_ctx *ctx,
+                           struct dp_packet *pkt,
+                           const struct conn *conn_for_expectation,
+                           long long now, enum ftp_ctl_pkt ftp_ctl,
+                           bool nat);
+
+static alg_helper alg_helpers[] = {
+    [CT_ALG_CTL_NONE] = NULL,
+    [CT_ALG_CTL_FTP] = handle_ftp_ctl,
+    [CT_ALG_CTL_TFTP] = handle_tftp_ctl,
 };
 
 long long ct_timeout_val[] = {
@@ -168,8 +197,6 @@ long long ct_timeout_val[] = {
 
 /* The maximum TCP or UDP port number. */
 #define CT_MAX_L4_PORT 65535
-/* Alg expectation timeout. */
-#define CT_ALG_EXP_TIMEOUT (30 * 1000)
 /* String buffer used for parsing FTP string messages.
  * This is sized about twice what is needed to leave some
  * margin of error. */
@@ -224,8 +251,8 @@ conn_key_cmp(const struct conn_key *key1, const struct conn_key *key2)
 }
 
 static void
-ct_print_conn_info(struct conn *c, char *log_msg, enum vlog_level vll,
-                   bool force, bool rl_on)
+ct_print_conn_info(const struct conn *c, const char *log_msg,
+                   enum vlog_level vll, bool force, bool rl_on)
 {
 #define CT_VLOG(RL_ON, LEVEL, ...)                                          \
     do {                                                                    \
@@ -283,23 +310,23 @@ ct_print_conn_info(struct conn *c, char *log_msg, enum vlog_level vll,
 void
 conntrack_init(struct conntrack *ct)
 {
-    unsigned i, j;
     long long now = time_msec();
 
     ct_rwlock_init(&ct->resources_lock);
     ct_rwlock_wrlock(&ct->resources_lock);
     hmap_init(&ct->nat_conn_keys);
     hmap_init(&ct->alg_expectations);
+    hindex_init(&ct->alg_expectation_refs);
     ovs_list_init(&ct->alg_exp_list);
     ct_rwlock_unlock(&ct->resources_lock);
 
-    for (i = 0; i < CONNTRACK_BUCKETS; i++) {
+    for (unsigned i = 0; i < CONNTRACK_BUCKETS; i++) {
         struct conntrack_bucket *ctb = &ct->buckets[i];
 
         ct_lock_init(&ctb->lock);
         ct_lock_lock(&ctb->lock);
         hmap_init(&ctb->connections);
-        for (j = 0; j < ARRAY_SIZE(ctb->exp_lists); j++) {
+        for (unsigned j = 0; j < ARRAY_SIZE(ctb->exp_lists); j++) {
             ovs_list_init(&ctb->exp_lists[j]);
         }
         ct_lock_unlock(&ctb->lock);
@@ -319,12 +346,10 @@ conntrack_init(struct conntrack *ct)
 void
 conntrack_destroy(struct conntrack *ct)
 {
-    unsigned i;
-
     latch_set(&ct->clean_thread_exit);
     pthread_join(ct->clean_thread, NULL);
     latch_destroy(&ct->clean_thread_exit);
-    for (i = 0; i < CONNTRACK_BUCKETS; i++) {
+    for (unsigned i = 0; i < CONNTRACK_BUCKETS; i++) {
         struct conntrack_bucket *ctb = &ct->buckets[i];
         struct conn *conn;
 
@@ -351,8 +376,10 @@ conntrack_destroy(struct conntrack *ct)
     HMAP_FOR_EACH_POP (alg_exp_node, node, &ct->alg_expectations) {
         free(alg_exp_node);
     }
+
     ovs_list_poison(&ct->alg_exp_list);
     hmap_destroy(&ct->alg_expectations);
+    hindex_destroy(&ct->alg_expectation_refs);
     ct_rwlock_unlock(&ct->resources_lock);
     ct_rwlock_destroy(&ct->resources_lock);
 }
@@ -387,10 +414,11 @@ write_ct_md(struct dp_packet *pkt, uint16_t zone, const struct conn *conn,
         pkt->md.ct_label = alg_exp->master_label;
         key = &alg_exp->master_key;
     }
+
     pkt->md.ct_orig_tuple_ipv6 = false;
+
     if (key) {
         if (key->dl_type == htons(ETH_TYPE_IP)) {
-
             pkt->md.ct_orig_tuple.ipv4 = (struct ovs_key_ct_tuple_ipv4) {
                 key->src.addr.ipv4_aligned,
                 key->dst.addr.ipv4_aligned,
@@ -434,45 +462,68 @@ get_ip_proto(const struct dp_packet *pkt)
 }
 
 static bool
-is_ftp_ctl(const struct dp_packet *pkt)
+is_ftp_ctl(const enum ct_alg_ctl_type ct_alg_ctl)
 {
-    uint8_t ip_proto = get_ip_proto(pkt);
-    struct tcp_header *th = dp_packet_l4(pkt);
+    return ct_alg_ctl == CT_ALG_CTL_FTP;
+}
 
-    /* CT_IPPORT_FTP is used because IPPORT_FTP in not defined in OSX,
-     * at least in in.h. Since this value will never change, just remove
+static enum ct_alg_ctl_type
+get_alg_ctl_type(const struct dp_packet *pkt, ovs_be16 tp_src, ovs_be16 tp_dst,
+                 const char *helper)
+{
+    /* CT_IPPORT_FTP/TFTP is used because IPPORT_FTP/TFTP in not defined
+     * in OSX, at least in in.h. Since these values will never change, remove
      * the external dependency. */
-#define CT_IPPORT_FTP 21
+    enum { CT_IPPORT_FTP = 21 };
+    enum { CT_IPPORT_TFTP = 69 };
+    uint8_t ip_proto = get_ip_proto(pkt);
+    struct udp_header *uh = dp_packet_l4(pkt);
+    struct tcp_header *th = dp_packet_l4(pkt);
+    ovs_be16 ftp_src_port = htons(CT_IPPORT_FTP);
+    ovs_be16 ftp_dst_port = htons(CT_IPPORT_FTP);
+    ovs_be16 tftp_dst_port = htons(CT_IPPORT_TFTP);
 
-    return (ip_proto == IPPROTO_TCP &&
-            (th->tcp_src == htons(CT_IPPORT_FTP) ||
-             th->tcp_dst == htons(CT_IPPORT_FTP)));
+    if (OVS_UNLIKELY(tp_dst)) {
+        if (helper && !strncmp(helper, "ftp", strlen("ftp"))) {
+            ftp_dst_port = tp_dst;
+        } else if (helper && !strncmp(helper, "tftp", strlen("tftp"))) {
+            tftp_dst_port = tp_dst;
+        }
+    } else if (OVS_UNLIKELY(tp_src)) {
+        if (helper && !strncmp(helper, "ftp", strlen("ftp"))) {
+            ftp_src_port = tp_src;
+        }
+    }
 
+    if (ip_proto == IPPROTO_UDP && uh->udp_dst == tftp_dst_port) {
+        return CT_ALG_CTL_TFTP;
+    } else if (ip_proto == IPPROTO_TCP &&
+               (th->tcp_src == ftp_src_port || th->tcp_dst == ftp_dst_port)) {
+        return CT_ALG_CTL_FTP;
+    }
+    return CT_ALG_CTL_NONE;
 }
 
 static bool
-is_tftp_ctl(const struct dp_packet *pkt)
+alg_src_ip_wc(enum ct_alg_ctl_type alg_ctl_type)
 {
-    uint8_t ip_proto = get_ip_proto(pkt);
-    struct udp_header *uh = dp_packet_l4(pkt);
-
-    /* CT_IPPORT_TFTP is used because IPPORT_TFTP in not defined in OSX,
-     * at least in in.h. Since this value will never change, remove
-     * the external dependency. */
-#define CT_IPPORT_TFTP 69
-    return (ip_proto == IPPROTO_UDP &&
-            uh->udp_dst == htons(CT_IPPORT_TFTP));
-
+    if (alg_ctl_type == CT_ALG_CTL_SIP) {
+        return true;
+    }
+    return false;
 }
 
 static void
-alg_exp_init_expiration(struct conntrack *ct,
-                        struct alg_exp_node *alg_exp_node,
-                        long long now)
-    OVS_REQ_WRLOCK(ct->resources_lock)
+handle_alg_ctl(struct conntrack *ct, const struct conn_lookup_ctx *ctx,
+               struct dp_packet *pkt, enum ct_alg_ctl_type ct_alg_ctl,
+               const struct conn *conn, long long now, bool nat,
+               const struct conn *conn_for_expectation)
 {
-    alg_exp_node->expiration = now + CT_ALG_EXP_TIMEOUT;
-    ovs_list_push_back(&ct->alg_exp_list, &alg_exp_node->exp_node);
+    /* ALG control packet handling with expectation creation. */
+    if (OVS_UNLIKELY(alg_helpers[ct_alg_ctl] && conn && conn->alg)) {
+        alg_helpers[ct_alg_ctl](ct, ctx, pkt, conn_for_expectation, now,
+                                CT_FTP_CTL_INTEREST, nat);
+    }
 }
 
 static void
@@ -599,7 +650,6 @@ reverse_nat_packet(struct dp_packet *pkt, const struct conn *conn)
         struct ip_header *inner_l3 = (struct ip_header *) (icmp + 1);
         extract_l3_ipv4(&inner_key, inner_l3, tail - ((char *)inner_l3) - pad,
                         &inner_l4, false);
-
         pkt->l3_ofs += (char *) inner_l3 - (char *) nh;
         pkt->l4_ofs += inner_l4 - (char *) icmp;
 
@@ -610,6 +660,7 @@ reverse_nat_packet(struct dp_packet *pkt, const struct conn *conn)
             packet_set_ipv4_addr(pkt, &inner_l3->ip_dst,
                                  conn->key.dst.addr.ipv4_aligned);
         }
+
         reverse_pat_packet(pkt, conn);
         icmp->icmp_csum = 0;
         icmp->icmp_csum = csum(icmp, tail - (char *) icmp - pad);
@@ -708,8 +759,7 @@ static void
 conn_seq_skew_set(struct conntrack *ct, const struct conn_key *key,
                   long long now, int seq_skew, bool seq_skew_dir)
 {
-    uint32_t hash = conn_key_hash(key, ct->hash_basis);
-    unsigned bucket = hash_to_bucket(hash);
+    unsigned bucket = hash_to_bucket(conn_key_hash(key, ct->hash_basis));
     ct_lock_lock(&ct->buckets[bucket].lock);
     struct conn *conn = conn_lookup(ct, key, now);
     if (conn && seq_skew) {
@@ -724,20 +774,16 @@ nat_clean(struct conntrack *ct, struct conn *conn,
           struct conntrack_bucket *ctb)
     OVS_REQUIRES(ctb->lock)
 {
-    long long now = time_msec();
     ct_rwlock_wrlock(&ct->resources_lock);
     nat_conn_keys_remove(&ct->nat_conn_keys, &conn->rev_key, ct->hash_basis);
     ct_rwlock_unlock(&ct->resources_lock);
     ct_lock_unlock(&ctb->lock);
-
-    uint32_t hash_rev_conn = conn_key_hash(&conn->rev_key, ct->hash_basis);
-    unsigned bucket_rev_conn = hash_to_bucket(hash_rev_conn);
-
+    unsigned bucket_rev_conn =
+        hash_to_bucket(conn_key_hash(&conn->rev_key, ct->hash_basis));
     ct_lock_lock(&ct->buckets[bucket_rev_conn].lock);
     ct_rwlock_wrlock(&ct->resources_lock);
-
+    long long now = time_msec();
     struct conn *rev_conn = conn_lookup(ct, &conn->rev_key, now);
-
     struct nat_conn_key_node *nat_conn_key_node =
         nat_conn_keys_lookup(&ct->nat_conn_keys, &conn->rev_key,
                              ct->hash_basis);
@@ -751,8 +797,8 @@ nat_clean(struct conntrack *ct, struct conn *conn,
                     &rev_conn->node);
         free(rev_conn);
     }
-    delete_conn(conn);
 
+    delete_conn(conn);
     ct_rwlock_unlock(&ct->resources_lock);
     ct_lock_unlock(&ct->buckets[bucket_rev_conn].lock);
     ct_lock_lock(&ctb->lock);
@@ -763,6 +809,9 @@ conn_clean(struct conntrack *ct, struct conn *conn,
            struct conntrack_bucket *ctb)
     OVS_REQUIRES(ctb->lock)
 {
+    if (conn->alg) {
+        expectation_clean(ct, &conn->key, ct->hash_basis);
+    }
     ovs_list_remove(&conn->exp_node);
     hmap_remove(&ctb->connections, &conn->node);
     atomic_count_dec(&ct->n_conn);
@@ -773,6 +822,26 @@ conn_clean(struct conntrack *ct, struct conn *conn,
     }
 }
 
+static bool
+ct_verify_helper(const char *helper, enum ct_alg_ctl_type ct_alg_ctl)
+{
+    if (ct_alg_ctl == CT_ALG_CTL_NONE) {
+        return true;
+    } else if (helper) {
+        if ((ct_alg_ctl == CT_ALG_CTL_FTP) &&
+             !strncmp(helper, "ftp", strlen("ftp"))) {
+            return true;
+        } else if ((ct_alg_ctl == CT_ALG_CTL_TFTP) &&
+                   !strncmp(helper, "tftp", strlen("tftp"))) {
+            return true;
+        } else {
+            return false;
+        }
+    } else {
+        return false;
+    }
+}
+
 /* This function is called with the bucket lock held. */
 static struct conn *
 conn_not_found(struct conntrack *ct, struct dp_packet *pkt,
@@ -780,23 +849,24 @@ conn_not_found(struct conntrack *ct, struct dp_packet *pkt,
                const struct nat_action_info_t *nat_action_info,
                struct conn *conn_for_un_nat_copy,
                const char *helper,
-               const struct alg_exp_node *alg_exp)
+               const struct alg_exp_node *alg_exp,
+               enum ct_alg_ctl_type ct_alg_ctl)
 {
-    unsigned bucket = hash_to_bucket(ctx->hash);
     struct conn *nc = NULL;
 
     if (!valid_new(pkt, &ctx->key)) {
         pkt->md.ct_state = CS_INVALID;
         return nc;
     }
+
     pkt->md.ct_state = CS_NEW;
+
     if (alg_exp) {
         pkt->md.ct_state |= CS_RELATED;
     }
 
     if (commit) {
         unsigned int n_conn_limit;
-
         atomic_read_relaxed(&ct->n_conn_limit, &n_conn_limit);
 
         if (atomic_count_get(&ct->n_conn) >= n_conn_limit) {
@@ -804,13 +874,14 @@ conn_not_found(struct conntrack *ct, struct dp_packet *pkt,
             return nc;
         }
 
+        unsigned bucket = hash_to_bucket(ctx->hash);
         nc = new_conn(&ct->buckets[bucket], pkt, &ctx->key, now);
         ctx->conn = nc;
         nc->rev_key = nc->key;
         conn_key_reverse(&nc->rev_key);
 
-        if (helper) {
-            nc->alg = xstrdup(helper);
+        if (ct_verify_helper(helper, ct_alg_ctl)) {
+            nc->alg = nullable_xstrdup(helper);
         }
 
         if (alg_exp) {
@@ -824,7 +895,7 @@ conn_not_found(struct conntrack *ct, struct dp_packet *pkt,
             nc->nat_info = xmemdup(nat_action_info, sizeof *nc->nat_info);
 
             if (alg_exp) {
-                if (alg_exp->passive_mode) {
+                if (alg_exp->nat_rpl_dst) {
                     nc->rev_key.dst.addr = alg_exp->alg_nat_repl_addr;
                     nc->nat_info->nat_action = NAT_ACTION_SRC;
                 } else {
@@ -847,8 +918,8 @@ conn_not_found(struct conntrack *ct, struct dp_packet *pkt,
             } else {
                 *conn_for_un_nat_copy = *nc;
                 ct_rwlock_wrlock(&ct->resources_lock);
-                bool nat_res = nat_select_range_tuple(
-                                   ct, nc, conn_for_un_nat_copy);
+                bool nat_res = nat_select_range_tuple(ct, nc,
+                                                      conn_for_un_nat_copy);
 
                 if (!nat_res) {
                     goto nat_res_exhaustion;
@@ -907,6 +978,7 @@ conn_update_state(struct conntrack *ct, struct dp_packet *pkt,
         if ((*conn)->alg_related) {
             pkt->md.ct_state |= CS_RELATED;
         }
+
         enum ct_update_res res = conn_update(*conn, &ct->buckets[bucket],
                                              pkt, ctx->reply, now);
 
@@ -962,7 +1034,6 @@ create_un_nat_conn(struct conntrack *ct, struct conn *conn_for_un_nat_copy,
             nat_conn_keys_lookup(&ct->nat_conn_keys, &nc->key, ct->hash_basis);
         if (nat_conn_key_node && !conn_key_cmp(&nat_conn_key_node->value,
             &nc->rev_key) && !rev_conn) {
-
             hmap_insert(&ct->buckets[un_nat_conn_bucket].connections,
                         &nc->node, un_nat_hash);
         } else {
@@ -1053,13 +1124,11 @@ check_orig_tuple(struct conntrack *ct, struct dp_packet *pkt,
 
     ctx.key.dl_type = ctx_in->key.dl_type;
     ctx.key.zone = pkt->md.ct_zone;
-
     ctx.hash = conn_key_hash(&ctx.key, ct->hash_basis);
     *bucket = hash_to_bucket(ctx.hash);
     ct_lock_lock(&ct->buckets[*bucket].lock);
     conn_key_lookup(&ct->buckets[*bucket], &ctx, now);
     *conn = ctx.conn;
-
     return *conn ? true : false;
 }
 
@@ -1069,13 +1138,40 @@ is_un_nat_conn_valid(const struct conn *un_nat_conn)
     return un_nat_conn->conn_type == CT_CONN_TYPE_UN_NAT;
 }
 
+static bool
+conn_update_state_alg(struct conntrack *ct, struct dp_packet *pkt,
+                      struct conn_lookup_ctx *ctx, struct conn *conn,
+                      const struct nat_action_info_t *nat_action_info,
+                      enum ct_alg_ctl_type ct_alg_ctl, long long now,
+                      unsigned bucket, bool *create_new_conn)
+    OVS_REQUIRES(ct->buckets[bucket].lock)
+{
+    if (is_ftp_ctl(ct_alg_ctl)) {
+        /* Keep sequence tracking in sync with the source of the
+         * sequence skew. */
+        if (ctx->reply != conn->seq_skew_dir) {
+            handle_ftp_ctl(ct, ctx, pkt, conn, now, CT_FTP_CTL_OTHER,
+                           !!nat_action_info);
+            *create_new_conn = conn_update_state(ct, pkt, ctx, &conn, now,
+                                                bucket);
+        } else {
+            *create_new_conn = conn_update_state(ct, pkt, ctx, &conn, now,
+                                                bucket);
+            handle_ftp_ctl(ct, ctx, pkt, conn, now, CT_FTP_CTL_OTHER,
+                           !!nat_action_info);
+        }
+        return true;
+    }
+    return false;
+}
+
 static void
 process_one(struct conntrack *ct, struct dp_packet *pkt,
             struct conn_lookup_ctx *ctx, uint16_t zone,
             bool force, bool commit, long long now, const uint32_t *setmark,
             const struct ovs_key_ct_labels *setlabel,
             const struct nat_action_info_t *nat_action_info,
-            const char *helper)
+            ovs_be16 tp_src, ovs_be16 tp_dst, const char *helper)
 {
     struct conn *conn;
     unsigned bucket = hash_to_bucket(ctx->hash);
@@ -1121,24 +1217,15 @@ process_one(struct conntrack *ct, struct dp_packet *pkt,
     bool create_new_conn = false;
     struct conn conn_for_un_nat_copy;
     conn_for_un_nat_copy.conn_type = CT_CONN_TYPE_DEFAULT;
-    bool ftp_ctl = is_ftp_ctl(pkt);
+
+    enum ct_alg_ctl_type ct_alg_ctl = get_alg_ctl_type(pkt, tp_src, tp_dst,
+                                                       helper);
 
     if (OVS_LIKELY(conn)) {
-        if (ftp_ctl) {
-            /* Keep sequence tracking in sync with the source of the
-             * sequence skew. */
-            if (ctx->reply != conn->seq_skew_dir) {
-                handle_ftp_ctl(ct, ctx, pkt, conn, now, CT_FTP_CTL_OTHER,
-                               !!nat_action_info);
-                create_new_conn = conn_update_state(ct, pkt, ctx, &conn, now,
-                                                    bucket);
-            } else {
-                create_new_conn = conn_update_state(ct, pkt, ctx, &conn, now,
-                                                    bucket);
-                handle_ftp_ctl(ct, ctx, pkt, conn, now, CT_FTP_CTL_OTHER,
-                               !!nat_action_info);
-            }
-        } else {
+        if (OVS_LIKELY(!conn_update_state_alg(ct, pkt, ctx, conn,
+                                              nat_action_info,
+                                              ct_alg_ctl, now, bucket,
+                                              &create_new_conn))) {
             create_new_conn = conn_update_state(ct, pkt, ctx, &conn, now,
                                                 bucket);
         }
@@ -1146,10 +1233,9 @@ process_one(struct conntrack *ct, struct dp_packet *pkt,
             handle_nat(pkt, conn, zone, ctx->reply, ctx->icmp_related);
         }
 
-    }else if (check_orig_tuple(ct, pkt, ctx, now, &bucket, &conn,
+    } else if (check_orig_tuple(ct, pkt, ctx, now, &bucket, &conn,
                                nat_action_info)) {
-        create_new_conn = conn_update_state(ct, pkt, ctx, &conn, now,
-                                            bucket);
+        create_new_conn = conn_update_state(ct, pkt, ctx, &conn, now, bucket);
     } else {
         if (ctx->icmp_related) {
             /* An icmp related conn should always be found; no new
@@ -1161,12 +1247,14 @@ process_one(struct conntrack *ct, struct dp_packet *pkt,
     }
 
     const struct alg_exp_node *alg_exp = NULL;
+
     if (OVS_UNLIKELY(create_new_conn)) {
         struct alg_exp_node alg_exp_entry;
 
         ct_rwlock_rdlock(&ct->resources_lock);
         alg_exp = expectation_lookup(&ct->alg_expectations, &ctx->key,
-                                     ct->hash_basis);
+                                     ct->hash_basis,
+                                     alg_src_ip_wc(ct_alg_ctl));
         if (alg_exp) {
             alg_exp_entry = *alg_exp;
             alg_exp = &alg_exp_entry;
@@ -1174,7 +1262,8 @@ process_one(struct conntrack *ct, struct dp_packet *pkt,
         ct_rwlock_unlock(&ct->resources_lock);
 
         conn = conn_not_found(ct, pkt, ctx, commit, now, nat_action_info,
-                              &conn_for_un_nat_copy, helper, alg_exp);
+                              &conn_for_un_nat_copy, helper, alg_exp,
+                              ct_alg_ctl);
     }
 
     write_ct_md(pkt, zone, conn, &ctx->key, alg_exp);
@@ -1187,9 +1276,8 @@ process_one(struct conntrack *ct, struct dp_packet *pkt,
         set_label(pkt, conn, &setlabel[0], &setlabel[1]);
     }
 
-    bool tftp_ctl = is_tftp_ctl(pkt);
     struct conn conn_for_expectation;
-    if (OVS_UNLIKELY((ftp_ctl || tftp_ctl) && conn)) {
+    if (OVS_UNLIKELY((ct_alg_ctl != CT_ALG_CTL_NONE) && conn)) {
         conn_for_expectation = *conn;
     }
 
@@ -1199,13 +1287,8 @@ process_one(struct conntrack *ct, struct dp_packet *pkt,
         create_un_nat_conn(ct, &conn_for_un_nat_copy, now, !!alg_exp);
     }
 
-    /* FTP control packet handling with expectation creation. */
-    if (OVS_UNLIKELY(ftp_ctl && conn)) {
-        handle_ftp_ctl(ct, ctx, pkt, &conn_for_expectation,
-                       now, CT_FTP_CTL_INTEREST, !!nat_action_info);
-    } else if (OVS_UNLIKELY(tftp_ctl && conn)) {
-        handle_tftp_ctl(ct, &conn_for_expectation, now);
-    }
+    handle_alg_ctl(ct, ctx, pkt, ct_alg_ctl, conn, now, !!nat_action_info,
+                   &conn_for_expectation);
 }
 
 /* Sends the packets in '*pkt_batch' through the connection tracker 'ct'.  All
@@ -1221,7 +1304,7 @@ conntrack_execute(struct conntrack *ct, struct dp_packet_batch *pkt_batch,
                   ovs_be16 dl_type, bool force, bool commit, uint16_t zone,
                   const uint32_t *setmark,
                   const struct ovs_key_ct_labels *setlabel,
-                  const char *helper,
+                  ovs_be16 tp_src, ovs_be16 tp_dst, const char *helper,
                   const struct nat_action_info_t *nat_action_info,
                   long long now)
 {
@@ -1229,17 +1312,25 @@ conntrack_execute(struct conntrack *ct, struct dp_packet_batch *pkt_batch,
     struct dp_packet *packet;
     struct conn_lookup_ctx ctx;
 
-    DP_PACKET_BATCH_FOR_EACH (packet, pkt_batch) {
+    DP_PACKET_BATCH_FOR_EACH (i, packet, pkt_batch) {
         if (!conn_key_extract(ct, packet, dl_type, &ctx, zone)) {
             packet->md.ct_state = CS_INVALID;
             write_ct_md(packet, zone, NULL, NULL, NULL);
             continue;
         }
-        process_one(ct, packet, &ctx, zone, force, commit,
-                    now, setmark, setlabel, nat_action_info, helper);
+        process_one(ct, packet, &ctx, zone, force, commit, now, setmark,
+                    setlabel, nat_action_info, tp_src, tp_dst, helper);
     }
 
     return 0;
+}
+
+void
+conntrack_clear(struct dp_packet *packet)
+{
+    /* According to pkt_metadata_init(), ct_state == 0 is enough to make all of
+     * the conntrack fields invalid. */
+    packet->md.ct_state = 0;
 }
 
 static void
@@ -1286,10 +1377,9 @@ sweep_bucket(struct conntrack *ct, struct conntrack_bucket *ctb,
 {
     struct conn *conn, *next;
     long long min_expiration = LLONG_MAX;
-    unsigned i;
     size_t count = 0;
 
-    for (i = 0; i < N_CT_TM; i++) {
+    for (unsigned i = 0; i < N_CT_TM; i++) {
         LIST_FOR_EACH_SAFE (conn, next, exp_node, &ctb->exp_lists[i]) {
             if (conn->conn_type == CT_CONN_TYPE_DEFAULT) {
                 if (!conn_expired(conn, now) || count >= limit) {
@@ -1306,27 +1396,6 @@ sweep_bucket(struct conntrack *ct, struct conntrack_bucket *ctb,
             }
         }
     }
-
-    enum { MAX_ALG_EXP_TO_EXPIRE = 1000 };
-    size_t alg_exp_count = hmap_count(&ct->alg_expectations);
-    /* XXX: revisit this. */
-    size_t max_to_expire = MAX(alg_exp_count/10, MAX_ALG_EXP_TO_EXPIRE);
-    count = 0;
-    ct_rwlock_wrlock(&ct->resources_lock);
-    struct alg_exp_node *alg_exp_node, *alg_exp_node_next;
-    LIST_FOR_EACH_SAFE (alg_exp_node, alg_exp_node_next,
-                        exp_node, &ct->alg_exp_list) {
-        if (now < alg_exp_node->expiration || count >= max_to_expire) {
-            min_expiration = MIN(min_expiration, alg_exp_node->expiration);
-            break;
-        }
-        ovs_list_remove(&alg_exp_node->exp_node);
-        hmap_remove(&ct->alg_expectations, &alg_exp_node->node);
-        free(alg_exp_node);
-        count++;
-    }
-    ct_rwlock_unlock(&ct->resources_lock);
-
     return min_expiration;
 }
 
@@ -1340,11 +1409,10 @@ conntrack_clean(struct conntrack *ct, long long now)
     long long next_wakeup = now + CT_TM_MIN;
     unsigned int n_conn_limit;
     size_t clean_count = 0;
-    unsigned i;
 
     atomic_read_relaxed(&ct->n_conn_limit, &n_conn_limit);
 
-    for (i = 0; i < CONNTRACK_BUCKETS; i++) {
+    for (unsigned i = 0; i < CONNTRACK_BUCKETS; i++) {
         struct conntrack_bucket *ctb = &ct->buckets[i];
         size_t prev_count;
         long long min_exp;
@@ -1415,7 +1483,6 @@ clean_thread_main(void *f_)
     while (!latch_is_set(&ct->clean_thread_exit)) {
         long long next_wake;
         long long now = time_msec();
-
         next_wake = conntrack_clean(ct, now);
 
         if (next_wake < now) {
@@ -1442,16 +1509,14 @@ static inline bool
 extract_l3_ipv4(struct conn_key *key, const void *data, size_t size,
                 const char **new_data, bool validate_checksum)
 {
-    const struct ip_header *ip = data;
-    size_t ip_len;
-
     if (new_data) {
         if (OVS_UNLIKELY(size < IP_HEADER_LEN)) {
             return false;
         }
     }
 
-    ip_len = IP_IHL(ip->ip_ihl_ver) * 4;
+    const struct ip_header *ip = data;
+    size_t ip_len = IP_IHL(ip->ip_ihl_ver) * 4;
 
     if (new_data) {
         if (OVS_UNLIKELY(ip_len < IP_HEADER_LEN)) {
@@ -1461,11 +1526,11 @@ extract_l3_ipv4(struct conn_key *key, const void *data, size_t size,
             return false;
         }
 
-        *new_data = (char *) data + ip_len;
-    }
+        if (IP_IS_FRAGMENT(ip->ip_frag_off)) {
+            return false;
+        }
 
-    if (IP_IS_FRAGMENT(ip->ip_frag_off)) {
-        return false;
+        *new_data = (char *) data + ip_len;
     }
 
     if (validate_checksum && csum(data, ip_len) != 0) {
@@ -1496,22 +1561,21 @@ extract_l3_ipv6(struct conn_key *key, const void *data, size_t size,
         }
     }
 
-    uint8_t nw_proto = ip6->ip6_nxt;
-    uint8_t nw_frag = 0;
-
     data = ip6 + 1;
     size -=  sizeof *ip6;
+    uint8_t nw_proto = ip6->ip6_nxt;
+    uint8_t nw_frag = 0;
 
     if (!parse_ipv6_ext_hdrs(&data, &size, &nw_proto, &nw_frag)) {
         return false;
     }
 
-    if (new_data) {
-        *new_data = data;
-    }
-
     if (nw_frag) {
         return false;
+    }
+
+    if (new_data) {
+        *new_data = data;
     }
 
     key->src.addr.ipv6 = ip6->ip6_src;
@@ -1592,12 +1656,11 @@ check_l4_icmp6(const struct conn_key *key, const void *data, size_t size,
 static inline bool
 extract_l4_tcp(struct conn_key *key, const void *data, size_t size)
 {
-    const struct tcp_header *tcp = data;
-
     if (OVS_UNLIKELY(size < TCP_HEADER_LEN)) {
         return false;
     }
 
+    const struct tcp_header *tcp = data;
     key->src.port = tcp->tcp_src;
     key->dst.port = tcp->tcp_dst;
 
@@ -1608,12 +1671,11 @@ extract_l4_tcp(struct conn_key *key, const void *data, size_t size)
 static inline bool
 extract_l4_udp(struct conn_key *key, const void *data, size_t size)
 {
-    const struct udp_header *udp = data;
-
     if (OVS_UNLIKELY(size < UDP_HEADER_LEN)) {
         return false;
     }
 
+    const struct udp_header *udp = data;
     key->src.port = udp->udp_src;
     key->dst.port = udp->udp_dst;
 
@@ -1657,11 +1719,11 @@ static inline int
 extract_l4_icmp(struct conn_key *key, const void *data, size_t size,
                 bool *related)
 {
-    const struct icmp_header *icmp = data;
-
     if (OVS_UNLIKELY(size < ICMP_HEADER_LEN)) {
         return false;
     }
+
+    const struct icmp_header *icmp = data;
 
     switch (icmp->icmp_type) {
     case ICMP4_ECHO_REQUEST:
@@ -1689,7 +1751,6 @@ extract_l4_icmp(struct conn_key *key, const void *data, size_t size,
         const char *l3 = (const char *) (icmp + 1);
         const char *tail = (const char *) data + size;
         const char *l4;
-        bool ok;
 
         if (!related) {
             return false;
@@ -1697,13 +1758,12 @@ extract_l4_icmp(struct conn_key *key, const void *data, size_t size,
 
         memset(&inner_key, 0, sizeof inner_key);
         inner_key.dl_type = htons(ETH_TYPE_IP);
-        ok = extract_l3_ipv4(&inner_key, l3, tail - l3, &l4, false);
+        bool ok = extract_l3_ipv4(&inner_key, l3, tail - l3, &l4, false);
         if (!ok) {
             return false;
         }
 
-        if (inner_key.src.addr.ipv4_aligned != key->dst.addr.ipv4_aligned
-            || inner_key.dst.addr.ipv4_aligned != key->src.addr.ipv4_aligned) {
+        if (inner_key.src.addr.ipv4_aligned != key->dst.addr.ipv4_aligned) {
             return false;
         }
 
@@ -1776,7 +1836,6 @@ extract_l4_icmp6(struct conn_key *key, const void *data, size_t size,
         const char *l3 = (const char *) icmp6 + 8;
         const char *tail = (const char *) data + size;
         const char *l4 = NULL;
-        bool ok;
 
         if (!related) {
             return false;
@@ -1784,16 +1843,14 @@ extract_l4_icmp6(struct conn_key *key, const void *data, size_t size,
 
         memset(&inner_key, 0, sizeof inner_key);
         inner_key.dl_type = htons(ETH_TYPE_IPV6);
-        ok = extract_l3_ipv6(&inner_key, l3, tail - l3, &l4);
+        bool ok = extract_l3_ipv6(&inner_key, l3, tail - l3, &l4);
         if (!ok) {
             return false;
         }
 
         /* pf doesn't do this, but it seems a good idea */
         if (!ipv6_addr_equals(&inner_key.src.addr.ipv6_aligned,
-                              &key->dst.addr.ipv6_aligned)
-            || !ipv6_addr_equals(&inner_key.dst.addr.ipv6_aligned,
-                                 &key->src.addr.ipv6_aligned)) {
+                              &key->dst.addr.ipv6_aligned)) {
             return false;
         }
 
@@ -1855,8 +1912,6 @@ conn_key_extract(struct conntrack *ct, struct dp_packet *pkt, ovs_be16 dl_type,
     const struct eth_header *l2 = dp_packet_eth(pkt);
     const struct ip_header *l3 = dp_packet_l3(pkt);
     const char *l4 = dp_packet_l4(pkt);
-    const char *tail = dp_packet_tail(pkt);
-    bool ok;
 
     memset(ctx, 0, sizeof *ctx);
 
@@ -1898,13 +1953,16 @@ conn_key_extract(struct conntrack *ct, struct dp_packet *pkt, ovs_be16 dl_type,
      *     we use a sparse representation (miniflow).
      *
      */
+    const char *tail = dp_packet_tail(pkt);
+    bool ok;
     ctx->key.dl_type = dl_type;
+
     if (ctx->key.dl_type == htons(ETH_TYPE_IP)) {
-        bool  hwol_bad_l3_csum = dp_packet_ip_checksum_bad(pkt);
+        bool hwol_bad_l3_csum = dp_packet_ip_checksum_bad(pkt);
         if (hwol_bad_l3_csum) {
             ok = false;
         } else {
-            bool  hwol_good_l3_csum = dp_packet_ip_checksum_valid(pkt);
+            bool hwol_good_l3_csum = dp_packet_ip_checksum_valid(pkt);
             /* Validate the checksum only when hwol is not supported. */
             ok = extract_l3_ipv4(&ctx->key, l3, tail - (char *) l3, NULL,
                                  !hwol_good_l3_csum);
@@ -1914,7 +1972,6 @@ conn_key_extract(struct conntrack *ct, struct dp_packet *pkt, ovs_be16 dl_type,
     } else {
         ok = false;
     }
-
 
     if (ok) {
         bool hwol_bad_l4_csum = dp_packet_l4_checksum_bad(pkt);
@@ -1951,7 +2008,6 @@ static uint32_t
 conn_key_hash(const struct conn_key *key, uint32_t basis)
 {
     uint32_t hsrc, hdst, hash;
-
     hsrc = hdst = basis;
     hsrc = ct_endpoint_hash_add(hsrc, &key->src);
     hdst = ct_endpoint_hash_add(hdst, &key->dst);
@@ -1970,9 +2026,7 @@ conn_key_hash(const struct conn_key *key, uint32_t basis)
 static void
 conn_key_reverse(struct conn_key *key)
 {
-    struct ct_endpoint tmp;
-
-    tmp = key->src;
+    struct ct_endpoint tmp = key->src;
     key->src = key->dst;
     key->dst = tmp;
 }
@@ -1997,6 +2051,7 @@ nat_ipv6_addrs_delta(struct in6_addr *ipv6_aligned_min,
     memcpy(&addr6_64_max_lo, ipv6_max_lo, sizeof addr6_64_max_lo);
 
     uint64_t diff;
+
     if (addr6_64_min_hi == addr6_64_max_hi &&
         ntohll(addr6_64_min_lo) <= ntohll(addr6_64_max_lo)) {
         diff = ntohll(addr6_64_max_lo) - ntohll(addr6_64_min_lo);
@@ -2010,6 +2065,7 @@ nat_ipv6_addrs_delta(struct in6_addr *ipv6_aligned_min,
          * support check, however the practical impact is probably nil. */
         diff = 0xfffffffe;
     }
+
     if (diff > 0xfffffffe) {
         diff = 0xfffffffe;
     }
@@ -2054,10 +2110,8 @@ nat_range_hash(const struct conn *conn, uint32_t basis)
     hash = hash_add(hash,
                     (conn->nat_info->max_port << 16)
                     | conn->nat_info->min_port);
-
     hash = ct_endpoint_hash_add(hash, &conn->key.src);
     hash = ct_endpoint_hash_add(hash, &conn->key.dst);
-
     hash = hash_add(hash, (OVS_FORCE uint32_t) conn->key.dl_type);
     hash = hash_add(hash, conn->key.nw_proto);
     hash = hash_add(hash, conn->key.zone);
@@ -2078,7 +2132,6 @@ nat_select_range_tuple(struct conntrack *ct, const struct conn *conn,
     uint16_t min_port;
     uint16_t max_port;
     uint16_t first_port;
-
     uint32_t hash = nat_range_hash(conn, ct->hash_basis);
 
     if ((conn->nat_info->nat_action & NAT_ACTION_SRC) &&
@@ -2122,7 +2175,6 @@ nat_select_range_tuple(struct conntrack *ct, const struct conn *conn,
          * enforcement via max_ct_addr. */
         max_ct_addr = conn->nat_info->min_addr;
         nat_ipv6_addr_increment(&max_ct_addr.ipv6_aligned, deltaa);
-
         address_index = hash % (deltaa + 1);
         ct_addr.ipv6_aligned = conn->nat_info->min_addr.ipv6_aligned;
         nat_ipv6_addr_increment(&ct_addr.ipv6_aligned, address_index);
@@ -2200,10 +2252,9 @@ nat_conn_keys_lookup(struct hmap *nat_conn_keys,
                      uint32_t basis)
 {
     struct nat_conn_key_node *nat_conn_key_node;
-    uint32_t nat_conn_key_hash = conn_key_hash(key, basis);
 
-    HMAP_FOR_EACH_WITH_HASH (nat_conn_key_node, node, nat_conn_key_hash,
-                             nat_conn_keys) {
+    HMAP_FOR_EACH_WITH_HASH (nat_conn_key_node, node,
+                             conn_key_hash(key, basis), nat_conn_keys) {
         if (!conn_key_cmp(&nat_conn_key_node->key, key)) {
             return nat_conn_key_node;
         }
@@ -2223,9 +2274,8 @@ nat_conn_keys_insert(struct hmap *nat_conn_keys, const struct conn *nat_conn,
         struct nat_conn_key_node *nat_conn_key = xzalloc(sizeof *nat_conn_key);
         nat_conn_key->key = nat_conn->rev_key;
         nat_conn_key->value = nat_conn->key;
-        uint32_t nat_conn_key_hash = conn_key_hash(&nat_conn_key->key,
-                                                   basis);
-        hmap_insert(nat_conn_keys, &nat_conn_key->node, nat_conn_key_hash);
+        hmap_insert(nat_conn_keys, &nat_conn_key->node,
+                    conn_key_hash(&nat_conn_key->key, basis));
         return true;
     }
     return false;
@@ -2238,10 +2288,9 @@ nat_conn_keys_remove(struct hmap *nat_conn_keys,
                      uint32_t basis)
 {
     struct nat_conn_key_node *nat_conn_key_node;
-    uint32_t nat_conn_key_hash = conn_key_hash(key, basis);
 
-    HMAP_FOR_EACH_WITH_HASH (nat_conn_key_node, node, nat_conn_key_hash,
-                             nat_conn_keys) {
+    HMAP_FOR_EACH_WITH_HASH (nat_conn_key_node, node,
+                             conn_key_hash(key, basis), nat_conn_keys) {
         if (!conn_key_cmp(&nat_conn_key_node->key, key)) {
             hmap_remove(nat_conn_keys, &nat_conn_key_node->node);
             free(nat_conn_key_node);
@@ -2303,10 +2352,7 @@ static struct conn *
 new_conn(struct conntrack_bucket *ctb, struct dp_packet *pkt,
          struct conn_key *key, long long now)
 {
-    struct conn *newconn;
-
-    newconn = l4_protos[key->nw_proto]->new_conn(ctb, pkt, now);
-
+    struct conn *newconn = l4_protos[key->nw_proto]->new_conn(ctb, pkt, now);
     if (newconn) {
         newconn->key = *key;
     }
@@ -2322,6 +2368,10 @@ delete_conn(struct conn *conn)
     free(conn);
 }
 
+/* Convert a conntrack address 'a' into an IP address 'b' based on 'dl_type'.
+ *
+ * Note that 'dl_type' should be either "ETH_TYPE_IP" or "ETH_TYPE_IPv6"
+ * in network-byte order. */
 static void
 ct_endpoint_to_ct_dpif_inet_addr(const struct ct_addr *a,
                                  union ct_dpif_inet_addr *b,
@@ -2331,6 +2381,22 @@ ct_endpoint_to_ct_dpif_inet_addr(const struct ct_addr *a,
         b->ip = a->ipv4_aligned;
     } else if (dl_type == htons(ETH_TYPE_IPV6)){
         b->in6 = a->ipv6_aligned;
+    }
+}
+
+/* Convert an IP address 'a' into a conntrack address 'b' based on 'dl_type'.
+ *
+ * Note that 'dl_type' should be either "ETH_TYPE_IP" or "ETH_TYPE_IPv6"
+ * in network-byte order. */
+static void
+ct_dpif_inet_addr_to_ct_endpoint(const union ct_dpif_inet_addr *a,
+                                 struct ct_addr *b,
+                                 ovs_be16 dl_type)
+{
+    if (dl_type == htons(ETH_TYPE_IP)) {
+        b->ipv4_aligned = a->ip;
+    } else if (dl_type == htons(ETH_TYPE_IPV6)){
+        b->ipv6_aligned = a->in6;
     }
 }
 
@@ -2359,11 +2425,38 @@ conn_key_to_tuple(const struct conn_key *key, struct ct_dpif_tuple *tuple)
 }
 
 static void
+tuple_to_conn_key(const struct ct_dpif_tuple *tuple, uint16_t zone,
+                  struct conn_key *key)
+{
+    if (tuple->l3_type == AF_INET) {
+        key->dl_type = htons(ETH_TYPE_IP);
+    } else if (tuple->l3_type == AF_INET6) {
+        key->dl_type = htons(ETH_TYPE_IPV6);
+    }
+    key->nw_proto = tuple->ip_proto;
+    ct_dpif_inet_addr_to_ct_endpoint(&tuple->src, &key->src.addr,
+                                     key->dl_type);
+    ct_dpif_inet_addr_to_ct_endpoint(&tuple->dst, &key->dst.addr,
+                                     key->dl_type);
+
+    if (tuple->ip_proto == IPPROTO_ICMP || tuple->ip_proto == IPPROTO_ICMPV6) {
+        key->src.icmp_id = tuple->icmp_id;
+        key->src.icmp_type = tuple->icmp_type;
+        key->src.icmp_code = tuple->icmp_code;
+        key->dst.icmp_id = tuple->icmp_id;
+        key->dst.icmp_type = reverse_icmp_type(tuple->icmp_type);
+        key->dst.icmp_code = tuple->icmp_code;
+    } else {
+        key->src.port = tuple->src_port;
+        key->dst.port = tuple->dst_port;
+    }
+    key->zone = zone;
+}
+
+static void
 conn_to_ct_dpif_entry(const struct conn *conn, struct ct_dpif_entry *entry,
                       long long now, int bkt)
 {
-    struct ct_l4_proto *class;
-    long long expiration;
     memset(entry, 0, sizeof *entry);
     conn_key_to_tuple(&conn->key, &entry->tuple_orig);
     conn_key_to_tuple(&conn->rev_key, &entry->tuple_reply);
@@ -2376,10 +2469,10 @@ conn_to_ct_dpif_entry(const struct conn *conn, struct ct_dpif_entry *entry,
     entry->timestamp.start = 0;
     entry->timestamp.stop = 0;
 
-    expiration = conn->expiration - now;
+    long long expiration = conn->expiration - now;
     entry->timeout = (expiration > 0) ? expiration / 1000 : 0;
 
-    class = l4_protos[conn->key.nw_proto];
+    struct ct_l4_proto *class = l4_protos[conn->key.nw_proto];
     if (class->conn_get_protoinfo) {
         class->conn_get_protoinfo(conn, &entry->protoinfo);
     }
@@ -2397,14 +2490,14 @@ conntrack_dump_start(struct conntrack *ct, struct conntrack_dump *dump,
                      const uint16_t *pzone, int *ptot_bkts)
 {
     memset(dump, 0, sizeof(*dump));
+
     if (pzone) {
         dump->zone = *pzone;
         dump->filter_zone = true;
     }
+
     dump->ct = ct;
-
     *ptot_bkts = CONNTRACK_BUCKETS;
-
     return 0;
 }
 
@@ -2456,9 +2549,7 @@ conntrack_dump_done(struct conntrack_dump *dump OVS_UNUSED)
 int
 conntrack_flush(struct conntrack *ct, const uint16_t *zone)
 {
-    unsigned i;
-
-    for (i = 0; i < CONNTRACK_BUCKETS; i++) {
+    for (unsigned i = 0; i < CONNTRACK_BUCKETS; i++) {
         struct conn *conn, *next;
 
         ct_lock_lock(&ct->buckets[i].lock);
@@ -2471,32 +2562,69 @@ conntrack_flush(struct conntrack *ct, const uint16_t *zone)
         ct_lock_unlock(&ct->buckets[i].lock);
     }
 
-    ct_rwlock_wrlock(&ct->resources_lock);
-    struct alg_exp_node *alg_exp_node, *alg_exp_node_next;
-    HMAP_FOR_EACH_SAFE (alg_exp_node, alg_exp_node_next,
-                       node, &ct->alg_expectations) {
-        if (!zone || *zone == alg_exp_node->key.zone) {
-            ovs_list_remove(&alg_exp_node->exp_node);
-            hmap_remove(&ct->alg_expectations, &alg_exp_node->node);
-            free(alg_exp_node);
-        }
+    return 0;
+}
+
+int
+conntrack_flush_tuple(struct conntrack *ct, const struct ct_dpif_tuple *tuple,
+                      uint16_t zone)
+{
+    struct conn_lookup_ctx ctx;
+    int error = 0;
+
+    memset(&ctx, 0, sizeof(ctx));
+    tuple_to_conn_key(tuple, zone, &ctx.key);
+    ctx.hash = conn_key_hash(&ctx.key, ct->hash_basis);
+    unsigned bucket = hash_to_bucket(ctx.hash);
+
+    ct_lock_lock(&ct->buckets[bucket].lock);
+    conn_key_lookup(&ct->buckets[bucket], &ctx, time_msec());
+    if (ctx.conn) {
+        conn_clean(ct, ctx.conn, &ct->buckets[bucket]);
+    } else {
+        error = ENOENT;
     }
-    ct_rwlock_unlock(&ct->resources_lock);
+    ct_lock_unlock(&ct->buckets[bucket].lock);
+    return error;
+}
+
+int
+conntrack_set_maxconns(struct conntrack *ct, uint32_t maxconns)
+{
+    atomic_store_relaxed(&ct->n_conn_limit, maxconns);
+    return 0;
+}
+
+int
+conntrack_get_maxconns(struct conntrack *ct, uint32_t *maxconns)
+{
+    atomic_read_relaxed(&ct->n_conn_limit, maxconns);
+    return 0;
+}
+
+int
+conntrack_get_nconns(struct conntrack *ct, uint32_t *nconns)
+{
+    *nconns = atomic_count_get(&ct->n_conn);
     return 0;
 }
 
 /* This function must be called with the ct->resources read lock taken. */
 static struct alg_exp_node *
-expectation_lookup(struct hmap *alg_expectations,
-                   const struct conn_key *key, uint32_t basis)
+expectation_lookup(struct hmap *alg_expectations, const struct conn_key *key,
+                   uint32_t basis, bool src_ip_wc)
 {
     struct conn_key check_key = *key;
     check_key.src.port = ALG_WC_SRC_PORT;
+
+    if (src_ip_wc) {
+        memset(&check_key.src.addr, 0, sizeof check_key.src.addr);
+    }
+
     struct alg_exp_node *alg_exp_node;
 
-    uint32_t alg_exp_conn_key_hash = conn_key_hash(&check_key, basis);
     HMAP_FOR_EACH_WITH_HASH (alg_exp_node, node,
-                             alg_exp_conn_key_hash,
+                             conn_key_hash(&check_key, basis),
                              alg_expectations) {
         if (!conn_key_cmp(&alg_exp_node->key, &check_key)) {
             return alg_exp_node;
@@ -2505,35 +2633,109 @@ expectation_lookup(struct hmap *alg_expectations,
     return NULL;
 }
 
+/* This function must be called with the ct->resources write lock taken. */
 static void
-expectation_create(struct conntrack *ct,
-                   ovs_be16 dst_port,
-                   const long long now,
-                   enum ct_alg_mode mode,
-                   const struct conn *master_conn)
+expectation_remove(struct hmap *alg_expectations,
+                   const struct conn_key *key, uint32_t basis)
+{
+    struct alg_exp_node *alg_exp_node;
+
+    HMAP_FOR_EACH_WITH_HASH (alg_exp_node, node, conn_key_hash(key, basis),
+                             alg_expectations) {
+        if (!conn_key_cmp(&alg_exp_node->key, key)) {
+            hmap_remove(alg_expectations, &alg_exp_node->node);
+            break;
+        }
+    }
+}
+
+/* This function must be called with the ct->resources read lock taken. */
+static struct alg_exp_node *
+expectation_ref_lookup_unique(const struct hindex *alg_expectation_refs,
+                              const struct conn_key *master_key,
+                              const struct conn_key *alg_exp_key,
+                              uint32_t basis)
+{
+    struct alg_exp_node *alg_exp_node;
+
+    HINDEX_FOR_EACH_WITH_HASH (alg_exp_node, node_ref,
+                               conn_key_hash(master_key, basis),
+                               alg_expectation_refs) {
+        if (!conn_key_cmp(&alg_exp_node->master_key, master_key) &&
+            !conn_key_cmp(&alg_exp_node->key, alg_exp_key)) {
+            return alg_exp_node;
+        }
+    }
+    return NULL;
+}
+
+/* This function must be called with the ct->resources write lock taken. */
+static void
+expectation_ref_create(struct hindex *alg_expectation_refs,
+                       struct alg_exp_node *alg_exp_node,
+                       uint32_t basis)
+{
+    if (!expectation_ref_lookup_unique(alg_expectation_refs,
+                                       &alg_exp_node->master_key,
+                                       &alg_exp_node->key, basis)) {
+        hindex_insert(alg_expectation_refs, &alg_exp_node->node_ref,
+                      conn_key_hash(&alg_exp_node->master_key, basis));
+    }
+}
+
+static void
+expectation_clean(struct conntrack *ct, const struct conn_key *master_key,
+                  uint32_t basis)
+{
+    ct_rwlock_wrlock(&ct->resources_lock);
+
+    struct alg_exp_node *node, *next;
+    HINDEX_FOR_EACH_WITH_HASH_SAFE (node, next, node_ref,
+                                    conn_key_hash(master_key, basis),
+                                    &ct->alg_expectation_refs) {
+        if (!conn_key_cmp(&node->master_key, master_key)) {
+            expectation_remove(&ct->alg_expectations, &node->key, basis);
+            hindex_remove(&ct->alg_expectation_refs, &node->node_ref);
+            free(node);
+        }
+    }
+
+    ct_rwlock_unlock(&ct->resources_lock);
+}
+
+static void
+expectation_create(struct conntrack *ct, ovs_be16 dst_port,
+                   const struct conn *master_conn, bool reply, bool src_ip_wc,
+                   bool skip_nat)
 {
     struct ct_addr src_addr;
     struct ct_addr dst_addr;
     struct ct_addr alg_nat_repl_addr;
+    struct alg_exp_node *alg_exp_node = xzalloc(sizeof *alg_exp_node);
 
-    switch (mode) {
-    case CT_FTP_MODE_ACTIVE:
-    case CT_TFTP_MODE:
-        src_addr = master_conn->rev_key.src.addr;
-        dst_addr = master_conn->rev_key.dst.addr;
-        alg_nat_repl_addr = master_conn->key.src.addr;
-        break;
-    case CT_FTP_MODE_PASSIVE:
+    if (reply) {
         src_addr = master_conn->key.src.addr;
         dst_addr = master_conn->key.dst.addr;
-        alg_nat_repl_addr = master_conn->rev_key.dst.addr;
-        break;
-    default:
-        OVS_NOT_REACHED();
+        if (skip_nat) {
+            alg_nat_repl_addr = dst_addr;
+        } else {
+            alg_nat_repl_addr = master_conn->rev_key.dst.addr;
+        }
+        alg_exp_node->nat_rpl_dst = true;
+    } else {
+        src_addr = master_conn->rev_key.src.addr;
+        dst_addr = master_conn->rev_key.dst.addr;
+        if (skip_nat) {
+            alg_nat_repl_addr = src_addr;
+        } else {
+            alg_nat_repl_addr = master_conn->key.src.addr;
+        }
+        alg_exp_node->nat_rpl_dst = false;
+    }
+    if (src_ip_wc) {
+        memset(&src_addr, 0, sizeof src_addr);
     }
 
-    struct alg_exp_node *alg_exp_node =
-        xzalloc(sizeof *alg_exp_node);
     alg_exp_node->key.dl_type = master_conn->key.dl_type;
     alg_exp_node->key.nw_proto = master_conn->key.nw_proto;
     alg_exp_node->key.zone = master_conn->key.zone;
@@ -2544,13 +2746,12 @@ expectation_create(struct conntrack *ct,
     alg_exp_node->master_mark = master_conn->mark;
     alg_exp_node->master_label = master_conn->label;
     alg_exp_node->master_key = master_conn->key;
-    alg_exp_node->passive_mode = mode == CT_FTP_MODE_PASSIVE;
     /* Take the write lock here because it is almost 100%
      * likely that the lookup will fail and
      * expectation_create() will be called below. */
     ct_rwlock_wrlock(&ct->resources_lock);
     struct alg_exp_node *alg_exp = expectation_lookup(
-        &ct->alg_expectations, &alg_exp_node->key, ct->hash_basis);
+        &ct->alg_expectations, &alg_exp_node->key, ct->hash_basis, src_ip_wc);
     if (alg_exp) {
         free(alg_exp_node);
         ct_rwlock_unlock(&ct->resources_lock);
@@ -2558,14 +2759,10 @@ expectation_create(struct conntrack *ct,
     }
 
     alg_exp_node->alg_nat_repl_addr = alg_nat_repl_addr;
-    uint32_t alg_exp_conn_key_hash =
-        conn_key_hash(&alg_exp_node->key,
-                      ct->hash_basis);
-    hmap_insert(&ct->alg_expectations,
-                &alg_exp_node->node,
-                alg_exp_conn_key_hash);
-
-    alg_exp_init_expiration(ct, alg_exp_node, now);
+    hmap_insert(&ct->alg_expectations, &alg_exp_node->node,
+                conn_key_hash(&alg_exp_node->key, ct->hash_basis));
+    expectation_ref_create(&ct->alg_expectation_refs, alg_exp_node,
+                           ct->hash_basis);
     ct_rwlock_unlock(&ct->resources_lock);
 }
 
@@ -2606,7 +2803,6 @@ repl_ftp_v4_addr(struct dp_packet *pkt, ovs_be32 v4_addr_rep,
 
     size_t remain_size = tcp_payload_length(pkt) -
                              addr_offset_from_ftp_data_start;
-
     int overall_delta = 0;
     char *byte_str = ftp_data_start + addr_offset_from_ftp_data_start;
 
@@ -2675,9 +2871,9 @@ static enum ftp_ctl_pkt
 detect_ftp_ctl_type(const struct conn_lookup_ctx *ctx,
                     struct dp_packet *pkt)
 {
-
     char ftp_msg[LARGEST_FTP_MSG_OF_INTEREST + 1] = {0};
     get_ftp_ctl_msg(pkt, ftp_msg);
+
     if (ctx->key.dl_type == htons(ETH_TYPE_IPV6)) {
         if (strncasecmp(ftp_msg, FTP_EPRT_CMD, strlen(FTP_EPRT_CMD)) &&
             !strcasestr(ftp_msg, FTP_EPSV_REPLY)) {
@@ -2698,7 +2894,7 @@ static enum ftp_ctl_pkt
 process_ftp_ctl_v4(struct conntrack *ct,
                    struct dp_packet *pkt,
                    const struct conn *conn_for_expectation,
-                   long long now, ovs_be32 *v4_addr_rep,
+                   ovs_be32 *v4_addr_rep,
                    char **ftp_data_v4_start,
                    size_t *addr_offset_from_ftp_data_start)
 {
@@ -2708,9 +2904,9 @@ process_ftp_ctl_v4(struct conntrack *ct,
     *ftp_data_v4_start = tcp_hdr + tcp_hdr_len;
     char ftp_msg[LARGEST_FTP_MSG_OF_INTEREST + 1] = {0};
     get_ftp_ctl_msg(pkt, ftp_msg);
-
     char *ftp = ftp_msg;
     enum ct_alg_mode mode;
+
     if (!strncasecmp(ftp, FTP_PORT_CMD, strlen(FTP_PORT_CMD))) {
         ftp = ftp_msg + strlen(FTP_PORT_CMD);
         mode = CT_FTP_MODE_ACTIVE;
@@ -2733,8 +2929,8 @@ process_ftp_ctl_v4(struct conntrack *ct,
 
     char *ip_addr_start = ftp;
     *addr_offset_from_ftp_data_start = ip_addr_start - ftp_msg;
-    uint8_t comma_count = 0;
 
+    uint8_t comma_count = 0;
     while (comma_count < 4 && *ftp) {
         if (*ftp == ',') {
             comma_count++;
@@ -2798,6 +2994,7 @@ process_ftp_ctl_v4(struct conntrack *ct,
     if (65535 - port_hs < port_lo_hs) {
         return CT_FTP_CTL_INVALID;
     }
+
     port_hs |= port_lo_hs;
     ovs_be16 port = htons(port_hs);
     ovs_be32 conn_ipv4_addr;
@@ -2824,7 +3021,8 @@ process_ftp_ctl_v4(struct conntrack *ct,
         return CT_FTP_CTL_INVALID;
     }
 
-    expectation_create(ct, port, now, mode, conn_for_expectation);
+    expectation_create(ct, port, conn_for_expectation,
+                       !!(pkt->md.ct_state & CS_REPLY_DIR), false, false);
     return CT_FTP_CTL_INTEREST;
 }
 
@@ -2841,7 +3039,6 @@ static enum ftp_ctl_pkt
 process_ftp_ctl_v6(struct conntrack *ct,
                    struct dp_packet *pkt,
                    const struct conn *conn_for_expectation,
-                   long long now,
                    struct ct_addr *v6_addr_rep,
                    char **ftp_data_start,
                    size_t *addr_offset_from_ftp_data_start,
@@ -2851,12 +3048,11 @@ process_ftp_ctl_v6(struct conntrack *ct,
     size_t tcp_hdr_len = TCP_OFFSET(th->tcp_ctl) * 4;
     char *tcp_hdr = (char *) th;
     char ftp_msg[LARGEST_FTP_MSG_OF_INTEREST + 1] = {0};
-
     get_ftp_ctl_msg(pkt, ftp_msg);
     *ftp_data_start = tcp_hdr + tcp_hdr_len;
-
     char *ftp = ftp_msg;
     struct in6_addr ip6_addr;
+
     if (!strncasecmp(ftp, FTP_EPRT_CMD, strlen(FTP_EPRT_CMD))) {
         ftp = ftp_msg + strlen(FTP_EPRT_CMD);
         ftp = skip_non_digits(ftp);
@@ -2866,8 +3062,8 @@ process_ftp_ctl_v6(struct conntrack *ct,
         /* Jump over delimiter. */
         ftp += 2;
 
-        char *ip_addr_start = ftp;
         memset(&ip6_addr, 0, sizeof ip6_addr);
+        char *ip_addr_start = ftp;
         *addr_offset_from_ftp_data_start = ip_addr_start - ftp_msg;
         ftp = skip_ipv6_digits(ftp);
         *ftp = 0;
@@ -2897,6 +3093,7 @@ process_ftp_ctl_v6(struct conntrack *ct,
     if (!ftp) {
         return CT_FTP_CTL_INVALID;
     }
+
     int value;
     if (!str_to_int(save_ftp, 10, &value)) {
         return CT_FTP_CTL_INVALID;
@@ -2927,7 +3124,8 @@ process_ftp_ctl_v6(struct conntrack *ct,
         OVS_NOT_REACHED();
     }
 
-    expectation_create(ct, port, now, *mode, conn_for_expectation);
+    expectation_create(ct, port, conn_for_expectation,
+                       !!(pkt->md.ct_state & CS_REPLY_DIR), false, false);
     return CT_FTP_CTL_INTEREST;
 }
 
@@ -2954,11 +3152,9 @@ repl_ftp_v6_addr(struct dp_packet *pkt, struct ct_addr v6_addr_rep,
         return 0;
     }
 
-    const char *rc;
     char v6_addr_str[IPV6_SCAN_LEN] = {0};
-    rc = inet_ntop(AF_INET6, &v6_addr_rep.ipv6_aligned, v6_addr_str,
-              IPV6_SCAN_LEN - 1);
-    ovs_assert(rc != NULL);
+    ovs_assert(inet_ntop(AF_INET6, &v6_addr_rep.ipv6_aligned, v6_addr_str,
+                         IPV6_SCAN_LEN - 1));
 
     size_t replace_addr_size = strlen(v6_addr_str);
 
@@ -3000,18 +3196,19 @@ handle_ftp_ctl(struct conntrack *ct, const struct conn_lookup_ctx *ctx,
 
     struct ovs_16aligned_ip6_hdr *nh6 = dp_packet_l3(pkt);
     int64_t seq_skew = 0;
+
     if (ftp_ctl == CT_FTP_CTL_OTHER) {
         seq_skew = conn_for_expectation->seq_skew;
     } else if (ftp_ctl == CT_FTP_CTL_INTEREST) {
         enum ftp_ctl_pkt rc;
         if (ctx->key.dl_type == htons(ETH_TYPE_IPV6)) {
             rc = process_ftp_ctl_v6(ct, pkt, conn_for_expectation,
-                                    now, &v6_addr_rep, &ftp_data_start,
+                                    &v6_addr_rep, &ftp_data_start,
                                     &addr_offset_from_ftp_data_start,
                                     &addr_size, &mode);
         } else {
             rc = process_ftp_ctl_v4(ct, pkt, conn_for_expectation,
-                                    now, &v4_addr_rep, &ftp_data_start,
+                                    &v4_addr_rep, &ftp_data_start,
                                     &addr_offset_from_ftp_data_start);
         }
         if (rc == CT_FTP_CTL_INVALID) {
@@ -3021,6 +3218,7 @@ handle_ftp_ctl(struct conntrack *ct, const struct conn_lookup_ctx *ctx,
             return;
         } else if (rc == CT_FTP_CTL_INTEREST) {
             uint16_t ip_len;
+
             if (ctx->key.dl_type == htons(ETH_TYPE_IPV6)) {
                 seq_skew = repl_ftp_v6_addr(pkt, v6_addr_rep, ftp_data_start,
                                             addr_offset_from_ftp_data_start,
@@ -3053,6 +3251,7 @@ handle_ftp_ctl(struct conntrack *ct, const struct conn_lookup_ctx *ctx,
     }
 
     struct tcp_header *th = dp_packet_l4(pkt);
+
     if (do_seq_skew_adj && seq_skew != 0) {
         if (ctx->reply != conn_for_expectation->seq_skew_dir) {
 
@@ -3083,8 +3282,6 @@ handle_ftp_ctl(struct conntrack *ct, const struct conn_lookup_ctx *ctx,
         }
     }
 
-    const char *tail = dp_packet_tail(pkt);
-    uint8_t pad = dp_packet_l2_pad_size(pkt);
     th->tcp_csum = 0;
     uint32_t tcp_csum;
     if (ctx->key.dl_type == htons(ETH_TYPE_IPV6)) {
@@ -3092,6 +3289,8 @@ handle_ftp_ctl(struct conntrack *ct, const struct conn_lookup_ctx *ctx,
     } else {
         tcp_csum = packet_csum_pseudoheader(l3_hdr);
     }
+    const char *tail = dp_packet_tail(pkt);
+    uint8_t pad = dp_packet_l2_pad_size(pkt);
     th->tcp_csum = csum_finish(
         csum_continue(tcp_csum, th, tail - (char *) th - pad));
     return;
@@ -3099,10 +3298,14 @@ handle_ftp_ctl(struct conntrack *ct, const struct conn_lookup_ctx *ctx,
 
 static void
 handle_tftp_ctl(struct conntrack *ct,
+                const struct conn_lookup_ctx *ctx OVS_UNUSED,
+                struct dp_packet *pkt,
                 const struct conn *conn_for_expectation,
-                long long now)
+                long long now OVS_UNUSED,
+                enum ftp_ctl_pkt ftp_ctl OVS_UNUSED, bool nat OVS_UNUSED)
 {
-    expectation_create(ct, conn_for_expectation->key.src.port, now,
-                       CT_TFTP_MODE, conn_for_expectation);
+    expectation_create(ct, conn_for_expectation->key.src.port,
+                       conn_for_expectation,
+                       !!(pkt->md.ct_state & CS_REPLY_DIR), false, false);
     return;
 }

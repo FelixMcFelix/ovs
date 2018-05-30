@@ -446,42 +446,45 @@ sflow_choose_agent_address(const char *agent_device,
                            const char *control_ip,
                            SFLAddress *agent_addr)
 {
-    const char *target;
-    struct in_addr in4;
-
-    memset(agent_addr, 0, sizeof *agent_addr);
-    agent_addr->type = SFLADDRESSTYPE_IP_V4;
+    struct in6_addr ip;
 
     if (agent_device) {
-        if (!netdev_get_in4_by_name(agent_device, &in4)) {
+        /* If 'agent_device' is the name of a network device, use its IP
+         * address. */
+        if (!netdev_get_ip_by_name(agent_device, &ip)) {
+            goto success;
+        }
+
+        /* If 'agent_device' is itself an IP address, use it. */
+        struct sockaddr_storage ss;
+        if (inet_parse_address(agent_device, &ss)) {
+            ip = ss_get_address(&ss);
             goto success;
         }
     }
 
+    /* Otherwise, use an appropriate local IP address for one of the
+     * collectors' remote IP addresses. */
+    const char *target;
     SSET_FOR_EACH (target, targets) {
-        union {
-            struct sockaddr_storage ss;
-            struct sockaddr_in sin;
-        } sa;
-        char name[IFNAMSIZ];
-
-        if (inet_parse_active(target, SFL_DEFAULT_COLLECTOR_PORT, &sa.ss)
-            && sa.ss.ss_family == AF_INET) {
-            struct in6_addr addr6, src, gw;
-
-            in6_addr_set_mapped_ipv4(&addr6, sa.sin.sin_addr.s_addr);
+        struct sockaddr_storage ss;
+        if (inet_parse_active(target, SFL_DEFAULT_COLLECTOR_PORT, &ss)) {
             /* sFlow only supports target in default routing table with
              * packet mark zero.
              */
-            if (ovs_router_lookup(0, &addr6, name, &src, &gw)) {
+            ip = ss_get_address(&ss);
 
-                in4.s_addr = in6_addr_get_mapped_ipv4(&src);
+            struct in6_addr gw, src = in6addr_any;
+            char name[IFNAMSIZ];
+            if (ovs_router_lookup(0, &ip, name, &src, &gw)) {
                 goto success;
             }
         }
     }
 
-    if (control_ip && !lookup_ip(control_ip, &in4)) {
+    struct sockaddr_storage ss;
+    if (control_ip && inet_parse_address(control_ip, &ss)) {
+        ip = ss_get_address(&ss);
         goto success;
     }
 
@@ -489,7 +492,16 @@ sflow_choose_agent_address(const char *agent_device,
     return false;
 
 success:
-    agent_addr->address.ip_v4.addr = (OVS_FORCE uint32_t) in4.s_addr;
+    memset(agent_addr, 0, sizeof *agent_addr);
+    if (IN6_IS_ADDR_V4MAPPED(&ip)) {
+        agent_addr->type = SFLADDRESSTYPE_IP_V4;
+        agent_addr->address.ip_v4.addr
+            = (OVS_FORCE uint32_t) in6_addr_get_mapped_ipv4(&ip);
+    } else {
+        agent_addr->type = SFLADDRESSTYPE_IP_V6;
+        memcpy(agent_addr->address.ip_v6.addr, ip.s6_addr,
+               sizeof agent_addr->address.ip_v6.addr);
+    }
     return true;
 }
 
@@ -961,7 +973,7 @@ sflow_read_set_action(const struct nlattr *attr,
         } else {
             dpif_sflow_read_actions(NULL,
                                     nl_attr_get(attr), nl_attr_get_size(attr),
-                                    sflow_actions);
+                                    sflow_actions, true);
         }
         break;
     case OVS_KEY_ATTR_PRIORITY:
@@ -1088,8 +1100,9 @@ dpif_sflow_capture_input_mpls(const struct flow *flow,
 
 void
 dpif_sflow_read_actions(const struct flow *flow,
-			const struct nlattr *actions, size_t actions_len,
-			struct dpif_sflow_actions *sflow_actions)
+                        const struct nlattr *actions, size_t actions_len,
+                        struct dpif_sflow_actions *sflow_actions,
+                        bool capture_mpls)
 {
     const struct nlattr *a;
     unsigned int left;
@@ -1099,7 +1112,7 @@ dpif_sflow_read_actions(const struct flow *flow,
 	return;
     }
 
-    if (flow != NULL) {
+    if (flow != NULL && capture_mpls == true) {
 	/* Make sure the MPLS output stack
 	 * is seeded with the input stack.
 	 */
@@ -1160,6 +1173,7 @@ dpif_sflow_read_actions(const struct flow *flow,
 	case OVS_ACTION_ATTR_RECIRC:
 	case OVS_ACTION_ATTR_HASH:
         case OVS_ACTION_ATTR_CT:
+    case OVS_ACTION_ATTR_CT_CLEAR:
         case OVS_ACTION_ATTR_METER:
 	    break;
 
@@ -1197,10 +1211,15 @@ dpif_sflow_read_actions(const struct flow *flow,
 	     * structure to report this.
 	     */
 	    break;
+    case OVS_ACTION_ATTR_CLONE:
+        if (flow != NULL) {
+            dpif_sflow_read_actions(flow, nl_attr_get(a), nl_attr_get_size(a),
+                                    sflow_actions, false);
+        }
+        break;
 	case OVS_ACTION_ATTR_SAMPLE:
-	case OVS_ACTION_ATTR_CLONE:
-        case OVS_ACTION_ATTR_ENCAP_NSH:
-        case OVS_ACTION_ATTR_DECAP_NSH:
+        case OVS_ACTION_ATTR_PUSH_NSH:
+        case OVS_ACTION_ATTR_POP_NSH:
 	case OVS_ACTION_ATTR_UNSPEC:
     case OVS_ACTION_ATTR_PROBDROP:
 	case __OVS_ACTION_ATTR_MAX:
@@ -1234,7 +1253,7 @@ dpif_sflow_encode_mpls_stack(SFLLabelStack *stack,
  * See http://sflow.org/sflow_version_5.txt "Input/Output port information"
  */
 static uint32_t
-dpif_sflow_cookie_num_outputs(const union user_action_cookie *cookie)
+dpif_sflow_cookie_num_outputs(const struct user_action_cookie *cookie)
 {
     uint32_t format = cookie->sflow.output & 0xC0000000;
     uint32_t port_n = cookie->sflow.output & 0x3FFFFFFF;
@@ -1249,9 +1268,9 @@ dpif_sflow_cookie_num_outputs(const union user_action_cookie *cookie)
 
 void
 dpif_sflow_received(struct dpif_sflow *ds, const struct dp_packet *packet,
-		    const struct flow *flow, odp_port_t odp_in_port,
-		    const union user_action_cookie *cookie,
-		    const struct dpif_sflow_actions *sflow_actions)
+                    const struct flow *flow, odp_port_t odp_in_port,
+                    const struct user_action_cookie *cookie,
+                    const struct dpif_sflow_actions *sflow_actions)
     OVS_EXCLUDED(mutex)
 {
     SFL_FLOW_SAMPLE_TYPE fs;
@@ -1284,9 +1303,9 @@ dpif_sflow_received(struct dpif_sflow *ds, const struct dp_packet *packet,
         fs.input = SFL_DS_INDEX(in_dsp->dsi);
     }
 
-    /* Make the assumption that the random number generator in the datapath converges
-     * to the configured mean, and just increment the samplePool by the configured
-     * sampling rate every time. */
+    /* Make the assumption that the random number generator in the
+     * datapath converges to the configured mean, and just increment the
+     * samplePool by the configured sampling rate every time. */
     sampler->samplePool += sfl_sampler_get_sFlowFsPacketSamplingRate(sampler);
 
     /* Sampled header. */

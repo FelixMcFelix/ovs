@@ -599,7 +599,7 @@ vlog_set_syslog_target(const char *target)
 {
     int new_fd;
 
-    inet_open_active(SOCK_DGRAM, target, 0, NULL, &new_fd, 0);
+    inet_open_active(SOCK_DGRAM, target, -1, NULL, &new_fd, 0);
 
     ovs_rwlock_wrlock(&pattern_rwlock);
     if (syslog_fd >= 0) {
@@ -836,6 +836,16 @@ vlog_enable_async(void)
     ovs_mutex_unlock(&log_file_mutex);
 }
 
+void
+vlog_disable_async(void)
+{
+    ovs_mutex_lock(&log_file_mutex);
+    log_async = false;
+    async_append_destroy(log_writer);
+    log_writer = NULL;
+    ovs_mutex_unlock(&log_file_mutex);
+}
+
 /* Print the current logging level for each module. */
 char *
 vlog_get_levels(void)
@@ -942,7 +952,7 @@ format_log_message(const struct vlog_module *module, enum vlog_level level,
     for (p = pattern; *p != '\0'; ) {
         const char *subprogram_name;
         enum { LEFT, RIGHT } justify = RIGHT;
-        int pad = '0';
+        int pad = ' ';
         size_t length, field, used;
 
         if (*p != '%') {

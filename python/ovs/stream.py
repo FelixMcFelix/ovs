@@ -383,11 +383,8 @@ class Stream(object):
         elif len(buf) == 0:
             return 0
 
-        # Python 3 has separate types for strings and bytes.  We must have
-        # bytes here.
-        if six.PY3 and not isinstance(buf, bytes):
-            buf = bytes(buf, 'utf-8')
-        elif six.PY2:
+        # We must have bytes for sending.
+        if isinstance(buf, six.text_type):
             buf = buf.encode('utf-8')
 
         if sys.platform == 'win32' and self.socket is None:
@@ -801,10 +798,6 @@ class SSLStream(Stream):
 
     def send(self, buf):
         try:
-            if isinstance(buf, six.text_type):
-                # Convert to byte stream if the buffer is string type/unicode.
-                # pyopenssl version 0.14 expects the buffer to be byte string.
-                buf = buf.encode('utf-8')
             return super(SSLStream, self).send(buf)
         except SSL.WantWriteError:
             return -errno.EAGAIN

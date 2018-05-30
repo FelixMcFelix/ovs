@@ -157,8 +157,7 @@ NDIS_STATUS OvsEncapGeneve(POVS_VPORT_ENTRY vport,
         }
 
         curMdl = NET_BUFFER_CURRENT_MDL(curNb);
-        bufferStart = (PUINT8)MmGetSystemAddressForMdlSafe(curMdl,
-                                                           LowPagePriority);
+        bufferStart = (PUINT8)OvsGetMdlWithLowPriority(curMdl);
         if (!bufferStart) {
             status = NDIS_STATUS_RESOURCES;
             goto ret_error;
@@ -262,10 +261,16 @@ NDIS_STATUS OvsDecapGeneve(POVS_SWITCH_CONTEXT switchContext,
     PUINT8 bufferStart;
     PVOID optStart;
     NDIS_STATUS status;
+    OVS_PACKET_HDR_INFO layers = { 0 };
+
+    status = OvsExtractLayers(curNbl, &layers);
+    if (status != NDIS_STATUS_SUCCESS) {
+        return status;
+    }
 
     /* Check the length of the UDP payload */
     curNb = NET_BUFFER_LIST_FIRST_NB(curNbl);
-    tunnelSize = OvsGetGeneveTunHdrMinSize();
+    tunnelSize = OvsGetGeneveTunHdrSizeFromLayers(&layers);
     packetLength = NET_BUFFER_DATA_LENGTH(curNb);
     if (packetLength <= tunnelSize) {
         return NDIS_STATUS_INVALID_LENGTH;
@@ -286,7 +291,7 @@ NDIS_STATUS OvsDecapGeneve(POVS_SWITCH_CONTEXT switchContext,
     curNbl = *newNbl;
     curNb = NET_BUFFER_LIST_FIRST_NB(curNbl);
     curMdl = NET_BUFFER_CURRENT_MDL(curNb);
-    bufferStart = (PUINT8)MmGetSystemAddressForMdlSafe(curMdl, LowPagePriority)
+    bufferStart = (PUINT8)OvsGetMdlWithLowPriority(curMdl)
                   + NET_BUFFER_CURRENT_MDL_OFFSET(curNb);
     if (!bufferStart) {
         status = NDIS_STATUS_RESOURCES;
@@ -295,13 +300,13 @@ NDIS_STATUS OvsDecapGeneve(POVS_SWITCH_CONTEXT switchContext,
 
     ethHdr = (EthHdr *)bufferStart;
     /* XXX: Handle IP options. */
-    ipHdr = (IPHdr *)((PCHAR)ethHdr + sizeof *ethHdr);
+    ipHdr = (IPHdr *)(bufferStart + layers.l3Offset);
     tunKey->src = ipHdr->saddr;
     tunKey->dst = ipHdr->daddr;
     tunKey->tos = ipHdr->tos;
     tunKey->ttl = ipHdr->ttl;
     tunKey->pad = 0;
-    udpHdr = (UDPHdr *)((PCHAR)ipHdr + sizeof *ipHdr);
+    udpHdr = (UDPHdr *)(bufferStart + layers.l4Offset);
 
     /* Validate if NIC has indicated checksum failure. */
     status = OvsValidateUDPChecksum(curNbl, udpHdr->check == 0);
@@ -312,7 +317,7 @@ NDIS_STATUS OvsDecapGeneve(POVS_SWITCH_CONTEXT switchContext,
     /* Calculate and verify UDP checksum if NIC didn't do it. */
     if (udpHdr->check != 0) {
         status = OvsCalculateUDPChecksum(curNbl, curNb, ipHdr, udpHdr,
-                                         packetLength);
+                                         packetLength, &layers);
         tunKey->flags |= OVS_TNL_F_CSUM;
         if (status != NDIS_STATUS_SUCCESS) {
             goto dropNbl;

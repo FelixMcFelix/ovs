@@ -19,6 +19,7 @@
 
 #include <errno.h>
 #include <inttypes.h>
+#include <sys/types.h>
 #include <netinet/in.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,7 +29,6 @@
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <sys/ioctl.h>
-#include <sys/types.h>
 #endif
 
 #include "cmap.h"
@@ -45,10 +45,12 @@
 #include "odp-netlink.h"
 #include "openflow/openflow.h"
 #include "packets.h"
+#include "openvswitch/ofp-print.h"
 #include "openvswitch/poll-loop.h"
 #include "seq.h"
 #include "openvswitch/shash.h"
 #include "smap.h"
+#include "socket-util.h"
 #include "sset.h"
 #include "svec.h"
 #include "openvswitch/vlog.h"
@@ -694,11 +696,12 @@ netdev_rxq_close(struct netdev_rxq *rx)
  * Returns EAGAIN immediately if no packet is ready to be received or another
  * positive errno value if an error was encountered. */
 int
-netdev_rxq_recv(struct netdev_rxq *rx, struct dp_packet_batch *batch)
+netdev_rxq_recv(struct netdev_rxq *rx, struct dp_packet_batch *batch,
+                int *qfill)
 {
     int retval;
 
-    retval = rx->netdev->netdev_class->rxq_recv(rx, batch);
+    retval = rx->netdev->netdev_class->rxq_recv(rx, batch, qfill);
     if (!retval) {
         COVERAGE_INC(netdev_received);
     } else {
@@ -771,9 +774,8 @@ netdev_get_pt_mode(const struct netdev *netdev)
  * If the function returns a non-zero value, some of the packets might have
  * been sent anyway.
  *
- * If 'may_steal' is false, the caller retains ownership of all the packets.
- * If 'may_steal' is true, the caller transfers ownership of all the packets
- * to the network device, regardless of success.
+ * The caller transfers ownership of all the packets to the network device,
+ * regardless of success.
  *
  * If 'concurrent_txq' is true, the caller may perform concurrent calls
  * to netdev_send() with the same 'qid'. The netdev provider is responsible
@@ -787,15 +789,12 @@ netdev_get_pt_mode(const struct netdev *netdev)
  * queues. */
 int
 netdev_send(struct netdev *netdev, int qid, struct dp_packet_batch *batch,
-            bool may_steal, bool concurrent_txq)
+            bool concurrent_txq)
 {
-    int error = netdev->netdev_class->send(netdev, qid, batch, may_steal,
+    int error = netdev->netdev_class->send(netdev, qid, batch,
                                            concurrent_txq);
     if (!error) {
         COVERAGE_INC(netdev_sent);
-        if (!may_steal) {
-            dp_packet_batch_reset_cutlen(batch);
-        }
     }
     return error;
 }
@@ -858,8 +857,8 @@ netdev_push_header(const struct netdev *netdev,
                    const struct ovs_action_push_tnl *data)
 {
     struct dp_packet *packet;
-    DP_PACKET_BATCH_FOR_EACH (packet, batch) {
-        netdev->netdev_class->push_header(packet, data);
+    DP_PACKET_BATCH_FOR_EACH (i, packet, batch) {
+        netdev->netdev_class->push_header(netdev, packet, data);
         pkt_metadata_init(&packet->md, data->out_port);
     }
 
@@ -897,7 +896,13 @@ netdev_set_etheraddr(struct netdev *netdev, const struct eth_addr mac)
 int
 netdev_get_etheraddr(const struct netdev *netdev, struct eth_addr *mac)
 {
-    return netdev->netdev_class->get_etheraddr(netdev, mac);
+    int error;
+
+    error = netdev->netdev_class->get_etheraddr(netdev, mac);
+    if (error) {
+        memset(mac, 0, sizeof *mac);
+    }
+    return error;
 }
 
 /* Returns the name of the network device that 'netdev' represents,
@@ -947,7 +952,7 @@ netdev_set_mtu(struct netdev *netdev, int mtu)
 
     error = class->set_mtu ? class->set_mtu(netdev, mtu) : EOPNOTSUPP;
     if (error && error != EOPNOTSUPP) {
-        VLOG_DBG_RL(&rl, "failed to set MTU for network device %s: %s",
+        VLOG_WARN_RL(&rl, "failed to set MTU for network device %s: %s",
                      netdev_get_name(netdev), ovs_strerror(error));
     }
 
@@ -1093,6 +1098,40 @@ netdev_set_advertisements(struct netdev *netdev,
             : EOPNOTSUPP);
 }
 
+static const char *
+netdev_feature_to_name(uint32_t bit)
+{
+    enum netdev_features f = bit;
+
+    switch (f) {
+    case NETDEV_F_10MB_HD:    return "10MB-HD";
+    case NETDEV_F_10MB_FD:    return "10MB-FD";
+    case NETDEV_F_100MB_HD:   return "100MB-HD";
+    case NETDEV_F_100MB_FD:   return "100MB-FD";
+    case NETDEV_F_1GB_HD:     return "1GB-HD";
+    case NETDEV_F_1GB_FD:     return "1GB-FD";
+    case NETDEV_F_10GB_FD:    return "10GB-FD";
+    case NETDEV_F_40GB_FD:    return "40GB-FD";
+    case NETDEV_F_100GB_FD:   return "100GB-FD";
+    case NETDEV_F_1TB_FD:     return "1TB-FD";
+    case NETDEV_F_OTHER:      return "OTHER";
+    case NETDEV_F_COPPER:     return "COPPER";
+    case NETDEV_F_FIBER:      return "FIBER";
+    case NETDEV_F_AUTONEG:    return "AUTO_NEG";
+    case NETDEV_F_PAUSE:      return "AUTO_PAUSE";
+    case NETDEV_F_PAUSE_ASYM: return "AUTO_PAUSE_ASYM";
+    }
+
+    return NULL;
+}
+
+void
+netdev_features_format(struct ds *s, enum netdev_features features)
+{
+    ofp_print_bit_names(s, features, netdev_feature_to_name, ' ');
+    ds_put_char(s, '\n');
+}
+
 /* Assigns 'addr' as 'netdev''s IPv4 address and 'mask' as its netmask.  If
  * 'addr' is INADDR_ANY, 'netdev''s IPv4 address is cleared.  Returns a
  * positive errno value. */
@@ -1104,39 +1143,74 @@ netdev_set_in4(struct netdev *netdev, struct in_addr addr, struct in_addr mask)
             : EOPNOTSUPP);
 }
 
-/* Obtains ad IPv4 address from device name and save the address in
- * in4.  Returns 0 if successful, otherwise a positive errno value.
- */
+static int
+netdev_get_addresses_by_name(const char *device_name,
+                             struct in6_addr **addrsp, int *n_addrsp)
+{
+    struct netdev *netdev;
+    int error = netdev_open(device_name, NULL, &netdev);
+    if (error) {
+        *addrsp = NULL;
+        *n_addrsp = 0;
+        return error;
+    }
+
+    struct in6_addr *masks;
+    error = netdev_get_addr_list(netdev, addrsp, &masks, n_addrsp);
+    netdev_close(netdev);
+    free(masks);
+    return error;
+}
+
+/* Obtains an IPv4 address from 'device_name' and save the address in '*in4'.
+ * Returns 0 if successful, otherwise a positive errno value. */
 int
 netdev_get_in4_by_name(const char *device_name, struct in_addr *in4)
 {
-    struct in6_addr *mask, *addr6;
-    int err, n_in6, i;
-    struct netdev *dev;
+    struct in6_addr *addrs;
+    int n;
+    int error = netdev_get_addresses_by_name(device_name, &addrs, &n);
 
-    err = netdev_open(device_name, NULL, &dev);
-    if (err) {
-        return err;
-    }
-
-    err = netdev_get_addr_list(dev, &addr6, &mask, &n_in6);
-    if (err) {
-        goto out;
-    }
-
-    for (i = 0; i < n_in6; i++) {
-        if (IN6_IS_ADDR_V4MAPPED(&addr6[i])) {
-            in4->s_addr = in6_addr_get_mapped_ipv4(&addr6[i]);
-            goto out;
+    in4->s_addr = 0;
+    if (!error) {
+        error = ENOENT;
+        for (int i = 0; i < n; i++) {
+            if (IN6_IS_ADDR_V4MAPPED(&addrs[i])) {
+                in4->s_addr = in6_addr_get_mapped_ipv4(&addrs[i]);
+                error = 0;
+                break;
+            }
         }
     }
-    err = -ENOENT;
-out:
-    free(addr6);
-    free(mask);
-    netdev_close(dev);
-    return err;
+    free(addrs);
 
+    return error;
+}
+
+/* Obtains an IPv4 or IPv6 address from 'device_name' and save the address in
+ * '*in6', representing IPv4 addresses as v6-mapped.  Returns 0 if successful,
+ * otherwise a positive errno value. */
+int
+netdev_get_ip_by_name(const char *device_name, struct in6_addr *in6)
+{
+    struct in6_addr *addrs;
+    int n;
+    int error = netdev_get_addresses_by_name(device_name, &addrs, &n);
+
+    *in6 = in6addr_any;
+    if (!error) {
+        error = ENOENT;
+        for (int i = 0; i < n; i++) {
+            if (!in6_is_lla(&addrs[i])) {
+                *in6 = addrs[i];
+                error = 0;
+                break;
+            }
+        }
+    }
+    free(addrs);
+
+    return error;
 }
 
 /* Adds 'router' as a default IP gateway for the TCP/IP stack that corresponds
@@ -1418,6 +1492,21 @@ netdev_get_stats(const struct netdev *netdev, struct netdev_stats *stats)
     }
     return error;
 }
+
+/* Retrieves current device custom stats for 'netdev'. */
+int
+netdev_get_custom_stats(const struct netdev *netdev,
+                        struct netdev_custom_stats *custom_stats)
+{
+    int error;
+    memset(custom_stats, 0, sizeof *custom_stats);
+    error = (netdev->netdev_class->get_custom_stats
+             ? netdev->netdev_class->get_custom_stats(netdev, custom_stats)
+             : EOPNOTSUPP);
+
+    return error;
+}
+
 
 /* Attempts to set input rate limiting (policing) policy, such that up to
  * 'kbits_rate' kbps of traffic is accepted, with a maximum accumulative burst
@@ -1982,29 +2071,13 @@ netdev_get_addrs(const char dev[], struct in6_addr **paddr,
     addr_array = xzalloc(sizeof *addr_array * cnt);
     mask_array = xzalloc(sizeof *mask_array * cnt);
     for (ifa = if_addr_list; ifa; ifa = ifa->ifa_next) {
-        int family;
-
-        if (!ifa->ifa_name || !ifa->ifa_addr || !ifa->ifa_netmask
-            || strncmp(ifa->ifa_name, dev, IFNAMSIZ)) {
-            continue;
-        }
-
-        family = ifa->ifa_addr->sa_family;
-        if (family == AF_INET) {
-            const struct sockaddr_in *sin;
-
-            sin = ALIGNED_CAST(const struct sockaddr_in *, ifa->ifa_addr);
-            in6_addr_set_mapped_ipv4(&addr_array[i], sin->sin_addr.s_addr);
-            sin = ALIGNED_CAST(const struct sockaddr_in *, ifa->ifa_netmask);
-            in6_addr_set_mapped_ipv4(&mask_array[i], sin->sin_addr.s_addr);
-            i++;
-        } else if (family == AF_INET6) {
-            const struct sockaddr_in6 *sin6;
-
-            sin6 = ALIGNED_CAST(const struct sockaddr_in6 *, ifa->ifa_addr);
-            memcpy(&addr_array[i], &sin6->sin6_addr, sizeof *addr_array);
-            sin6 = ALIGNED_CAST(const struct sockaddr_in6 *, ifa->ifa_netmask);
-            memcpy(&mask_array[i], &sin6->sin6_addr, sizeof *mask_array);
+        if (ifa->ifa_name
+            && ifa->ifa_addr
+            && ifa->ifa_netmask
+            && !strncmp(ifa->ifa_name, dev, IFNAMSIZ)
+            && sa_is_ip(ifa->ifa_addr)) {
+            addr_array[i] = sa_get_address(ifa->ifa_addr);
+            mask_array[i] = sa_get_address(ifa->ifa_netmask);
             i++;
         }
     }
@@ -2372,6 +2445,18 @@ netdev_ports_flow_get(const struct dpif_class *dpif_class, struct match *match,
     }
     ovs_mutex_unlock(&netdev_hmap_mutex);
     return ENOENT;
+}
+
+void
+netdev_free_custom_stats_counters(struct netdev_custom_stats *custom_stats)
+{
+    if (custom_stats) {
+        if (custom_stats->counters) {
+            free(custom_stats->counters);
+            custom_stats->counters = NULL;
+            custom_stats->size = 0;
+        }
+    }
 }
 
 #ifdef __linux__

@@ -22,8 +22,8 @@
 #include "openflow/openflow.h"
 #include "openflow/nicira-ext.h"
 #include "openvswitch/meta-flow.h"
-#include "openvswitch/ofp-util.h"
 #include "openvswitch/ofp-errors.h"
+#include "openvswitch/ofp-protocol.h"
 #include "openvswitch/types.h"
 #include "openvswitch/ofp-ed-props.h"
 
@@ -93,6 +93,7 @@ struct vl_mff_map;
     OFPACT(DEC_MPLS_TTL,    ofpact_null,        ofpact, "dec_mpls_ttl") \
     OFPACT(PUSH_MPLS,       ofpact_push_mpls,   ofpact, "push_mpls")    \
     OFPACT(POP_MPLS,        ofpact_pop_mpls,    ofpact, "pop_mpls")     \
+    OFPACT(DEC_NSH_TTL,     ofpact_null,        ofpact, "dec_nsh_ttl")  \
                                                                         \
     /* Generic encap & decap */                                         \
     OFPACT(ENCAP,           ofpact_encap,       props, "encap")         \
@@ -128,6 +129,7 @@ struct vl_mff_map;
      * These are intentionally undocumented, subject to change, and     \
      * only accepted if ovs-vswitchd is started with --enable-dummy. */ \
     OFPACT(DEBUG_RECIRC, ofpact_null,           ofpact, "debug_recirc") \
+    OFPACT(DEBUG_SLOW,   ofpact_null,           ofpact, "debug_slow")   \
                                                                         \
     /* Instructions. */                                                 \
     OFPACT(METER,           ofpact_meter,       ofpact, "meter")        \
@@ -474,7 +476,7 @@ struct ofpact_reg_move {
     struct mf_subfield dst;
 };
 
-/* OFPACT_STACK_PUSH.
+/* OFPACT_STACK_PUSH, OFPACT_STACK_POP.
  *
  * Used for NXAST_STACK_PUSH and NXAST_STACK_POP. */
 struct ofpact_stack {
@@ -1071,18 +1073,34 @@ bool ofpacts_equal_stringwise(const struct ofpact a[], size_t a_len,
 const struct mf_field *ofpact_get_mf_dst(const struct ofpact *ofpact);
 uint32_t ofpacts_get_meter(const struct ofpact[], size_t ofpacts_len);
 
-/* Formatting and parsing ofpacts. */
+/* Formatting ofpacts. */
+struct ofpact_format_params {
+    /* Input. */
+    const struct ofputil_port_map *port_map;
+    const struct ofputil_table_map *table_map;
+
+    /* Output. */
+    struct ds *s;
+};
 void ofpacts_format(const struct ofpact[], size_t ofpacts_len,
-                    const struct ofputil_port_map *, struct ds *);
-char *ofpacts_parse_actions(const char *, const struct ofputil_port_map *,
-                            struct ofpbuf *ofpacts,
-                            enum ofputil_protocol *usable_protocols)
-    OVS_WARN_UNUSED_RESULT;
-char *ofpacts_parse_instructions(const char *, const struct ofputil_port_map *,
-                                 struct ofpbuf *ofpacts,
-                                 enum ofputil_protocol *usable_protocols)
-    OVS_WARN_UNUSED_RESULT;
+                    const struct ofpact_format_params *);
 const char *ofpact_name(enum ofpact_type);
+
+/* Parsing ofpacts. */
+struct ofpact_parse_params {
+    /* Input. */
+    const struct ofputil_port_map *port_map;
+    const struct ofputil_table_map *table_map;
+
+    /* Output. */
+    struct ofpbuf *ofpacts;
+    enum ofputil_protocol *usable_protocols;
+};
+char *ofpacts_parse_actions(const char *, const struct ofpact_parse_params *)
+    OVS_WARN_UNUSED_RESULT;
+char *ofpacts_parse_instructions(const char *,
+                                 const struct ofpact_parse_params *)
+    OVS_WARN_UNUSED_RESULT;
 
 /* Internal use by the helpers below. */
 void ofpact_init(struct ofpact *, enum ofpact_type, size_t len);

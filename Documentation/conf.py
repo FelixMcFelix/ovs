@@ -32,7 +32,7 @@ needs_sphinx = '1.1'
 # Add any Sphinx extension module names here, as strings. They can be
 # extensions coming with Sphinx (named 'sphinx.ext.*') or your custom
 # ones.
-extensions = []
+extensions = ['sphinx.ext.todo']
 
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ['_templates']
@@ -114,10 +114,18 @@ html_static_path = ['_static']
 # One entry per manual page. List of tuples
 # (source start file, name, description, authors, manual section).
 _man_pages = [
+    ('ovs-sim.1',
+     u'Open vSwitch simulator environment'),
     ('ovs-test.8',
      u'Check Linux drivers for performance, vlan and L3 tunneling problems'),
     ('ovs-vlan-test.8',
      u'Check Linux drivers for problems with vlan traffic'),
+    ('ovsdb-server.7',
+     u'Open vSwitch Database Server Protocol'),
+    ('ovsdb.5',
+     u'Open vSwitch Database (File Formats)'),
+    ('ovsdb.7',
+     u'Open vSwitch Database (Overview)'),
 ]
 
 # Generate list of (path, name, description, [author, ...], section)

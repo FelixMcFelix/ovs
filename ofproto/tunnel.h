@@ -32,17 +32,19 @@ struct netdev_tnl_build_header_params;
 
 void ofproto_tunnel_init(void);
 bool tnl_port_reconfigure(const struct ofport_dpif *, const struct netdev *,
-                          odp_port_t, bool native_tnl, const char name[]);
+                          odp_port_t new_odp_port, odp_port_t old_odp_port,
+                          bool native_tnl, const char name[]);
 
 int tnl_port_add(const struct ofport_dpif *, const struct netdev *,
-                 odp_port_t odp_port, bool native_tnl, const char name[]);
-void tnl_port_del(const struct ofport_dpif *);
+                 odp_port_t, bool native_tnl, const char name[]);
+void tnl_port_del(const struct ofport_dpif *, odp_port_t);
 
 const struct ofport_dpif *tnl_port_receive(const struct flow *);
 void tnl_wc_init(struct flow *, struct flow_wildcards *);
 bool tnl_process_ecn(struct flow *);
 odp_port_t tnl_port_send(const struct ofport_dpif *, struct flow *,
                          struct flow_wildcards *wc);
+const char *tnl_port_get_type(const struct ofport_dpif *tnl_port);
 
 /* Returns true if 'flow' should be submitted to tnl_port_receive(). */
 static inline bool

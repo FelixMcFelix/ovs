@@ -39,11 +39,11 @@
 #include "timeval.h"
 #include "unixctl.h"
 #include "util.h"
-#include "openvswitch/ofp-parse.h"
+#include "openvswitch/ofp-flow.h"
 #include "openvswitch/vconn.h"
 #include "openvswitch/vlog.h"
 #include "socket-util.h"
-#include "openvswitch/ofp-util.h"
+
 
 VLOG_DEFINE_THIS_MODULE(controller);
 
@@ -335,7 +335,7 @@ parse_options(int argc, char *argv[])
             break;
 
         case OPT_WITH_FLOWS:
-            error = parse_ofp_flow_mod_file(optarg, NULL, OFPFC_ADD,
+            error = parse_ofp_flow_mod_file(optarg, NULL, NULL, OFPFC_ADD,
                                             &default_flows, &n_default_flows,
                                             &usable_protocols);
             if (error) {

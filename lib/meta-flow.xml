@@ -1309,27 +1309,6 @@ tcp,tp_src=0x07c0/0xfff0
     </field>
   </group>
 
-  <group title="Network Service Header">
-    <field id="MFF_NSH_FLAGS"
-        title="flags field (8 bits)"/>
-    <field id="MFF_NSH_MDTYPE"
-        title="mdtype field (8 bits)"/>
-    <field id="MFF_NSH_NP"
-        title="np (next protocol) field (8 bits)"/>
-    <field id="MFF_NSH_SPI"
-        title="spi (service path identifier) field (24 bits)"/>
-    <field id="MFF_NSH_SI"
-        title="si (service index) field (8 bits)"/>
-    <field id="MFF_NSH_C1"
-        title="c1 (Network Platform Context) field (32 bits)"/>
-    <field id="MFF_NSH_C2"
-        title="c2 (Network Shared Context) field (32 bits)"/>
-    <field id="MFF_NSH_C3"
-        title="c3 (Service Platform Context) field (32 bits)"/>
-    <field id="MFF_NSH_C4"
-        title="c4 (Service Shared Context) field (32 bits)"/>
-  </group>
-
   <group title="Tunnel">
     <p>
       The fields in this group relate to tunnels, which Open vSwitch
@@ -1477,6 +1456,7 @@ ovs-ofctl add-flow br-int 'in_port=3,tun_src=192.168.1.1,tun_id=5001 actions=1'
 	<li>LISP has a 24-bit instance ID.</li>
 	<li>GRE has an optional 32-bit key.</li>
 	<li>STT has a 64-bit key.</li>
+    <li>ERSPAN has a 10-bit key (Session ID).</li>
       </ul>
 
       <p>
@@ -1734,6 +1714,87 @@ ovs-ofctl add-flow br-int 'in_port=3,tun_src=192.168.1.1,tun_id=5001 actions=1'
           this packet.  Devices must not apply policies when the A bit is set.
         </dd>
       </dl>
+    </field>
+
+    <h2>ERSPAN Metadata Fields</h2>
+    <p>
+      These fields provide access to features in the ERSPAN tunneling protocol
+      [ERSPAN], which has two major versions: version 1 (aka type II) and
+      version 2 (aka type III).
+    </p>
+
+    <p>
+      Regardless of version, ERSPAN is encapsulated within a fixed 8-byte GRE
+      header that consists of a 4-byte GRE base header and a 4-byte sequence
+      number.  The ERSPAN version 1 header format is:
+    </p>
+
+    <diagram>
+      <header name="GRE">
+        <bits name="..." above="16" width="0.4"/>
+        <bits name="type" above="16" below="0x88be" width="0.4"/>
+        <bits name="seq" above="32" width=".4"/>
+      </header>
+      <header name="ERSPAN v1">
+        <bits name="ver" above="4" below="1" width="0.4"/>
+        <bits name="..." above="18" width="0.4"/>
+        <bits name="session" above="10" below="tun_id" width="0.5"/>
+        <bits name="..." above="12" width="0.4"/>
+        <bits name="idx" above="20" width="0.6"/>
+      </header>
+      <header name="Ethernet">
+        <bits name="dst" above="48" width="0.4"/>
+        <bits name="src" above="48" width="0.4"/>
+        <bits name="type" above="16" width="0.4"/>
+        </header>
+      <dots/>
+    </diagram>
+
+    <p>
+      The ERSPAN version 2 header format is:
+    </p>
+
+    <diagram>
+      <header name="GRE">
+        <bits name="..." above="16" width="0.4"/>
+        <bits name="type" above="16" below="0x22eb" width="0.4"/>
+        <bits name="seq" above="32" width=".4"/>
+      </header>
+      <header name="ERSPAN v2">
+        <bits name="ver" above="4" below="2" width="0.4"/>
+        <bits name="..." above="18" width="0.4"/>
+        <bits name="session" above="10" below="tun_id" width="0.5"/>
+        <bits name="timestamp" above="32" width=".7"/>
+        <bits name="..." above="22" width="0.4"/>
+        <bits name="hwid" above="6" width="0.4"/>
+        <bits name="dir" above="1" below="0/1" width="0.4"/>
+        <bits name="..." above="3" width="0.4"/>
+      </header>
+      <header name="Ethernet">
+        <bits name="dst" above="48" width="0.4"/>
+        <bits name="src" above="48" width="0.4"/>
+        <bits name="type" above="16" width="0.4"/>
+      </header>
+      <dots/>
+    </diagram>
+
+    <field id="MFF_TUN_ERSPAN_VER" title="ERSPAN Version">
+      ERSPAN version number: 1 for version 1, or 2 for version 2.
+    </field>
+
+    <field id="MFF_TUN_ERSPAN_IDX" title="ERSPAN Index">
+      This field is a 20-bit index/port number associated with the ERSPAN
+      traffic's source port and direction (ingress/egress).  This field is
+      platform dependent.
+    </field>
+
+    <field id="MFF_TUN_ERSPAN_DIR" title="ERSPAN Direction">
+      For ERSPAN v2, the mirrored traffic's direction: 0 for ingress traffic, 1
+      for egress traffic.
+    </field>
+
+    <field id="MFF_TUN_ERSPAN_HWID" title="ERSPAN Hardware ID">
+      A 6-bit unique identifier of an ERSPAN v2 engine within a system.
     </field>
 
     <h2>Geneve Fields</h2>
@@ -3964,7 +4025,7 @@ r r c c c.
       listen for <code>OFPR_INVALID_TTL</code> ``packet-in'' messages via
       OpenFlow.
     </field>
-    
+
     <field id="MFF_IP_FRAG" title="IPv4/v6 Fragment Bitmask">
       <p>
         Specifies what kinds of IP fragments or non-fragments to match.  The
@@ -4179,6 +4240,111 @@ r r c c c.
     <field id="MFF_ARP_SHA" title="ARP Source Ethernet Address"/>
     <field id="MFF_ARP_THA" title="ARP Target Ethernet Address"/>
   </group>
+
+  <group title="Layer 3: NSH">
+    <p>
+      Service functions are widely deployed and essential in many networks.
+      These service functions provide a range of features such as security,
+      WAN acceleration, and server load balancing.  Service functions may
+      be instantiated at different points in the network infrastructure
+      such as the wide area network, data center, and so forth.
+    </p>
+
+    <p>
+      Prior to development of the SFC architecture [RFC 7665] and the
+      protocol specified in this document, current service function
+      deployment models have been relatively static and bound to topology
+      for insertion and policy selection.  Furthermore, they do not adapt
+      well to elastic service environments enabled by virtualization.
+    </p>
+
+    <p>
+      New data center network and cloud architectures require more flexible
+      service function deployment models.  Additionally, the transition to
+      virtual platforms demands an agile service insertion model that
+      supports dynamic and elastic service delivery.  Specifically, the
+      following functions are necessary:
+    </p>
+
+    <ol>
+      <li>
+        The movement of service functions and application workloads in
+        the network.
+      </li>
+
+      <li>
+        The ability to easily bind service policy to granular information, such
+        as per-subscriber state.
+      </li>
+
+      <li>
+        The capability to steer traffic to the requisite service function(s).
+      </li>
+    </ol>
+
+    <p>
+      The Network Service Header (NSH) specification defines a new data
+      plane protocol, which is an encapsulation for service function
+      chains.  The NSH is designed to encapsulate an original packet or
+      frame, and in turn be encapsulated by an outer transport
+      encapsulation (which is used to deliver the NSH to NSH-aware network
+      elements), as shown below:
+    </p>
+
+    <diagram>
+      <header>
+        <bits name="Transport Encapsulation" width="1.8"/>
+      </header>
+      <nospace/>
+      <header>
+        <bits name="Network Service Header (NSH)" width="2.0"/>
+      </header>
+      <nospace/>
+      <header>
+        <bits name="Original Packet/Frame" width="1.8"/>
+      </header>
+    </diagram>
+
+    <p>
+      The NSH is composed of the following elements:
+    </p>
+
+    <ol>
+      <li>Service Function Path identification.</li>
+      <li>Indication of location within a Service Function Path.</li>
+      <li>Optional, per packet metadata (fixed length or variable).</li>
+    </ol>
+
+    <p>
+      [RFC 7665] provides an overview of a service chaining architecture
+      that clearly defines the roles of the various elements and the scope
+      of a service function chaining encapsulation.  Figure 3 of [RFC 7665]
+      depicts the SFC architectural components after classification.  The
+      NSH is the SFC encapsulation referenced in [RFC 7665].
+    </p>
+
+    <field id="MFF_NSH_FLAGS"
+        title="flags field (2 bits)"/>
+    <field id="MFF_NSH_TTL"
+        title="TTL field (6 bits)"/>
+    <field id="MFF_NSH_MDTYPE"
+        title="mdtype field (8 bits)"/>
+    <field id="MFF_NSH_NP"
+        title="np (next protocol) field (8 bits)"/>
+    <field id="MFF_NSH_SPI"
+        title="spi (service path identifier) field (24 bits)"/>
+    <field id="MFF_NSH_SI"
+        title="si (service index) field (8 bits)"/>
+    <field id="MFF_NSH_C1"
+        title="c1 (Network Platform Context) field (32 bits)"/>
+    <field id="MFF_NSH_C2"
+        title="c2 (Network Shared Context) field (32 bits)"/>
+    <field id="MFF_NSH_C3"
+        title="c3 (Service Platform Context) field (32 bits)"/>
+    <field id="MFF_NSH_C4"
+        title="c4 (Service Shared Context) field (32 bits)"/>
+  </group>
+
 
   <group title="Layer 4: TCP, UDP, and SCTP">
     <p>
@@ -4432,6 +4598,13 @@ r r c c c.
       Computer Communications Review, October 2007.
     </dd>
 
+    <dt>ERSPAN</dt>
+    <dd>
+      M. Foschiano, K. Ghosh, M. Mehta, ``Cisco Systems' Encapsulated Remote
+      Switch Port Analyzer (ERSPAN),'' <url
+      href="https://tools.ietf.org/html/draft-foschiano-erspan-03"/>.
+    </dd>
+
     <dt>EXT-56</dt>
     <dd>
       J. Tonsing, ``Permit one of a set of prerequisites to apply, e.g. don't
@@ -4565,6 +4738,13 @@ r r c c c.
       M. Bursell, and C. Wright, ``Virtual eXtensible Local Area Network
       (VXLAN): A Framework for Overlaying Virtualized Layer 2 Networks over
       Layer 3 Networks, '' <url href="https://tools.ietf.org/html/rfc7348"/>.
+    </dd>
+
+    <dt>RFC 7665</dt>
+    <dd>
+      J. Halpern, Ed. and C. Pignataro, Ed.,
+      ``Service Function Chaining (SFC) Architecture,''
+      <url href="https://tools.ietf.org/html/rfc7665"/>.
     </dd>
 
     <dt>Srinivasan</dt>

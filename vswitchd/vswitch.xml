@@ -344,6 +344,49 @@
         </p>
       </column>
 
+      <column name="other_config" key="vhost-iommu-support"
+              type='{"type": "boolean"}'>
+        <p>
+          vHost IOMMU is a security feature, which restricts the vhost memory
+          that a virtio device may access. vHost IOMMU support is disabled by
+          default, due to a bug in QEMU implementations of the vhost REPLY_ACK
+          protocol, (on which vHost IOMMU relies) prior to v2.9.1. Setting this
+          value to <code>true</code> enables vHost IOMMU support for vHost User
+          Client ports in OvS-DPDK, starting from DPDK v17.11.
+        </p>
+        <p>
+          Changing this value requires restarting the daemon.
+        </p>
+      </column>
+
+      <column name="other_config" key="tx-flush-interval"
+              type='{"type": "integer",
+                     "minInteger": 0, "maxInteger": 1000000}'>
+        <p>
+          Specifies the time in microseconds that a packet can wait in output
+          batch for sending i.e. amount of time that packet can spend in an
+          intermediate output queue before sending to netdev.
+          This option can be used to configure balance between throughput
+          and latency. Lower values decreases latency while higher values
+          may be useful to achieve higher performance.
+        </p>
+        <p>
+          Defaults to 0 i.e. instant packet sending (latency optimized).
+        </p>
+      </column>
+
+      <column name="other_config" key="pmd-perf-metrics"
+              type='{"type": "boolean"}'>
+        <p>
+          Enables recording of detailed PMD performance metrics for analysis
+          and trouble-shooting. This can have a performance impact in the
+          order of 1%.
+        </p>
+        <p>
+          Defaults to false but can be changed at any time.
+        </p>
+      </column>
+
       <column name="other_config" key="n-handler-threads"
               type='{"type": "integer", "minInteger": 1}'>
         <p>
@@ -419,6 +462,18 @@
           VLAN.
         </p>
       </column>
+      <column name="other_config" key="bundle-idle-timeout"
+              type='{"type": "integer", "minInteger": 1}'>
+        <p>
+          The maximum time (in seconds) that idle bundles will wait
+          to be expired since it was either opened, modified or closed.
+        </p>
+        <p>
+          OpenFlow specification mandates the timeout to be at least one
+          second. The default is 10 seconds.
+        </p>
+    </column>
+
     </group>
 
     <group title="Status">
@@ -433,6 +488,11 @@
         Sequence number that Open vSwitch sets to the current value of
         <ref column="next_cfg"/> after it finishes applying a set of
         configuration changes.
+      </column>
+
+      <column name="dpdk_initialized">
+        True if <ref column="other_config" key="dpdk-init"/> is set to
+        true and the DPDK library is successfully initialized.
       </column>
 
       <group title="Statistics">
@@ -618,6 +678,12 @@
         </p>
       </column>
 
+      <column name="dpdk_version">
+        <p>
+          The version of the linked DPDK library.
+        </p>
+      </column>
+
     </group>
 
     <group title="Capabilities">
@@ -656,10 +722,20 @@
       </p>
 
       <column name="manager_options">
-        Database clients to which the Open vSwitch database server should
-        connect or to which it should listen, along with options for how these
-        connection should be configured.  See the <ref table="Manager"/> table
-        for more information.
+        <p>
+          Database clients to which the Open vSwitch database server should
+          connect or to which it should listen, along with options for how
+          these connections should be configured.  See the <ref
+          table="Manager"/> table for more information.
+        </p>
+
+        <p>
+          For this column to serve its purpose, <code>ovsdb-server</code> must
+          be configured to honor it.  The easiest way to do this is to invoke
+          <code>ovsdb-server</code> with the option
+          <option>--remote=db:Open_vSwitch,Open_vSwitch,manager_options</option>
+          The startup scripts that accompany Open vSwitch do this by default.
+        </p>
       </column>
     </group>
 
@@ -751,12 +827,12 @@
 
         <p>
           If there are primary controllers, removing all of them clears the
-          flow table.  If there are no primary controllers, adding one also
-          clears the flow table.  Other changes to the set of controllers, such
-          as adding or removing a service controller, adding another primary
-          controller to supplement an existing primary controller, or removing
-          only one of two primary controllers, have no effect on the flow
-          table.
+          OpenFlow flow tables, group table, and meter table.  If there are no
+          primary controllers, adding one also clears these tables.  Other
+          changes to the set of controllers, such as adding or removing a
+          service controller, adding another primary controller to supplement
+          an existing primary controller, or removing only one of two primary
+          controllers, have no effect on these tables.
         </p>
       </column>
 
@@ -806,7 +882,8 @@
         configured controllers can be contacted.</p>
         <p>
           Changing <ref column="fail_mode"/> when no primary controllers are
-          configured clears the flow table.
+          configured clears the OpenFlow flow tables, group table, and meter
+          table.
         </p>
       </column>
 
@@ -867,8 +944,9 @@
       </column>
 
       <column name="other_config" key="datapath-id">
-        Exactly 16 hex digits to set the OpenFlow datapath ID to a specific
-        value.  May not be all-zero.
+        Overrides the default OpenFlow datapath ID, setting it to the specified
+        value specified in hex.  The value must either have a <code>0x</code>
+        prefix or be exactly 16 hex digits long.  May not be all-zero.
       </column>
 
       <column name="other_config" key="dp-desc">
@@ -2067,7 +2145,8 @@
           their hardware.</li>
         </ul>
         <p>Some interfaces may not have a software-controllable MAC
-        address.</p>
+        address.  This option only affects internal ports.  For other type ports,
+	you can change the MAC address outside Open vSwitch, using ip command.</p>
       </column>
 
       <column name="error">
@@ -2158,7 +2237,18 @@
           imprecisely for internal interfaces.</dd>
 
           <dt><code>tap</code></dt>
-          <dd>A TUN/TAP device managed by Open vSwitch.</dd>
+          <dd>
+            <p>
+              A TUN/TAP device managed by Open vSwitch.
+            </p>
+            <p>
+              Open vSwitch checks the interface state before send packets
+              to the device.  When it is <code>down</code>, the packets are
+              dropped and the tx_dropped statistic is updated accordingly.
+              Older versions of Open vSwitch did not check the interface state
+              and then the tx_packets was incremented along with tx_dropped.
+            </p>
+          </dd>
 
           <dt><code>geneve</code></dt>
           <dd>
@@ -2226,10 +2316,6 @@
           <dd>
             A pair of virtual devices that act as a patch cable.
           </dd>
-
-          <dt><code>null</code></dt>
-          <dd>An ignored interface. Deprecated and slated for removal in
-          February 2013.</dd>
         </dl>
       </column>
     </group>
@@ -2521,6 +2607,13 @@
             </li>
           </ul>
         </column>
+        <column name="options" key="seq" type='{"type": "boolean"}'>
+          <p>
+            Optional.  A 4-byte sequence number field for GRE tunnel only.
+            Default is disabled, set to <code>true</code> to enable.
+            Sequence number is incremented by one on each outgoing packet.
+          </p>
+        </column>
       </group>
 
       <group title="Tunnel Options: gre, geneve, and vxlan">
@@ -2549,6 +2642,40 @@
 
         </column>
       </group>
+    </group>
+
+    <group title="Tunnel Options: erspan only">
+      <p>
+        Only <code>erspan</code> interfaces support these options.
+      </p>
+      <column name="options" key="erspan_idx">
+        <p>
+          20 bit index/port number associated with the ERSPAN traffic's
+          source port and direction (ingress/egress).  This field is
+          platform dependent.
+        </p>
+      </column>
+
+      <column name="options" key="erspan_ver">
+        <p>
+          ERSPAN version: 1 for version 1 (type II)
+          or 2 for version 2 (type III).
+        </p>
+      </column>
+
+      <column name="options" key="erspan_dir">
+        <p>
+          Specifies the ERSPAN v2 mirrored traffic's direction.
+          1 for egress traffic, and 0 for ingress traffic.
+        </p>
+      </column>
+
+      <column name="options" key="erspan_hwid">
+        <p>
+          ERSPAN hardware ID is a 6-bit unique identifier of an
+          ERSPAN v2 engine within a system.
+        </p>
+      </column>
     </group>
 
     <group title="Patch Options">
@@ -2651,6 +2778,17 @@ ovs-vsctl add-port br0 p0 -- set Interface p0 type=patch options:peer=p1 \
           The value specifies the path to the socket associated with a vHost
           User client mode device that has been or will be created by QEMU.
           Only supported by dpdkvhostuserclient interfaces.
+        </p>
+      </column>
+
+      <column name="options" key="dq-zero-copy"
+              type='{"type": "boolean"}'>
+        <p>
+          The value specifies whether or not to enable dequeue zero copy on
+          the given interface.
+          Must be set before vhost-server-path is specified.
+          Only supported by dpdkvhostuserclient interfaces.
+          The feature is considered experimental.
         </p>
       </column>
 
@@ -2815,6 +2953,70 @@ ovs-vsctl add-port br0 p0 -- set Interface p0 type=patch options:peer=p1 \
         Whether carrier is detected on <ref column="status"
         key="tunnel_egress_iface"/>.
       </column>
+
+      <group title="dpdk">
+        <p>
+          DPDK specific interface status options.
+        </p>
+
+          <column name="status" key="port_no">
+            DPDK port ID.
+          </column>
+
+          <column name="status" key="numa_id">
+            NUMA socket ID to which an Ethernet device is connected.
+          </column>
+
+          <column name="status" key="min_rx_bufsize">
+            Minimum size of RX buffer.
+          </column>
+
+          <column name="status" key="max_rx_pktlen">
+            Maximum configurable length of RX pkt.
+          </column>
+
+          <column name="status" key="max_rx_queues">
+            Maximum number of RX queues.
+          </column>
+
+          <column name="status" key="max_tx_queues">
+            Maximum number of TX queues.
+          </column>
+
+          <column name="status" key="max_mac_addrs">
+            Maximum number of MAC addresses.
+          </column>
+
+          <column name="status" key="max_hash_mac_addrs">
+            Maximum number of hash MAC addresses for MTA and UTA.
+          </column>
+
+          <column name="status" key="max_vfs">
+            Maximum number of hash MAC addresses for MTA and UTA.
+            Maximum number of VFs.
+          </column>
+
+          <column name="status" key="max_vmdq_pools">
+            Maximum number of VMDq pools.
+          </column>
+
+          <column name="status" key="if_type">
+            Interface type ID according to IANA ifTYPE MIB definitions.
+          </column>
+
+          <column name="status" key="if_descr">
+            Interface description string.
+          </column>
+
+          <column name="status" key="pci-vendor_id">
+            Vendor ID of PCI device.
+          </column>
+
+          <column name="status" key="pci-device_id">
+            Device ID of PCI device.
+          </column>
+
+      </group>
     </group>
 
     <group title="Statistics">
@@ -3512,6 +3714,23 @@ ovs-vsctl add-port br0 p0 -- set Interface p0 type=patch options:peer=p1 \
       </column>
     </group>
 
+    <group title="Link State Change detection mode">
+      <column name="options" key="dpdk-lsc-interrupt"
+              type='{"type": "boolean"}'>
+        <p>
+          Set this value to <code>true</code> to configure interrupt mode for
+          Link State Change (LSC) detection instead of poll mode for the DPDK
+          interface.
+        </p>
+        <p>
+          If this value is not set, poll mode is configured.
+        </p>
+        <p>
+          This parameter has an effect only on netdev dpdk interfaces.
+        </p>
+      </column>
+    </group>
+
     <group title="Common Columns">
       The overall purpose of these columns is described under <code>Common
       Columns</code> at the beginning of this document.
@@ -3867,6 +4086,25 @@ ovs-vsctl add-port br0 p0 -- set Interface p0 type=patch options:peer=p1 \
         be transmitted then the cbs will be decremented by the number of
         bytes/tokens of the packet. If there are not enough tokens in the cbs
         bucket the packet will be dropped.
+      </column>
+    </group>
+
+    <group title="Configuration for linux-sfq">
+      <p>
+        The <code>linux-sfq</code> QoS supports the following key-value pairs:
+      </p>
+
+      <column name="other_config" key="perturb" type='{"type": "integer"}'>
+        Number of seconds between consecutive perturbations in hashing algorithm.
+        Different flows can end up in the same hash bucket causing unfairness.
+        Perturbation's goal is to remove possible unfairness.
+        The default and recommended value is 10. Too low a value is discouraged
+        because each perturbation can cause packet reordering.
+      </column>
+      <column name="other_config" key="quantum" type='{"type": "integer"}'>
+        Number of bytes <code>linux-sfq</code> QoS can dequeue in one turn in
+        round-robin from one flow. The default and recommended value is equal
+        to interface's MTU.
       </column>
     </group>
 
@@ -4965,13 +5203,24 @@ ovs-vsctl add-port br0 p0 -- set Interface p0 type=patch options:peer=p1 \
     monitoring of switches.</p>
 
     <column name="agent">
-      Name of the network device whose IP address should be reported as the
-      ``agent address'' to collectors.  If not specified, the agent device is
-      figured from the first target address and the routing table.  If the
-      routing table does not contain a route to the target, the IP address
-      defaults to the <ref table="Controller" column="local_ip"/> in the
-      collector's <ref table="Controller"/>.  If an agent IP address cannot be
-      determined any of these ways, sFlow is disabled.
+      <p>
+        Determines the agent address, that is, the IP address reported to
+        collectors as the source of the sFlow data.  It may be an IP address or
+        the name of a network device.  In the latter case, the network device's
+        IP address is used,
+      </p>
+
+      <p>
+        If not specified, the agent device is figured from the first target
+        address and the routing table.  If the routing table does not contain a
+        route to the target, the IP address defaults to the <ref
+        table="Controller" column="local_ip"/> in the collector's <ref
+        table="Controller"/>.
+      </p>
+
+      <p>
+        If an agent IP address cannot be determined, sFlow is disabled.
+      </p>
     </column>
 
     <column name="header">

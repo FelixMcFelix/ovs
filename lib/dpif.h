@@ -392,7 +392,7 @@
 #include "dp-packet.h"
 #include "netdev.h"
 #include "openflow/openflow.h"
-#include "openvswitch/ofp-util.h"
+#include "openvswitch/ofp-meter.h"
 #include "ovs-numa.h"
 #include "packets.h"
 #include "util.h"
@@ -760,7 +760,7 @@ struct dpif_op {
         struct dpif_flow_del flow_del;
         struct dpif_execute execute;
         struct dpif_flow_get flow_get;
-    } u;
+    };
 };
 
 void dpif_operate(struct dpif *, struct dpif_op **ops, size_t n_ops);
@@ -787,9 +787,9 @@ const char *dpif_upcall_type_to_string(enum dpif_upcall_type);
 struct dpif_upcall {
     /* All types. */
     struct dp_packet packet;    /* Packet data,'dp_packet' should be the first
-				   member to avoid a hole. This is because
-				   'rte_mbuf' in dp_packet is aligned atleast
-				   on a 64-byte boundary */
+                                   member to avoid a hole. This is because
+                                   'rte_mbuf' in dp_packet is aligned atleast
+                                   on a 64-byte boundary */
     enum dpif_upcall_type type;
     struct nlattr *key;         /* Flow key. */
     size_t key_len;             /* Length of 'key' in bytes. */

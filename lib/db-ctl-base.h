@@ -51,13 +51,11 @@ struct cmd_show_table;
 
 /* ctl_init() figures out the number of tables on its own and flags an error if
  * 'ctl_classes' was defined with the wrong number of elements. */
-#define ctl_init(idl_classes, ctl_classes, cmd_show_table, ctl_exit_func) \
-    (BUILD_ASSERT(ARRAY_SIZE(idl_classes) == ARRAY_SIZE(ctl_classes)),  \
-     ctl_init__(idl_classes, ctl_classes, ARRAY_SIZE(idl_classes),      \
-                cmd_show_table, ctl_exit_func))
-void ctl_init__(const struct ovsdb_idl_table_class *idl_classes,
-                const struct ctl_table_class *ctl_classes,
-                size_t n_classes,
+#define ctl_init(idl_class, table_classes, ctl_classes, cmd_show_table, \
+                 ctl_exit_func)                                         \
+    (BUILD_ASSERT(ARRAY_SIZE(table_classes) == ARRAY_SIZE(ctl_classes)),  \
+     ctl_init__(idl_class, ctl_classes, cmd_show_table, ctl_exit_func))
+void ctl_init__(const struct ovsdb_idl_class *, const struct ctl_table_class *,
                 const struct cmd_show_table *cmd_show_tables,
                 void (*ctl_exit_func)(int status));
 char *ctl_default_db(void);
@@ -157,8 +155,10 @@ struct ctl_command {
     struct table *table;
 };
 
-bool ctl_might_write_to_db(char **argv);
+bool ctl_might_write_to_db(const struct ctl_command *, size_t n);
 const char *ctl_get_db_cmd_usage(void);
+
+const char *ctl_list_db_tables_usage(void);
 void ctl_print_commands(void);
 void ctl_print_options(const struct option *);
 void ctl_add_cmd_options(struct option **, size_t *n_options_p,
@@ -197,7 +197,7 @@ struct weak_ref_table {
 struct cmd_show_table {
     const struct ovsdb_idl_table_class *table;
     const struct ovsdb_idl_column *name_column;
-    const struct ovsdb_idl_column *columns[3]; /* Seems like a good number. */
+    const struct ovsdb_idl_column *columns[4]; /* Seems like a good number. */
     const struct weak_ref_table wref_table;
 };
 
@@ -231,7 +231,7 @@ struct ctl_context {
     /* For implementation with a cache of the contents of the database,
      * this function will be called when the database is changed and the
      * change makes the cache no longer valid. */
-    void (*invalidate_cache)(struct ctl_context *);
+    void (*invalidate_cache_cb)(struct ctl_context *);
 
     /* A command may set this member to true if some prerequisite is not met
      * and the caller should wait for something to change and then retry. */

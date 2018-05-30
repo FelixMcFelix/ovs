@@ -28,6 +28,7 @@
 #include "ovs-atomic.h"
 #include "ovs-thread.h"
 #include "packets.h"
+#include "hindex.h"
 
 /* Userspace connection tracker
  * ============================
@@ -90,13 +91,14 @@ struct nat_action_info_t {
 void conntrack_init(struct conntrack *);
 void conntrack_destroy(struct conntrack *);
 
-int conntrack_execute(struct conntrack *, struct dp_packet_batch *,
-                      ovs_be16 dl_type, bool force, bool commit,
-                      uint16_t zone, const uint32_t *setmark,
+int conntrack_execute(struct conntrack *ct, struct dp_packet_batch *pkt_batch,
+                      ovs_be16 dl_type, bool force, bool commit, uint16_t zone,
+                      const uint32_t *setmark,
                       const struct ovs_key_ct_labels *setlabel,
-                      const char *helper,
+                      ovs_be16 tp_src, ovs_be16 tp_dst, const char *helper,
                       const struct nat_action_info_t *nat_action_info,
                       long long now);
+void conntrack_clear(struct dp_packet *packet);
 
 struct conntrack_dump {
     struct conntrack *ct;
@@ -107,6 +109,7 @@ struct conntrack_dump {
 };
 
 struct ct_dpif_entry;
+struct ct_dpif_tuple;
 
 int conntrack_dump_start(struct conntrack *, struct conntrack_dump *,
                          const uint16_t *pzone, int *);
@@ -114,6 +117,11 @@ int conntrack_dump_next(struct conntrack_dump *, struct ct_dpif_entry *);
 int conntrack_dump_done(struct conntrack_dump *);
 
 int conntrack_flush(struct conntrack *, const uint16_t *zone);
+int conntrack_flush_tuple(struct conntrack *, const struct ct_dpif_tuple *,
+                          uint16_t zone);
+int conntrack_set_maxconns(struct conntrack *ct, uint32_t maxconns);
+int conntrack_get_maxconns(struct conntrack *ct, uint32_t *maxconns);
+int conntrack_get_nconns(struct conntrack *ct, uint32_t *nconns);
 
 /* 'struct ct_lock' is a wrapper for an adaptive mutex.  It's useful to try
  * different types of locks (e.g. spinlocks) */
@@ -271,14 +279,17 @@ struct conntrack {
     /* Hash table for alg expectations. Expectations are created
      * by control connections to help create data connections. */
     struct hmap alg_expectations OVS_GUARDED;
+    /* Used to lookup alg expectations from the control context. */
+    struct hindex alg_expectation_refs OVS_GUARDED;
     /* Expiry list for alg expectations. */
     struct ovs_list alg_exp_list OVS_GUARDED;
     /* This lock is used during NAT connection creation and deletion;
      * it is taken after a bucket lock and given back before that
      * bucket unlock.
      * This lock is similarly used to guard alg_expectations and
-     * alg_exp_list. If a bucket lock is also held during the normal
-     * code flow, then is must be taken first first and released last.
+     * alg_expectation_refs. If a bucket lock is also held during
+     * the normal code flow, then is must be taken first and released
+     * last.
      */
     struct ct_rwlock resources_lock;
 

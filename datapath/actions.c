@@ -1097,6 +1097,12 @@ static int execute_recirc(struct datapath *dp, struct sk_buff *skb,
 	return clone_execute(dp, skb, key, recirc_id, NULL, 0, last, true);
 }
 
+static bool prob_drop(uint32_t prob)
+{
+	/* Linux provides this handy function! */
+	return prandom_u32() > prob;
+}
+
 /* Execute a list of actions against 'skb'. */
 static int do_execute_actions(struct datapath *dp, struct sk_buff *skb,
 			      struct sw_flow_key *key,
@@ -1221,6 +1227,21 @@ static int do_execute_actions(struct datapath *dp, struct sk_buff *skb,
 		case OVS_ACTION_ATTR_POP_ETH:
 			err = pop_eth(skb, key);
 			break;
+
+		case OVS_ACTION_ATTR_PROBDROP: {
+			/* No need to free, taken care of for us
+			   This function just reads the attribute to
+			   know if we should drop. */
+			uint32_t prob = nla_get_u32(a);
+			if(prob_drop(prob))
+			{
+				//rem = 0;
+				while (rem) {
+					a = nla_next(a, &rem);
+				}
+			}
+			break;
+		}
 		}
 
 		if (unlikely(err)) {

@@ -1784,3 +1784,14 @@ IP_ECN_set_ce(struct dp_packet *pkt, bool is_ipv6)
         }
     }
 }
+
+/* Ask for a random number.
+   "p" is the amount we should let through, here true means drop,
+   false means let it pass on */
+bool
+prob_drop(uint32_t prob)
+{
+    unsigned int roll_i;
+    random_bytes(&roll_i, sizeof(roll_i));
+    return roll_i > prob;
+}

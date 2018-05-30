@@ -134,7 +134,8 @@ struct vl_mff_map;
     OFPACT(CLEAR_ACTIONS,   ofpact_null,        ofpact, "clear_actions") \
     OFPACT(WRITE_ACTIONS,   ofpact_nest,        actions, "write_actions") \
     OFPACT(WRITE_METADATA,  ofpact_metadata,    ofpact, "write_metadata") \
-    OFPACT(GOTO_TABLE,      ofpact_goto_table,  ofpact, "goto_table")
+    OFPACT(GOTO_TABLE,      ofpact_goto_table,  ofpact, "goto_table") \
+    OFPACT(PROBDROP,        ofpact_probdrop,    ofpact, "probdrop")
 
 /* enum ofpact_type, with a member OFPACT_<ENUM> for each action. */
 enum OVS_PACKED_ENUM ofpact_type {
@@ -1011,6 +1012,14 @@ struct ofpact_decap {
      * next protocol.
      */
     ovs_be32 new_pkt_type;
+};
+
+/* OFPACT_PROBDROP.
+ *
+ * Used for OFPAT_PROBDROP */
+struct ofpact_probdrop {
+    struct ofpact ofpact;
+    uint32_t prob;           /* Uint probability, "covers" 0->1 range. */
 };
 
 /* Converting OpenFlow to ofpacts. */

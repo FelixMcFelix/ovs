@@ -2490,11 +2490,11 @@ static int __ovs_nla_copy_actions(struct net *net, const struct nlattr *attr,
 			[OVS_ACTION_ATTR_TRUNC] = sizeof(struct ovs_action_trunc),
 			[OVS_ACTION_ATTR_PUSH_ETH] = sizeof(struct ovs_action_push_eth),
 			[OVS_ACTION_ATTR_POP_ETH] = 0,
+			[OVS_ACTION_ATTR_PROBDROP] = sizeof(u32),
 		};
 		const struct ovs_action_push_vlan *vlan;
 		int type = nla_type(a);
 		bool skip_copy;
-
 		if (type > OVS_ACTION_ATTR_MAX ||
 		    (action_lens[type] != nla_len(a) &&
 		     action_lens[type] != (u32)-1))
@@ -2642,6 +2642,9 @@ static int __ovs_nla_copy_actions(struct net *net, const struct nlattr *attr,
 			if (vlan_tci & htons(VLAN_TAG_PRESENT))
 				return -EINVAL;
 			mac_proto = MAC_PROTO_ETHERNET;
+			break;
+
+		case OVS_ACTION_ATTR_PROBDROP:
 			break;
 
 		default:

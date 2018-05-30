@@ -348,6 +348,9 @@ enum ofp_raw_action_type {
     /* NX1.3+(47): struct nx_action_decap, ... */
     NXAST_RAW_DECAP,
 
+    /* OF1.0+(29): uint32_t. */
+    OFPAT_RAW_PROBDROP,
+
 /* ## ------------------ ## */
 /* ## Debugging actions. ## */
 /* ## ------------------ ## */
@@ -480,6 +483,7 @@ ofpact_next_flattened(const struct ofpact *ofpact)
     case OFPACT_NAT:
     case OFPACT_ENCAP:
     case OFPACT_DECAP:
+    case OFPACT_PROBDROP:
         return ofpact_next(ofpact);
 
     case OFPACT_CLONE:
@@ -6957,6 +6961,67 @@ format_GOTO_TABLE(const struct ofpact_goto_table *a,
     ds_put_format(s, "%sgoto_table:%s%"PRIu8,
                   colors.param, colors.end, a->table_id);
 }
+
+/* Okay, the new stuff! */
+
+/* Encoding the action packet to put on the wire. */
+static void
+encode_PROBDROP(const struct ofpact_probdrop *prob,
+                    enum ofp_version ofp_version OVS_UNUSED,
+                    struct ofpbuf *out)
+{
+    uint32_t p = prob->prob;
+
+    put_OFPAT_PROBDROP(out, p);
+}
+
+/* Hmm. */
+static enum ofperr
+decode_OFPAT_RAW_PROBDROP(uint32_t prob,
+                            enum ofp_version ofp_version OVS_UNUSED,
+                            struct ofpbuf *out)
+{
+    struct ofpact_probdrop *op;
+    op = ofpact_put_PROBDROP(out);
+    op->prob = prob;
+    
+    return 0;
+}
+
+/* Helper for below. */
+static char * OVS_WARN_UNUSED_RESULT
+parse_prob(char *arg, struct ofpbuf *ofpacts)
+{
+    struct ofpact_probdrop *probdrop;
+    uint32_t prob;
+    char *error;
+
+    error = str_to_u32(arg, &prob);
+    if (error) return error;
+
+    probdrop = ofpact_put_PROBDROP(ofpacts);
+    probdrop->prob = prob;
+    return NULL;
+}
+
+/* Go from string-formatted args into an action struct. */
+static char * OVS_WARN_UNUSED_RESULT
+parse_PROBDROP(char *arg,
+                    const struct ofputil_port_map *port_map OVS_UNUSED,
+                    struct ofpbuf *ofpacts,
+                    enum ofputil_protocol *usable_protocols OVS_UNUSED)
+{
+    return parse_prob(arg, ofpacts);
+}
+
+/* Used when printing info to console. */
+static void
+format_PROBDROP(const struct ofpact_probdrop *a,
+                    const struct ofputil_port_map *port_map OVS_UNUSED,
+                    struct ds *s)
+{
+    ds_put_format(s, "probdrop:%"PRIu32, a->prob);
+}
 
 static void
 log_bad_action(const struct ofp_action_header *actions, size_t actions_len,
@@ -7149,6 +7214,7 @@ ofpact_is_set_or_move_action(const struct ofpact *a)
     case OFPACT_WRITE_ACTIONS:
     case OFPACT_WRITE_METADATA:
     case OFPACT_DEBUG_RECIRC:
+    case OFPACT_PROBDROP:
         return false;
     default:
         OVS_NOT_REACHED();
@@ -7190,6 +7256,7 @@ ofpact_is_allowed_in_actions_set(const struct ofpact *a)
     case OFPACT_STRIP_VLAN:
     case OFPACT_ENCAP:
     case OFPACT_DECAP:
+    case OFPACT_PROBDROP:
         return true;
 
     /* In general these actions are excluded because they are not part of
@@ -7444,6 +7511,7 @@ ovs_instruction_type_from_ofpact_type(enum ofpact_type type)
     case OFPACT_NAT:
     case OFPACT_ENCAP:
     case OFPACT_DECAP:
+    case OFPACT_PROBDROP:
     default:
         return OVSINST_OFPIT11_APPLY_ACTIONS;
     }
@@ -8130,6 +8198,9 @@ ofpact_check__(enum ofputil_protocol *usable_protocols, struct ofpact *a,
         }
         return 0;
 
+    case OFPACT_PROBDROP:
+        return 0;
+
     default:
         OVS_NOT_REACHED();
     }
@@ -8625,6 +8696,7 @@ ofpact_outputs_to_port(const struct ofpact *ofpact, ofp_port_t port)
     case OFPACT_NAT:
     case OFPACT_ENCAP:
     case OFPACT_DECAP:
+    case OFPACT_PROBDROP:
     default:
         return false;
     }
@@ -9305,4 +9377,3 @@ pad_ofpat(struct ofpbuf *openflow, size_t start_ofs)
     oah = ofpbuf_at_assert(openflow, start_ofs, sizeof *oah);
     oah->len = htons(openflow->size - start_ofs);
 }
-

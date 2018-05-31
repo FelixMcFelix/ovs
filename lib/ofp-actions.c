@@ -7247,6 +7247,7 @@ ofpacts_execute_action_set(struct ofpbuf *action_list,
     ofpacts_copy_last(action_list, action_set, OFPACT_DEC_NSH_TTL);
     ofpacts_copy_all(action_list, action_set, ofpact_is_set_or_move_action);
     ofpacts_copy_last(action_list, action_set, OFPACT_SET_QUEUE);
+    ofpacts_copy_last(action_list, action_set, OFPACT_PROBDROP);
 
     /* If both OFPACT_GROUP and OFPACT_OUTPUT are present, OpenFlow says that
      * we should execute only OFPACT_GROUP.

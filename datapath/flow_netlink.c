@@ -3010,10 +3010,9 @@ static int __ovs_nla_copy_actions(struct net *net, const struct nlattr *attr,
 			mac_proto = MAC_PROTO_ETHERNET;
 			break;
 
-<<<<<<< HEAD
 		case OVS_ACTION_ATTR_PROBDROP:
 			break;
-=======
+
 		case OVS_ACTION_ATTR_PUSH_NSH:
 			if (mac_proto != MAC_PROTO_ETHERNET) {
 				u8 next_proto;
@@ -3041,7 +3040,6 @@ static int __ovs_nla_copy_actions(struct net *net, const struct nlattr *attr,
 				mac_proto = MAC_PROTO_NONE;
 			break;
 		}
->>>>>>> master
 
 		default:
 			OVS_NLERR(log, "Unknown Action type %d", type);

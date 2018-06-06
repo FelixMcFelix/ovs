@@ -7116,40 +7116,43 @@ ofpact_copy(struct ofpbuf *out, const struct ofpact *a)
     ofpbuf_put(out, a, OFPACT_ALIGN(a->len));
 }
 
-/* Copies the last ofpact whose type is 'filter' from 'in' to 'out'. */
-static bool
-ofpacts_copy_last(struct ofpbuf *out, const struct ofpbuf *in,
-                  enum ofpact_type filter)
-{
-    const struct ofpact *target;
-    const struct ofpact *a;
-
-    target = NULL;
-    OFPACT_FOR_EACH (a, in->data, in->size) {
-        if (a->type == filter) {
-            target = a;
-        }
-    }
-    if (target) {
-        ofpact_copy(out, target);
-    }
-    return target != NULL;
-}
-
-/* Append all ofpacts, for which 'filter' returns true, from 'in' to 'out'.
+/* Append all ofpacts, from 'in' to 'out'.
  * The order of appended ofpacts is preserved between 'in' and 'out' */
 static void
-ofpacts_copy_all(struct ofpbuf *out, const struct ofpbuf *in,
-                 bool (*filter)(const struct ofpact *))
+ofpacts_copy_all(struct ofpbuf *out, const struct ofpbuf *in)
 {
     const struct ofpact *a;
 
     OFPACT_FOR_EACH (a, in->data, in->size) {
-        if (filter(a)) {
-            ofpact_copy(out, a);
-        }
+        ofpact_copy(out, a);
     }
 }
+
+#define ACTION_SET_MISC_POSITION 10
+#define ACTION_SET_COUNT ACTION_SET_MISC_POSITION + 6
+
+/* 1-indexed lookup table for constructing the action set.
+ * The OpenFlow spec "Action Set" section specifies this order.
+ * 0 (implicit from partial initialisation) means ignore, unless
+ * action is a "set_or_move" (and should be copied to another list) */
+static const unsigned int ofpact_action_set_order[N_OFPACTS] = {
+    [OFPACT_STRIP_VLAN]     = 1,
+    [OFPACT_POP_MPLS]       = 2,
+    [OFPACT_DECAP]          = 3,
+    [OFPACT_ENCAP]          = 4,
+    [OFPACT_PUSH_MPLS]      = 5,
+    [OFPACT_PUSH_VLAN]      = 6,
+    [OFPACT_DEC_TTL]        = 7,
+    [OFPACT_DEC_MPLS_TTL]   = 8,
+    [OFPACT_DEC_NSH_TTL]    = 9,
+    /* Space reserved for set_or_move action list. */
+    [OFPACT_SET_QUEUE]      = ACTION_SET_MISC_POSITION + 1,
+    [OFPACT_GROUP]          = ACTION_SET_MISC_POSITION + 2,
+    [OFPACT_OUTPUT]         = ACTION_SET_MISC_POSITION + 3,
+    [OFPACT_RESUBMIT]       = ACTION_SET_MISC_POSITION + 4,
+    [OFPACT_CT_CLEAR]       = ACTION_SET_MISC_POSITION + 5,
+    [OFPACT_CT]             = ACTION_SET_MISC_POSITION + 6,
+};
 
 /* Reads 'action_set', which contains ofpacts accumulated by
  * OFPACT_WRITE_ACTIONS instructions, and writes equivalent actions to be
@@ -7172,18 +7175,32 @@ void
 ofpacts_execute_action_set(struct ofpbuf *action_list,
                            const struct ofpbuf *action_set)
 {
-    /* The OpenFlow spec "Action Set" section specifies this order. */
-    ofpacts_copy_last(action_list, action_set, OFPACT_STRIP_VLAN);
-    ofpacts_copy_last(action_list, action_set, OFPACT_POP_MPLS);
-    ofpacts_copy_last(action_list, action_set, OFPACT_DECAP);
-    ofpacts_copy_last(action_list, action_set, OFPACT_ENCAP);
-    ofpacts_copy_last(action_list, action_set, OFPACT_PUSH_MPLS);
-    ofpacts_copy_last(action_list, action_set, OFPACT_PUSH_VLAN);
-    ofpacts_copy_last(action_list, action_set, OFPACT_DEC_TTL);
-    ofpacts_copy_last(action_list, action_set, OFPACT_DEC_MPLS_TTL);
-    ofpacts_copy_last(action_list, action_set, OFPACT_DEC_NSH_TTL);
-    ofpacts_copy_all(action_list, action_set, ofpact_is_set_or_move_action);
-    ofpacts_copy_last(action_list, action_set, OFPACT_SET_QUEUE);
+    const struct ofpact *actions[ACTION_SET_COUNT] = {NULL,};
+    struct ofpbuf set_or_move_action_list;
+    ofpbuf_init(&set_or_move_action_list, 0);
+
+    const struct ofpact *cursor;
+
+    OFPACT_FOR_EACH (cursor, action_set->data, action_set->size) {
+        unsigned int loc = ofpact_action_set_order[cursor->type];
+
+        if (loc) {
+            actions[loc-1] = cursor;
+        } else if (ofpact_is_set_or_move_action(cursor)) {
+            ofpact_copy(&set_or_move_action_list, cursor);
+        }
+    }
+
+    /* Copy up to OFPACT_SET_QUEUE. */
+    for (int i = 0; i < ACTION_SET_MISC_POSITION + 1; ++i) {
+        if (i == ACTION_SET_MISC_POSITION - 1) {
+            ofpacts_copy_all(action_list, &set_or_move_action_list);
+        } else if (actions[i]) {
+            ofpact_copy(action_list, actions[i]);
+        }
+    }
+
+    ofpbuf_uninit(&set_or_move_action_list);
 
     /* If both OFPACT_GROUP and OFPACT_OUTPUT are present, OpenFlow says that
      * we should execute only OFPACT_GROUP.
@@ -7191,12 +7208,15 @@ ofpacts_execute_action_set(struct ofpbuf *action_list,
      * If neither OFPACT_GROUP nor OFPACT_OUTPUT is present, then we can drop
      * all the actions because there's no point in modifying a packet that will
      * not be sent anywhere. */
-    if (!ofpacts_copy_last(action_list, action_set, OFPACT_GROUP) &&
-        !ofpacts_copy_last(action_list, action_set, OFPACT_OUTPUT) &&
-        !ofpacts_copy_last(action_list, action_set, OFPACT_RESUBMIT) &&
-        !ofpacts_copy_last(action_list, action_set, OFPACT_CT_CLEAR) &&
-        !ofpacts_copy_last(action_list, action_set, OFPACT_CT)) {
+    const struct ofpact *final_action = NULL;
+    for (int i = ACTION_SET_MISC_POSITION + 1; !final_action && i < ACTION_SET_COUNT; ++i) {
+        final_action = actions[i];
+    }
+
+    if (!final_action) {
         ofpbuf_clear(action_list);
+    } else {
+        ofpact_copy(action_list, final_action);
     }
 }
 

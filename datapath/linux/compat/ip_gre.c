@@ -208,10 +208,9 @@ static int erspan_rcv(struct sk_buff *skb, struct tnl_ptk_info *tpi,
 	 * Use ERSPAN 10-bit session ID as key.
 	 */
 	tpi->key = cpu_to_be32(get_session_id(ershdr));
-	/* OVS doesn't set tunnel key - so don't bother with it */
 	tunnel = ip_tunnel_lookup(itn, skb->dev->ifindex,
 				  tpi->flags,
-				  iph->saddr, iph->daddr, 0);
+				  iph->saddr, iph->daddr, tpi->key);
 
 	if (tunnel) {
 		len = gre_hdr_len + erspan_hdr_len(ver);
@@ -552,10 +551,12 @@ netdev_tx_t rpl_gre_fb_xmit(struct sk_buff *skb)
 			goto err_free_rt;
 	}
 
-	skb = __vlan_hwaccel_push_inside(skb);
-	if (unlikely(!skb)) {
-		err = -ENOMEM;
-		goto err_free_rt;
+	if (skb_vlan_tag_present(skb)) {
+		skb = __vlan_hwaccel_push_inside(skb);
+		if (unlikely(!skb)) {
+			err = -ENOMEM;
+			goto err_free_rt;
+		}
 	}
 
 	/* Push Tunnel header. */
@@ -1153,7 +1154,12 @@ static const struct net_device_ops ipgre_netdev_ops = {
 	.ndo_init		= ipgre_tunnel_init,
 	.ndo_uninit		= rpl_ip_tunnel_uninit,
 	.ndo_start_xmit		= ipgre_xmit,
+#ifdef	HAVE_RHEL7_MAX_MTU
+	.ndo_size		= sizeof(struct net_device_ops),
+	.extended.ndo_change_mtu = ip_tunnel_change_mtu,
+#else
 	.ndo_change_mtu		= ip_tunnel_change_mtu,
+#endif
 	.ndo_get_stats64	= ip_tunnel_get_stats64,
 #ifdef HAVE_GET_LINK_NET
 	.ndo_get_iflink		= ip_tunnel_get_iflink,
@@ -1187,7 +1193,12 @@ static const struct net_device_ops erspan_netdev_ops = {
 	.ndo_start_xmit		= erspan_xmit,
 	.ndo_set_mac_address	= eth_mac_addr,
 	.ndo_validate_addr	= eth_validate_addr,
+#ifdef	HAVE_RHEL7_MAX_MTU
+	.ndo_size		= sizeof(struct net_device_ops),
+	.extended.ndo_change_mtu = ip_tunnel_change_mtu,
+#else
 	.ndo_change_mtu		= ip_tunnel_change_mtu,
+#endif
 	.ndo_get_stats64	= ip_tunnel_get_stats64,
 #ifdef HAVE_NDO_GET_IFLINK
 	.ndo_get_iflink		= rpl_ip_tunnel_get_iflink,

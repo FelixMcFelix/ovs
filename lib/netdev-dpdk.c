@@ -341,6 +341,7 @@ struct ingress_policer {
 
 enum dpdk_hw_ol_features {
     NETDEV_RX_CHECKSUM_OFFLOAD = 1 << 0,
+    NETDEV_RX_HW_CRC_STRIP = 1 << 1,
 };
 
 /*
@@ -779,6 +780,7 @@ dpdk_eth_dev_port_config(struct netdev_dpdk *dev, int n_rxq, int n_txq)
     int i;
     struct rte_eth_conf conf = port_conf;
     struct rte_eth_dev_info info;
+    uint16_t conf_mtu;
 
     /* As of DPDK 17.11.1 a few PMDs require to explicitly enable
      * scatter to support jumbo RX. Checking the offload capabilities
@@ -796,6 +798,11 @@ dpdk_eth_dev_port_config(struct netdev_dpdk *dev, int n_rxq, int n_txq)
     conf.intr_conf.lsc = dev->lsc_interrupt_mode;
     conf.rxmode.hw_ip_checksum = (dev->hw_ol_features &
                                   NETDEV_RX_CHECKSUM_OFFLOAD) != 0;
+
+    if (dev->hw_ol_features & NETDEV_RX_HW_CRC_STRIP) {
+        conf.rxmode.hw_strip_crc = 1;
+    }
+
     /* A device may report more queues than it makes available (this has
      * been observed for Intel xl710, which reserves some of them for
      * SRIOV):  rte_eth_*_queue_setup will fail if a queue is not
@@ -815,9 +822,19 @@ dpdk_eth_dev_port_config(struct netdev_dpdk *dev, int n_rxq, int n_txq)
 
         diag = rte_eth_dev_set_mtu(dev->port_id, dev->mtu);
         if (diag) {
-            VLOG_ERR("Interface %s MTU (%d) setup error: %s",
-                    dev->up.name, dev->mtu, rte_strerror(-diag));
-            break;
+            /* A device may not support rte_eth_dev_set_mtu, in this case
+             * flag a warning to the user and include the devices configured
+             * MTU value that will be used instead. */
+            if (-ENOTSUP == diag) {
+                rte_eth_dev_get_mtu(dev->port_id, &conf_mtu);
+                VLOG_WARN("Interface %s does not support MTU configuration, "
+                          "max packet size supported is %"PRIu16".",
+                          dev->up.name, conf_mtu);
+            } else {
+                VLOG_ERR("Interface %s MTU (%d) setup error: %s",
+                         dev->up.name, dev->mtu, rte_strerror(-diag));
+                break;
+            }
         }
 
         for (i = 0; i < n_txq; i++) {
@@ -884,6 +901,13 @@ dpdk_eth_dev_init(struct netdev_dpdk *dev)
                                      DEV_RX_OFFLOAD_IPV4_CKSUM;
 
     rte_eth_dev_info_get(dev->port_id, &info);
+
+    if (strstr(info.driver_name, "vf") != NULL) {
+        VLOG_INFO("Virtual function detected, HW_CRC_STRIP will be enabled");
+        dev->hw_ol_features |= NETDEV_RX_HW_CRC_STRIP;
+    } else {
+        dev->hw_ol_features &= ~NETDEV_RX_HW_CRC_STRIP;
+    }
 
     if ((info.rx_offload_capa & rx_chksm_offload_capa) !=
             rx_chksm_offload_capa) {
@@ -2859,11 +2883,10 @@ netdev_dpdk_vhost_user_get_status(const struct netdev *netdev,
 
     for (int i = 0; i < vring_num; i++) {
         struct rte_vhost_vring vring;
-        char vhost_vring[16];
 
         rte_vhost_get_vhost_vring(vid, i, &vring);
-        snprintf(vhost_vring, 16, "vring_%d_size", i);
-        smap_add_format(args, vhost_vring, "%d", vring.size);
+        smap_add_nocopy(args, xasprintf("vring_%d_size", i),
+                        xasprintf("%d", vring.size));
     }
 
     ovs_mutex_unlock(&dev->mutex);
@@ -3934,7 +3957,8 @@ unlock:
     RXQ_RECV,                                                 \
     NULL,                       /* rx_wait */                 \
     NULL,                       /* rxq_drain */               \
-    NO_OFFLOAD_API                                            \
+    NO_OFFLOAD_API,                                           \
+    NULL                        /* get_block_id */            \
 }
 
 static const struct netdev_class dpdk_class =

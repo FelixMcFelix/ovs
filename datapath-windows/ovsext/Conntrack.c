@@ -32,9 +32,8 @@ KSTART_ROUTINE OvsConntrackEntryCleaner;
 static PLIST_ENTRY ovsConntrackTable;
 static OVS_CT_THREAD_CTX ctThreadCtx;
 static PNDIS_RW_LOCK_EX *ovsCtBucketLock = NULL;
-static PNDIS_RW_LOCK_EX ovsCtNatLockObj;
 extern POVS_SWITCH_CONTEXT gOvsSwitchContext;
-static LONG ctTotalEntries;
+static ULONG ctTotalEntries;
 
 static __inline OvsCtFlush(UINT16 zone, struct ovs_key_ct_tuple_ipv4 *tuple);
 static __inline NDIS_STATUS
@@ -54,19 +53,11 @@ OvsInitConntrack(POVS_SWITCH_CONTEXT context)
     ctTotalEntries = 0;
     UINT32 numBucketLocks = CT_HASH_TABLE_SIZE;
 
-    /* Init the sync-lock */
-    ovsCtNatLockObj = NdisAllocateRWLock(context->NdisFilterHandle);
-    if (ovsCtNatLockObj == NULL) {
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
-
     /* Init the Hash Buffer */
     ovsConntrackTable = OvsAllocateMemoryWithTag(sizeof(LIST_ENTRY)
                                                  * CT_HASH_TABLE_SIZE,
                                                  OVS_CT_POOL_TAG);
     if (ovsConntrackTable == NULL) {
-        NdisFreeRWLock(ovsCtNatLockObj);
-        ovsCtNatLockObj = NULL;
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
@@ -121,8 +112,6 @@ freeBucketLock:
 freeTable:
     OvsFreeMemoryWithTag(ovsConntrackTable, OVS_CT_POOL_TAG);
     ovsConntrackTable = NULL;
-    NdisFreeRWLock(ovsCtNatLockObj);
-    ovsCtNatLockObj = NULL;
     return status;
 }
 
@@ -135,7 +124,6 @@ freeTable:
 VOID
 OvsCleanupConntrack(VOID)
 {
-    LOCK_STATE_EX lockStateNat;
     ctThreadCtx.exit = 1;
     KeSetEvent(&ctThreadCtx.event, 0, FALSE);
     KeWaitForSingleObject(ctThreadCtx.threadObject, Executive,
@@ -160,12 +148,25 @@ OvsCleanupConntrack(VOID)
     }
     OvsFreeMemoryWithTag(ovsCtBucketLock, OVS_CT_POOL_TAG);
     ovsCtBucketLock = NULL;
-
-    NdisAcquireRWLockWrite(ovsCtNatLockObj, &lockStateNat, 0);
     OvsNatCleanup();
-    NdisReleaseRWLock(ovsCtNatLockObj, &lockStateNat);
-    NdisFreeRWLock(ovsCtNatLockObj);
-    ovsCtNatLockObj = NULL;
+}
+
+/*
+ *----------------------------------------------------------------------------
+ * OvsCtHashKey
+ *     Compute hash using 5-tuple and zone.
+ *----------------------------------------------------------------------------
+ */
+UINT32
+OvsCtHashKey(const OVS_CT_KEY *key)
+{
+    UINT32 hsrc, hdst, hash;
+    hsrc = key->src.addr.ipv4 | ntohl(key->src.port);
+    hdst = key->dst.addr.ipv4 | ntohl(key->dst.port);
+    hash = hsrc ^ hdst; /* TO identify reverse traffic */
+    hash = hash | (key->zone + key->nw_proto);
+    hash = OvsJhashWords((uint32_t*) &hash, 1, hash);
+    return hash;
 }
 
 static __inline VOID
@@ -208,7 +209,6 @@ OvsPostCtEventEntry(POVS_CT_ENTRY entry, UINT8 type)
 {
     OVS_CT_EVENT_ENTRY ctEventEntry = {0};
     NdisMoveMemory(&ctEventEntry.entry, entry, sizeof(OVS_CT_ENTRY));
-    ctEventEntry.entry.lock = NULL;
     ctEventEntry.entry.parent = NULL;
     ctEventEntry.type = type;
     OvsPostCtEvent(&ctEventEntry);
@@ -217,8 +217,7 @@ OvsPostCtEventEntry(POVS_CT_ENTRY entry, UINT8 type)
 static __inline VOID
 OvsCtIncrementCounters(POVS_CT_ENTRY entry, BOOLEAN reply, PNET_BUFFER_LIST nbl)
 {
-    LOCK_STATE_EX lockState;
-    NdisAcquireRWLockWrite(entry->lock, &lockState, 0);
+    NdisAcquireSpinLock(&(entry->lock));
     if (reply) {
         entry->rev_key.byteCount+= OvsPacketLenNBL(nbl);
         entry->rev_key.packetCount++;
@@ -226,11 +225,11 @@ OvsCtIncrementCounters(POVS_CT_ENTRY entry, BOOLEAN reply, PNET_BUFFER_LIST nbl)
         entry->key.byteCount += OvsPacketLenNBL(nbl);
         entry->key.packetCount++;
     }
-    NdisReleaseRWLock(entry->lock, &lockState);
+    NdisReleaseSpinLock(&(entry->lock));
 }
 
 static __inline BOOLEAN
-OvsCtAddEntry(POVS_SWITCH_CONTEXT switchContext, POVS_CT_ENTRY entry,
+OvsCtAddEntry(POVS_CT_ENTRY entry,
               OvsConntrackKeyLookupCtx *ctx,
               PNAT_ACTION_INFO natInfo, UINT64 now)
 {
@@ -245,34 +244,25 @@ OvsCtAddEntry(POVS_SWITCH_CONTEXT switchContext, POVS_CT_ENTRY entry,
     if (natInfo == NULL) {
         entry->natInfo.natAction = NAT_ACTION_NONE;
     } else {
-        LOCK_STATE_EX lockStateNat;
-        NdisAcquireRWLockWrite(ovsCtNatLockObj, &lockStateNat, 0);
         if (OvsIsForwardNat(natInfo->natAction)) {
             entry->natInfo = *natInfo;
             if (!OvsNatTranslateCtEntry(entry)) {
-                NdisReleaseRWLock(ovsCtNatLockObj, &lockStateNat);
                 return FALSE;
             }
-            ctx->hash = OvsHashCtKey(&entry->key);
+            ctx->hash = OvsCtHashKey(&entry->key);
         } else {
             entry->natInfo.natAction = natInfo->natAction;
         }
-        NdisReleaseRWLock(ovsCtNatLockObj, &lockStateNat);
     }
 
     entry->timestampStart = now;
-    entry->lock = NdisAllocateRWLock(switchContext->NdisFilterHandle);
-    if (entry->lock == NULL) {
-        OVS_LOG_ERROR("NdisAllocateRWLock failed : Insufficient resources");
-        return FALSE;
-    }
+    NdisAllocateSpinLock(&(entry->lock));
     UINT32 bucketIdx = ctx->hash & CT_HASH_TABLE_MASK;
-    entry->bucketLockRef = ovsCtBucketLock[bucketIdx];
     NdisAcquireRWLockWrite(ovsCtBucketLock[bucketIdx], &lockState, 0);
     InsertHeadList(&ovsConntrackTable[bucketIdx],
                    &entry->link);
 
-    InterlockedIncrement((LONG volatile *)&ctTotalEntries);
+    NdisInterlockedIncrement((PLONG)&ctTotalEntries);
     NdisReleaseRWLock(ovsCtBucketLock[bucketIdx], &lockState);
     return TRUE;
 }
@@ -280,7 +270,7 @@ OvsCtAddEntry(POVS_SWITCH_CONTEXT switchContext, POVS_CT_ENTRY entry,
 static __inline POVS_CT_ENTRY
 OvsCtEntryCreate(OvsForwardingContext *fwdCtx,
                  UINT8 ipProto,
-                 UINT32 l4Offset,
+                 OVS_PACKET_HDR_INFO *layers,
                  OvsConntrackKeyLookupCtx *ctx,
                  OvsFlowKey *key,
                  PNAT_ACTION_INFO natInfo,
@@ -298,16 +288,18 @@ OvsCtEntryCreate(OvsForwardingContext *fwdCtx,
     switch (ipProto) {
     case IPPROTO_TCP:
     {
+        UINT32 tcpPayloadLen;
         TCPHdr tcpStorage;
         const TCPHdr *tcp;
-        tcp = OvsGetTcp(curNbl, l4Offset, &tcpStorage);
+        tcp = OvsGetTcpHeader(curNbl, layers, &tcpStorage, &tcpPayloadLen);
         if (!OvsConntrackValidateTcpPacket(tcp)) {
             state = OVS_CS_F_INVALID;
             break;
         }
 
         if (commit) {
-            entry = OvsConntrackCreateTcpEntry(tcp, curNbl, currentTime);
+            entry = OvsConntrackCreateTcpEntry(tcp, currentTime,
+                                               tcpPayloadLen);
         }
         break;
     }
@@ -315,7 +307,7 @@ OvsCtEntryCreate(OvsForwardingContext *fwdCtx,
     {
         ICMPHdr storage;
         const ICMPHdr *icmp;
-        icmp = OvsGetIcmp(curNbl, l4Offset, &storage);
+        icmp = OvsGetIcmp(curNbl, layers->l4Offset, &storage);
         if (!OvsConntrackValidateIcmpPacket(icmp)) {
             if(icmp) {
                 OVS_LOG_TRACE("Invalid ICMP packet detected, icmp->type %u",
@@ -351,8 +343,7 @@ OvsCtEntryCreate(OvsForwardingContext *fwdCtx,
     if (state != OVS_CS_F_INVALID && commit) {
         if (entry) {
             entry->parent = parentEntry;
-            if (OvsCtAddEntry(fwdCtx->switchContext, entry, ctx,
-                              natInfo, currentTime)) {
+            if (OvsCtAddEntry(entry, ctx, natInfo, currentTime)) {
                 *entryCreated = TRUE;
             } else {
                 /* Unable to add entry to the list */
@@ -377,37 +368,46 @@ static enum CT_UPDATE_RES
 OvsCtUpdateEntry(OVS_CT_ENTRY* entry,
                  PNET_BUFFER_LIST nbl,
                  UINT8 ipProto,
-                 UINT32 l4Offset,
+                 OVS_PACKET_HDR_INFO *layers,
                  BOOLEAN reply,
                  UINT64 now)
 {
     CT_UPDATE_RES status;
-    LOCK_STATE_EX lockState;
-    NdisAcquireRWLockWrite(entry->lock, &lockState, 0);
     switch (ipProto) {
     case IPPROTO_TCP:
     {
+        UINT32 tcpPayloadLen;
         TCPHdr tcpStorage;
         const TCPHdr *tcp;
-        tcp = OvsGetTcp(nbl, l4Offset, &tcpStorage);
+        tcp = OvsGetTcpHeader(nbl, layers, &tcpStorage, &tcpPayloadLen);
         if (!tcp) {
             status = CT_UPDATE_INVALID;
             break;
         }
-        status = OvsConntrackUpdateTcpEntry(entry, tcp, nbl, reply, now);
+        NdisAcquireSpinLock(&(entry->lock));
+        status = OvsConntrackUpdateTcpEntry(entry, tcp, reply, now,
+                                            tcpPayloadLen);
+        NdisReleaseSpinLock(&(entry->lock));
         break;
     }
     case IPPROTO_ICMP:
+    {
+        NdisAcquireSpinLock(&(entry->lock));
         status = OvsConntrackUpdateIcmpEntry(entry, reply, now);
+        NdisReleaseSpinLock(&(entry->lock));
         break;
+    }
     case IPPROTO_UDP:
+    {
+        NdisAcquireSpinLock(&(entry->lock));
         status = OvsConntrackUpdateOtherEntry(entry, reply, now);
+        NdisReleaseSpinLock(&(entry->lock));
         break;
+    }
     default:
         status = CT_UPDATE_INVALID;
         break;
     }
-    NdisReleaseRWLock(entry->lock, &lockState);
     return status;
 }
 
@@ -431,24 +431,21 @@ OvsCtEntryDelete(POVS_CT_ENTRY entry, BOOLEAN forceDelete)
     if (entry == NULL) {
         return;
     }
-    LOCK_STATE_EX lockState;
-    NdisAcquireRWLockWrite(entry->lock, &lockState, 0);
+    KIRQL irql = KeGetCurrentIrql();
+    OVS_ACQUIRE_SPIN_LOCK(&(entry->lock), irql);
     if (forceDelete || OvsCtEntryExpired(entry)) {
         if (entry->natInfo.natAction) {
-            LOCK_STATE_EX lockStateNat;
-            NdisAcquireRWLockWrite(ovsCtNatLockObj, &lockStateNat, 0);
             OvsNatDeleteKey(&entry->key);
-            NdisReleaseRWLock(ovsCtNatLockObj, &lockStateNat);
         }
         OvsPostCtEventEntry(entry, OVS_EVENT_CT_DELETE);
         RemoveEntryList(&entry->link);
-        NdisReleaseRWLock(entry->lock, &lockState);
-        NdisFreeRWLock(entry->lock);
+        OVS_RELEASE_SPIN_LOCK(&(entry->lock), irql);
+        NdisFreeSpinLock(&(entry->lock));
         OvsFreeMemoryWithTag(entry, OVS_CT_POOL_TAG);
-        InterlockedDecrement((LONG volatile*)&ctTotalEntries);
+        NdisInterlockedDecrement((PLONG)&ctTotalEntries);
         return;
     }
-    NdisReleaseRWLock(entry->lock, &lockState);
+    OVS_RELEASE_SPIN_LOCK(&(entry->lock), irql);
 }
 
 static __inline NDIS_STATUS
@@ -481,15 +478,12 @@ OvsDetectCtPacket(OvsForwardingContext *fwdCtx,
 }
 
 BOOLEAN
-OvsCtKeyAreSame(OVS_CT_KEY ctxKey, OVS_CT_KEY entryKey)
+OvsCtEndpointsAreSame(OVS_CT_KEY ctxKey, OVS_CT_KEY entryKey)
 {
     return ((NdisEqualMemory(&ctxKey.src, &entryKey.src,
                              sizeof(struct ct_endpoint))) &&
             (NdisEqualMemory(&ctxKey.dst, &entryKey.dst,
-                             sizeof(struct ct_endpoint))) &&
-            (ctxKey.dl_type == entryKey.dl_type) &&
-            (ctxKey.nw_proto == entryKey.nw_proto) &&
-            (ctxKey.zone == entryKey.zone));
+                             sizeof(struct ct_endpoint))));
 }
 
 POVS_CT_ENTRY
@@ -499,8 +493,13 @@ OvsCtLookup(OvsConntrackKeyLookupCtx *ctx)
     POVS_CT_ENTRY entry;
     BOOLEAN reply = FALSE;
     POVS_CT_ENTRY found = NULL;
-    LOCK_STATE_EX lockState, lockStateTable;
+    LOCK_STATE_EX lockStateTable;
     UINT32 bucketIdx;
+
+    if (!ctTotalEntries) {
+        return found;
+    }
+
     /* Reverse NAT must be performed before OvsCtLookup, so here
      * we simply need to flip the src and dst in key and compare
      * they are equal. Note that flipped key is not equal to
@@ -509,20 +508,26 @@ OvsCtLookup(OvsConntrackKeyLookupCtx *ctx)
     OVS_CT_KEY revCtxKey = ctx->key;
     OvsCtKeyReverse(&revCtxKey);
 
-    if (!ctTotalEntries) {
-        return found;
-    }
+    KIRQL irql = KeGetCurrentIrql();
     bucketIdx = ctx->hash & CT_HASH_TABLE_MASK;
     NdisAcquireRWLockRead(ovsCtBucketLock[bucketIdx], &lockStateTable, 0);
     LIST_FORALL(&ovsConntrackTable[bucketIdx], link) {
         entry = CONTAINING_RECORD(link, OVS_CT_ENTRY, link);
-        NdisAcquireRWLockRead(entry->lock, &lockState, 0);
-        if (OvsCtKeyAreSame(ctx->key, entry->key)) {
+        OVS_ACQUIRE_SPIN_LOCK(&(entry->lock), irql);
+
+        if ((ctx->key.dl_type != entry->key.dl_type) ||
+            (ctx->key.nw_proto != entry->key.nw_proto) ||
+            (ctx->key.zone != entry->key.zone)) {
+            OVS_RELEASE_SPIN_LOCK(&(entry->lock), irql);
+            continue;
+        }
+
+        if (OvsCtEndpointsAreSame(ctx->key, entry->key)) {
             found = entry;
             reply = FALSE;
         }
 
-        if (!found && OvsCtKeyAreSame(revCtxKey, entry->key)) {
+        if (!found && OvsCtEndpointsAreSame(revCtxKey, entry->key)) {
             found = entry;
             reply = TRUE;
         }
@@ -533,29 +538,15 @@ OvsCtLookup(OvsConntrackKeyLookupCtx *ctx)
             } else {
                 ctx->reply = reply;
             }
-            NdisReleaseRWLock(entry->lock, &lockState);
+            OVS_RELEASE_SPIN_LOCK(&(entry->lock), irql);
             break;
         }
-        NdisReleaseRWLock(entry->lock, &lockState);
+        OVS_RELEASE_SPIN_LOCK(&(entry->lock), irql);
     }
 
     NdisReleaseRWLock(ovsCtBucketLock[bucketIdx], &lockStateTable);
     ctx->entry = found;
     return found;
-}
-
-UINT32
-OvsHashCtKey(const OVS_CT_KEY *key)
-{
-    UINT32 hsrc, hdst, hash;
-    hsrc = OvsJhashBytes((UINT32*) &key->src, sizeof(key->src), 0);
-    hdst = OvsJhashBytes((UINT32*) &key->dst, sizeof(key->dst), 0);
-    hash = hsrc ^ hdst; /* TO identify reverse traffic */
-    hash = OvsJhashBytes((uint32_t *) &key->dst + 1,
-                         ((uint32_t *) (key + 1) -
-                         (uint32_t *) (&key->dst + 1)),
-                         hash);
-    return hash;
 }
 
 static UINT8
@@ -648,17 +639,14 @@ OvsCtSetupLookupCtx(OvsFlowKey *flowKey,
         return NDIS_STATUS_INVALID_PACKET;
     }
 
-    LOCK_STATE_EX lockStateNat;
-    NdisAcquireRWLockRead(ovsCtNatLockObj, &lockStateNat, 0);
     natEntry = OvsNatLookup(&ctx->key, TRUE);
-    NdisReleaseRWLock(ovsCtNatLockObj, &lockStateNat);
     if (natEntry) {
         /* Translate address first for reverse NAT */
         ctx->key = natEntry->ctEntry->key;
         OvsCtKeyReverse(&ctx->key);
     }
 
-    ctx->hash = OvsHashCtKey(&ctx->key);
+    ctx->hash = OvsCtHashKey(&ctx->key);
     return NDIS_STATUS_SUCCESS;
 }
 
@@ -677,7 +665,7 @@ OvsDetectFtpPacket(OvsFlowKey *key) {
  */
 static __inline POVS_CT_ENTRY
 OvsProcessConntrackEntry(OvsForwardingContext *fwdCtx,
-                         UINT32 l4Offset,
+                         OVS_PACKET_HDR_INFO *layers,
                          OvsConntrackKeyLookupCtx *ctx,
                          OvsFlowKey *key,
                          UINT16 zone,
@@ -689,8 +677,8 @@ OvsProcessConntrackEntry(OvsForwardingContext *fwdCtx,
     POVS_CT_ENTRY entry = ctx->entry;
     UINT32 state = 0;
     PNET_BUFFER_LIST curNbl = fwdCtx->curNbl;
-    LOCK_STATE_EX lockState, lockStateTable;
-    PNDIS_RW_LOCK_EX bucketLockRef = NULL;
+    LOCK_STATE_EX lockStateTable;
+
     *entryCreated = FALSE;
 
     /* If an entry was found, update the state based on TCP flags */
@@ -701,8 +689,9 @@ OvsProcessConntrackEntry(OvsForwardingContext *fwdCtx,
         }
     } else {
         CT_UPDATE_RES result;
-        result = OvsCtUpdateEntry(entry, curNbl, key->ipKey.nwProto,
-                                  l4Offset, ctx->reply, currentTime);
+        UINT32 bucketIdx;
+        result = OvsCtUpdateEntry(entry, curNbl, key->ipKey.nwProto, layers,
+                                  ctx->reply, currentTime);
         switch (result) {
         case CT_UPDATE_VALID:
             state |= OVS_CS_F_ESTABLISHED;
@@ -715,12 +704,12 @@ OvsProcessConntrackEntry(OvsForwardingContext *fwdCtx,
             break;
         case CT_UPDATE_NEW:
             //Delete and update the Conntrack
-            bucketLockRef = entry->bucketLockRef;
-            NdisAcquireRWLockWrite(bucketLockRef, &lockStateTable, 0);
+            bucketIdx = ctx->hash & CT_HASH_TABLE_MASK;
+            NdisAcquireRWLockWrite(ovsCtBucketLock[bucketIdx], &lockStateTable, 0);
             OvsCtEntryDelete(ctx->entry, TRUE);
-            NdisReleaseRWLock(bucketLockRef, &lockStateTable);
+            NdisReleaseRWLock(ovsCtBucketLock[bucketIdx], &lockStateTable);
             ctx->entry = NULL;
-            entry = OvsCtEntryCreate(fwdCtx, key->ipKey.nwProto, l4Offset,
+            entry = OvsCtEntryCreate(fwdCtx, key->ipKey.nwProto, layers,
                                      ctx, key, natInfo, commit, currentTime,
                                      entryCreated);
             if (!entry) {
@@ -730,7 +719,7 @@ OvsProcessConntrackEntry(OvsForwardingContext *fwdCtx,
         }
     }
     if (entry) {
-        NdisAcquireRWLockRead(entry->lock, &lockState, 0);
+        NdisAcquireSpinLock(&(entry->lock));
         if (key->ipKey.nwProto == IPPROTO_TCP) {
             /* Update the related bit if there is a parent */
             if (entry->parent) {
@@ -748,7 +737,7 @@ OvsProcessConntrackEntry(OvsForwardingContext *fwdCtx,
         /* Copy mark and label from entry into flowKey. If actions specify
            different mark and label, update the flowKey. */
         OvsCtUpdateFlowKey(key, state, zone, entry->mark, &entry->labels);
-        NdisReleaseRWLock(entry->lock, &lockState);
+        NdisReleaseSpinLock(&(entry->lock));
     } else {
         OvsCtUpdateFlowKey(key, state, zone, 0, NULL);
     }
@@ -802,8 +791,6 @@ OvsCtSetMarkLabel(OvsFlowKey *key,
                        MD_LABELS *labels,
                        BOOLEAN *triggerUpdateEvent)
 {
-    LOCK_STATE_EX lockState;
-    NdisAcquireRWLockWrite(entry->lock, &lockState, 0);
     if (mark) {
         OvsConntrackSetMark(key, entry, mark->value, mark->mask,
                             triggerUpdateEvent);
@@ -813,7 +800,6 @@ OvsCtSetMarkLabel(OvsFlowKey *key,
         OvsConntrackSetLabels(key, entry, &labels->value, &labels->mask,
                               triggerUpdateEvent);
     }
-    NdisReleaseRWLock(entry->lock, &lockState);
 }
 
 /*
@@ -854,10 +840,11 @@ OvsCtExecute_(OvsForwardingContext *fwdCtx,
 {
     NDIS_STATUS status = NDIS_STATUS_SUCCESS;
     BOOLEAN triggerUpdateEvent = FALSE;
+    BOOLEAN entryCreated = FALSE;
     POVS_CT_ENTRY entry = NULL;
     PNET_BUFFER_LIST curNbl = fwdCtx->curNbl;
     OvsConntrackKeyLookupCtx ctx = { 0 };
-    LOCK_STATE_EX lockState, lockStateTable;
+    LOCK_STATE_EX lockStateTable;
     UINT64 currentTime;
     NdisGetCurrentSystemTime((LARGE_INTEGER *) &currentTime);
 
@@ -866,45 +853,43 @@ OvsCtExecute_(OvsForwardingContext *fwdCtx,
 
     /* Lookup Conntrack entries for a matching entry */
     entry = OvsCtLookup(&ctx);
-    BOOLEAN entryCreated = FALSE;
 
     /* Delete entry in reverse direction if 'force' is specified */
-    if (entry && force && ctx.reply) {
-        PNDIS_RW_LOCK_EX bucketLockRef = entry->bucketLockRef;
-        NdisAcquireRWLockWrite(bucketLockRef, &lockStateTable, 0);
+    if (force && ctx.reply && entry) {
+        UINT32 bucketIdx = ctx.hash & CT_HASH_TABLE_MASK;
+        NdisAcquireRWLockWrite(ovsCtBucketLock[bucketIdx], &lockStateTable, 0);
         OvsCtEntryDelete(entry, TRUE);
-        NdisReleaseRWLock(bucketLockRef, &lockStateTable);
+        NdisReleaseRWLock(ovsCtBucketLock[bucketIdx], &lockStateTable);
         entry = NULL;
     }
 
-    if (!entry && commit && ctTotalEntries >= CT_MAX_ENTRIES) {
-        /* Don't proceed with processing if the max limit has been hit.
-         * This blocks only new entries from being created and doesn't
-         * affect existing connections.
+    if (entry) {
+        /* Increment stats for the entry if it wasn't tracked previously or
+         * if they are on different zones
          */
-        OVS_LOG_ERROR("Conntrack Limit hit: %lu", ctTotalEntries);
-        return NDIS_STATUS_RESOURCES;
-    }
-
-    /* Increment stats for the entry if it wasn't tracked previously or
-     * if they are on different zones
-     */
-    if (entry && (entry->key.zone != key->ct.zone ||
-           (!(key->ct.state & OVS_CS_F_TRACKED)))) {
-        OvsCtIncrementCounters(entry, ctx.reply, curNbl);
-    }
-
-    if (!entry) {
-        /* If no matching entry was found, create one and add New state */
-        entry = OvsCtEntryCreate(fwdCtx, key->ipKey.nwProto,
-                                 layers->l4Offset, &ctx,
-                                 key, natInfo, commit, currentTime,
-                                 &entryCreated);
-    } else {
+        if ((entry->key.zone != key->ct.zone ||
+               (!(key->ct.state & OVS_CS_F_TRACKED)))) {
+            OvsCtIncrementCounters(entry, ctx.reply, curNbl);
+        }
         /* Process the entry and update CT flags */
-        entry = OvsProcessConntrackEntry(fwdCtx, layers->l4Offset, &ctx, key,
+        entry = OvsProcessConntrackEntry(fwdCtx, layers, &ctx, key,
                                          zone, natInfo, commit, currentTime,
                                          &entryCreated);
+
+    } else {
+        if (commit && ctTotalEntries >= CT_MAX_ENTRIES) {
+            /* Don't proceed with processing if the max limit has been hit.
+             * This blocks only new entries from being created and doesn't
+             * affect existing connections.
+             */
+            OVS_LOG_ERROR("Conntrack Limit hit: %lu", ctTotalEntries);
+            return NDIS_STATUS_RESOURCES;
+        }
+        /* If no matching entry was found, create one and add New state */
+        entry = OvsCtEntryCreate(fwdCtx, key->ipKey.nwProto,
+                                 layers, &ctx,
+                                 key, natInfo, commit, currentTime,
+                                 &entryCreated);
     }
 
     if (entry == NULL) {
@@ -918,13 +903,11 @@ OvsCtExecute_(OvsForwardingContext *fwdCtx,
      * NAT_ACTION_REVERSE, yet entry->natInfo is NAT_ACTION_SRC or
      * NAT_ACTION_DST without NAT_ACTION_REVERSE
      */
-    if (natInfo->natAction != NAT_ACTION_NONE)
-    {
-        LOCK_STATE_EX lockStateNat;
-        NdisAcquireRWLockWrite(ovsCtNatLockObj, &lockStateNat, 0);
+    KIRQL irql = KeGetCurrentIrql();
+    OVS_ACQUIRE_SPIN_LOCK(&(entry->lock), irql);
+    if (natInfo->natAction != NAT_ACTION_NONE) {
         OvsNatPacket(fwdCtx, entry, entry->natInfo.natAction,
                      key, ctx.reply);
-        NdisReleaseRWLock(ovsCtNatLockObj, &lockStateNat);
     }
 
     OvsCtSetMarkLabel(key, entry, mark, labels, &triggerUpdateEvent);
@@ -939,15 +922,14 @@ OvsCtExecute_(OvsForwardingContext *fwdCtx,
             OVS_LOG_ERROR("Error while parsing the FTP packet");
         }
     }
-    NdisAcquireRWLockRead(entry->lock, &lockState, 0);
+
     /* Add original tuple information to flow Key */
     if (entry->key.dl_type == ntohs(ETH_TYPE_IPV4)) {
         if (entry->parent != NULL) {
             POVS_CT_ENTRY parent = entry->parent;
-            LOCK_STATE_EX lockStateParent;
-            NdisAcquireRWLockRead(parent->lock, &lockStateParent, 0);
+            OVS_ACQUIRE_SPIN_LOCK(&(parent->lock), irql);
             OvsCtUpdateTuple(key, &parent->key);
-            NdisReleaseRWLock(parent->lock, &lockStateParent);
+            OVS_RELEASE_SPIN_LOCK(&(parent->lock), irql);
         } else {
             OvsCtUpdateTuple(key, &entry->key);
         }
@@ -955,13 +937,11 @@ OvsCtExecute_(OvsForwardingContext *fwdCtx,
 
     if (entryCreated) {
         OvsPostCtEventEntry(entry, OVS_EVENT_CT_NEW);
-    }
-    if (postUpdateEvent && !entryCreated && triggerUpdateEvent) {
+    } else if (postUpdateEvent && triggerUpdateEvent) {
         OvsPostCtEventEntry(entry, OVS_EVENT_CT_UPDATE);
     }
 
-    NdisReleaseRWLock(entry->lock, &lockState);
-
+    OVS_RELEASE_SPIN_LOCK(&(entry->lock), irql);
     return status;
 }
 
@@ -977,7 +957,6 @@ OvsExecuteConntrackAction(OvsForwardingContext *fwdCtx,
                           OvsFlowKey *key,
                           const PNL_ATTR a)
 {
-    PNL_ATTR ctAttr;
     BOOLEAN commit = FALSE;
     BOOLEAN force = FALSE;
     BOOLEAN postUpdateEvent = FALSE;
@@ -997,108 +976,109 @@ OvsExecuteConntrackAction(OvsForwardingContext *fwdCtx,
         return status;
     }
 
-    /* XXX Convert this to NL_ATTR_FOR_EACH */
-    ctAttr = NlAttrFindNested(a, OVS_CT_ATTR_ZONE);
-    if (ctAttr) {
-        zone = NlAttrGetU16(ctAttr);
-    }
-    ctAttr = NlAttrFindNested(a, OVS_CT_ATTR_COMMIT);
-    if (ctAttr) {
-        commit = TRUE;
-    }
-    ctAttr = NlAttrFindNested(a, OVS_CT_ATTR_MARK);
-    if (ctAttr) {
-        mark = NlAttrGet(ctAttr);
-    }
-    ctAttr = NlAttrFindNested(a, OVS_CT_ATTR_LABELS);
-    if (ctAttr) {
-        labels = NlAttrGet(ctAttr);
-    }
-    natActionInfo.natAction = NAT_ACTION_NONE;
-    ctAttr = NlAttrFindNested(a, OVS_CT_ATTR_NAT);
-    if (ctAttr) {
-        /* Pares Nested NAT attributes. */
-        PNL_ATTR natAttr;
-        unsigned int left;
-        BOOLEAN hasMinIp = FALSE;
-        BOOLEAN hasMinPort = FALSE;
-        BOOLEAN hasMaxIp = FALSE;
-        BOOLEAN hasMaxPort = FALSE;
-        NL_NESTED_FOR_EACH_UNSAFE (natAttr, left, ctAttr) {
-            enum ovs_nat_attr subtype = NlAttrType(natAttr);
-            switch(subtype) {
-            case OVS_NAT_ATTR_SRC:
-            case OVS_NAT_ATTR_DST:
-                natActionInfo.natAction |=
-                    ((subtype == OVS_NAT_ATTR_SRC)
-                        ? NAT_ACTION_SRC : NAT_ACTION_DST);
+    PNL_ATTR ctAttr = NULL;
+    INT left;
+
+    NL_NESTED_FOR_EACH (ctAttr, left, a) {
+        switch(NlAttrType(ctAttr)) {
+            case OVS_CT_ATTR_ZONE:
+                zone = NlAttrGetU16(ctAttr);
                 break;
-            case OVS_NAT_ATTR_IP_MIN:
-                memcpy(&natActionInfo.minAddr,
-                       NlAttrData(natAttr), NlAttrGetSize(natAttr));
-                hasMinIp = TRUE;
+            case OVS_CT_ATTR_COMMIT:
+                commit = TRUE;
                 break;
-            case OVS_NAT_ATTR_IP_MAX:
-                memcpy(&natActionInfo.maxAddr,
-                       NlAttrData(natAttr), NlAttrGetSize(natAttr));
-                hasMaxIp = TRUE;
+            case OVS_CT_ATTR_MARK:
+                mark = NlAttrGet(ctAttr);
                 break;
-            case OVS_NAT_ATTR_PROTO_MIN:
-                natActionInfo.minPort = NlAttrGetU16(natAttr);
-                hasMinPort = TRUE;
+            case OVS_CT_ATTR_LABELS:
+                labels = NlAttrGet(ctAttr);
                 break;
-            case OVS_NAT_ATTR_PROTO_MAX:
-                natActionInfo.maxPort = NlAttrGetU16(natAttr);
-                hasMaxPort = TRUE;
+            case OVS_CT_ATTR_HELPER:
+                helper = NlAttrGetString(ctAttr);
+                if (helper == NULL) {
+                    return NDIS_STATUS_INVALID_PARAMETER;
+                }
+                if (strcmp("ftp", helper) != 0) {
+                    /* Only support FTP */
+                    return NDIS_STATUS_NOT_SUPPORTED;
+                }
                 break;
-            case OVS_NAT_ATTR_PERSISTENT:
-            case OVS_NAT_ATTR_PROTO_HASH:
-            case OVS_NAT_ATTR_PROTO_RANDOM:
+            case OVS_CT_ATTR_FORCE_COMMIT:
+                force = TRUE;
+                /* Force implicitly means commit */
+                commit = TRUE;
                 break;
-            }
+            case OVS_CT_ATTR_EVENTMASK:
+                eventmask = NlAttrGetU32(ctAttr);
+                /* Only mark and label updates are supported. */
+                if (eventmask & (1 << IPCT_MARK | 1 << IPCT_LABEL))
+                    postUpdateEvent = TRUE;
+                break;
+            case OVS_CT_ATTR_NAT:
+                natActionInfo.natAction = NAT_ACTION_NONE;
+                /* Pares Nested NAT attributes. */
+                PNL_ATTR natAttr;
+                unsigned int natLeft;
+                BOOLEAN hasMinIp = FALSE;
+                BOOLEAN hasMinPort = FALSE;
+                BOOLEAN hasMaxIp = FALSE;
+                BOOLEAN hasMaxPort = FALSE;
+                NL_NESTED_FOR_EACH_UNSAFE (natAttr, natLeft, ctAttr) {
+                    enum ovs_nat_attr subtype = NlAttrType(natAttr);
+                    switch(subtype) {
+                    case OVS_NAT_ATTR_SRC:
+                    case OVS_NAT_ATTR_DST:
+                        natActionInfo.natAction |=
+                            ((subtype == OVS_NAT_ATTR_SRC)
+                                ? NAT_ACTION_SRC : NAT_ACTION_DST);
+                        break;
+                    case OVS_NAT_ATTR_IP_MIN:
+                        memcpy(&natActionInfo.minAddr,
+                                NlAttrData(natAttr), NlAttrGetSize(natAttr));
+                        hasMinIp = TRUE;
+                        break;
+                    case OVS_NAT_ATTR_IP_MAX:
+                        memcpy(&natActionInfo.maxAddr,
+                                NlAttrData(natAttr), NlAttrGetSize(natAttr));
+                        hasMaxIp = TRUE;
+                        break;
+                    case OVS_NAT_ATTR_PROTO_MIN:
+                        natActionInfo.minPort = NlAttrGetU16(natAttr);
+                        hasMinPort = TRUE;
+                        break;
+                    case OVS_NAT_ATTR_PROTO_MAX:
+                        natActionInfo.maxPort = NlAttrGetU16(natAttr);
+                        hasMaxPort = TRUE;
+                        break;
+                    case OVS_NAT_ATTR_PERSISTENT:
+                    case OVS_NAT_ATTR_PROTO_HASH:
+                    case OVS_NAT_ATTR_PROTO_RANDOM:
+                        break;
+                    }
+                }
+                if (natActionInfo.natAction == NAT_ACTION_NONE) {
+                    natActionInfo.natAction = NAT_ACTION_REVERSE;
+                }
+                if (hasMinIp && !hasMaxIp) {
+                    memcpy(&natActionInfo.maxAddr,
+                            &natActionInfo.minAddr,
+                            sizeof(natActionInfo.maxAddr));
+                }
+                if (hasMinPort && !hasMaxPort) {
+                    natActionInfo.maxPort = natActionInfo.minPort;
+                }
+                if (hasMinPort || hasMaxPort) {
+                    if (natActionInfo.natAction & NAT_ACTION_SRC) {
+                        natActionInfo.natAction |= NAT_ACTION_SRC_PORT;
+                    } else if (natActionInfo.natAction & NAT_ACTION_DST) {
+                        natActionInfo.natAction |= NAT_ACTION_DST_PORT;
+                    }
+                }
+                break;
+            default:
+                OVS_LOG_TRACE("Invalid netlink attr type: %u", NlAttrType(ctAttr));
+                break;
         }
-        if (natActionInfo.natAction == NAT_ACTION_NONE) {
-            natActionInfo.natAction = NAT_ACTION_REVERSE;
-        }
-        if (hasMinIp && !hasMaxIp) {
-            memcpy(&natActionInfo.maxAddr,
-                   &natActionInfo.minAddr,
-                   sizeof(natActionInfo.maxAddr));
-        }
-        if (hasMinPort && !hasMaxPort) {
-            natActionInfo.maxPort = natActionInfo.minPort;
-        }
-        if (hasMinPort || hasMaxPort) {
-            if (natActionInfo.natAction & NAT_ACTION_SRC) {
-                natActionInfo.natAction |= NAT_ACTION_SRC_PORT;
-            } else if (natActionInfo.natAction & NAT_ACTION_DST) {
-                natActionInfo.natAction |= NAT_ACTION_DST_PORT;
-            }
-        }
-    }
-    ctAttr = NlAttrFindNested(a, OVS_CT_ATTR_HELPER);
-    if (ctAttr) {
-        helper = NlAttrGetString(ctAttr);
-        if (helper == NULL) {
-            return NDIS_STATUS_INVALID_PARAMETER;
-        }
-        if (strcmp("ftp", helper) != 0) {
-            /* Only support FTP */
-            return NDIS_STATUS_NOT_SUPPORTED;
-        }
-    }
-    ctAttr = NlAttrFindNested(a, OVS_CT_ATTR_FORCE_COMMIT);
-    if (ctAttr) {
-        force = TRUE;
-        /* Force implicitly means commit */
-        commit = TRUE;
-    }
-    ctAttr = NlAttrFindNested(a, OVS_CT_ATTR_EVENTMASK);
-    if (ctAttr) {
-        eventmask = NlAttrGetU32(ctAttr);
-        /* Only mark and label updates are supported. */
-        if (eventmask & (1 << IPCT_MARK | 1 << IPCT_LABEL))
-            postUpdateEvent = TRUE;
     }
     /* If newNbl is not allocated, use the current Nbl*/
     status = OvsCtExecute_(fwdCtx, key, layers,
@@ -1159,7 +1139,7 @@ OvsCtFlush(UINT16 zone, struct ovs_key_ct_tuple_ipv4 *tuple)
 {
     PLIST_ENTRY link, next;
     POVS_CT_ENTRY entry;
-    LOCK_STATE_EX lockState, lockStateNat;
+    LOCK_STATE_EX lockState;
 
     if (ctTotalEntries) {
         for (UINT32 i = 0; i < CT_HASH_TABLE_SIZE; i++) {
@@ -1191,9 +1171,7 @@ OvsCtFlush(UINT16 zone, struct ovs_key_ct_tuple_ipv4 *tuple)
         }
     }
 
-    NdisAcquireRWLockWrite(ovsCtNatLockObj, &lockStateNat, 0);
     OvsNatFlush(zone);
-    NdisReleaseRWLock(ovsCtNatLockObj, &lockStateNat);
     return NDIS_STATUS_SUCCESS;
 }
 
@@ -1738,8 +1716,9 @@ OvsCtDumpCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
     UINT32 inIndex = instance->dumpState.index[1];
     UINT32 i = CT_HASH_TABLE_SIZE;
     UINT32 outIndex = 0;
+    KIRQL irql = KeGetCurrentIrql();
+    LOCK_STATE_EX lockStateTable;
 
-    LOCK_STATE_EX lockState, lockStateTable;
     if (ctTotalEntries) {
         for (i = inBucket; i < CT_HASH_TABLE_SIZE; i++) {
             PLIST_ENTRY head, link;
@@ -1756,7 +1735,7 @@ OvsCtDumpCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
                  */
                 if (outIndex >= inIndex) {
                     entry = CONTAINING_RECORD(link, OVS_CT_ENTRY, link);
-                    NdisAcquireRWLockRead(entry->lock, &lockState, 0);
+                    OVS_ACQUIRE_SPIN_LOCK(&(entry->lock), irql);
                     rc = OvsCreateNlMsgFromCtEntry(entry,
                                                    usrParamsCtx->outputBuffer,
                                                    usrParamsCtx->outputLength,
@@ -1765,7 +1744,7 @@ OvsCtDumpCmdHandler(POVS_USER_PARAMS_CONTEXT usrParamsCtx,
                                                    msgIn->nlMsg.nlmsgPid,
                                                    msgIn->nfGenMsg.version,
                                                    0);
-                    NdisReleaseRWLock(entry->lock, &lockState);
+                    OVS_RELEASE_SPIN_LOCK(&(entry->lock), irql);
                     if (rc != NDIS_STATUS_SUCCESS) {
                         NdisReleaseRWLock(ovsCtBucketLock[i], &lockStateTable);
                         return STATUS_UNSUCCESSFUL;

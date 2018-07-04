@@ -187,6 +187,31 @@ parsed_dpif_open(const char *arg_, bool create, struct dpif **dpifp)
     return result;
 }
 
+/* Open a dpif with an optional name argument.
+ *
+ * The datapath name is not a mandatory parameter for this command.  If
+ * it is not specified -- so 'argc' < 'max_args' -- we retrieve it from
+ * the current setup, assuming only one exists.  On success stores the
+ * opened dpif in '*dpifp'. */
+static int
+opt_dpif_open(int argc, const char *argv[], struct dpctl_params *dpctl_p,
+              uint8_t max_args, struct dpif **dpifp)
+{
+    int error = 0;
+    char *dpname = argc >= max_args ? xstrdup(argv[1]) : get_one_dp(dpctl_p);
+    if (!dpname) {
+        error = EINVAL;
+        dpctl_error(dpctl_p, error, "datapath not found");
+    } else {
+        error = parsed_dpif_open(dpname, false, dpifp);
+        free(dpname);
+        if (error) {
+            dpctl_error(dpctl_p, error, "opening datapath");
+        }
+    }
+    return error;
+}
+
 static int
 dpctl_add_dp(int argc, const char *argv[],
              struct dpctl_params *dpctl_p)
@@ -535,14 +560,14 @@ show_dpif(struct dpif *dpif, struct dpctl_params *dpctl_p)
 
     dpctl_print(dpctl_p, "%s:\n", dpif_name(dpif));
     if (!dpif_get_dp_stats(dpif, &stats)) {
-        dpctl_print(dpctl_p, "\tlookups: hit:%"PRIu64" missed:%"PRIu64
-                             " lost:%"PRIu64"\n\tflows: %"PRIu64"\n",
+        dpctl_print(dpctl_p, "  lookups: hit:%"PRIu64" missed:%"PRIu64
+                             " lost:%"PRIu64"\n  flows: %"PRIu64"\n",
                     stats.n_hit, stats.n_missed, stats.n_lost, stats.n_flows);
         if (stats.n_masks != UINT32_MAX) {
             uint64_t n_pkts = stats.n_hit + stats.n_missed;
             double avg = n_pkts ? (double) stats.n_mask_hit / n_pkts : 0.0;
 
-            dpctl_print(dpctl_p, "\tmasks: hit:%"PRIu64" total:%"PRIu32
+            dpctl_print(dpctl_p, "  masks: hit:%"PRIu64" total:%"PRIu32
                                  " hit/pkt:%.2f\n",
                         stats.n_mask_hit, stats.n_masks, avg);
         }
@@ -569,7 +594,7 @@ show_dpif(struct dpif *dpif, struct dpctl_params *dpctl_p)
             continue;
         }
 
-        dpctl_print(dpctl_p, "\tport %u: %s",
+        dpctl_print(dpctl_p, "  port %u: %s",
                     dpif_port.port_no, dpif_port.name);
 
         if (strcmp(dpif_port.type, "system")) {
@@ -620,24 +645,24 @@ show_dpif(struct dpif *dpif, struct dpctl_params *dpctl_p)
             error = netdev_get_stats(netdev, &s);
             if (!error) {
                 netdev_close(netdev);
-                print_stat(dpctl_p, "\t\tRX packets:", s.rx_packets);
+                print_stat(dpctl_p, "    RX packets:", s.rx_packets);
                 print_stat(dpctl_p, " errors:", s.rx_errors);
                 print_stat(dpctl_p, " dropped:", s.rx_dropped);
                 print_stat(dpctl_p, " overruns:", s.rx_over_errors);
                 print_stat(dpctl_p, " frame:", s.rx_frame_errors);
                 dpctl_print(dpctl_p, "\n");
 
-                print_stat(dpctl_p, "\t\tTX packets:", s.tx_packets);
+                print_stat(dpctl_p, "    TX packets:", s.tx_packets);
                 print_stat(dpctl_p, " errors:", s.tx_errors);
                 print_stat(dpctl_p, " dropped:", s.tx_dropped);
                 print_stat(dpctl_p, " aborted:", s.tx_aborted_errors);
                 print_stat(dpctl_p, " carrier:", s.tx_carrier_errors);
                 dpctl_print(dpctl_p, "\n");
 
-                print_stat(dpctl_p, "\t\tcollisions:", s.collisions);
+                print_stat(dpctl_p, "    collisions:", s.collisions);
                 dpctl_print(dpctl_p, "\n");
 
-                print_stat(dpctl_p, "\t\tRX bytes:", s.rx_bytes);
+                print_stat(dpctl_p, "    RX bytes:", s.rx_bytes);
                 print_human_size(dpctl_p, s.rx_bytes);
                 print_stat(dpctl_p, "  TX bytes:", s.tx_bytes);
                 print_human_size(dpctl_p, s.tx_bytes);
@@ -746,7 +771,7 @@ dpctl_dump_dps(int argc OVS_UNUSED, const char *argv[] OVS_UNUSED,
 
 static void
 format_dpif_flow(struct ds *ds, const struct dpif_flow *f, struct hmap *ports,
-                 char *type, struct dpctl_params *dpctl_p)
+                 struct dpctl_params *dpctl_p)
 {
     if (dpctl_p->verbosity && f->ufid_present) {
         odp_format_ufid(&f->ufid, ds);
@@ -757,8 +782,11 @@ format_dpif_flow(struct ds *ds, const struct dpif_flow *f, struct hmap *ports,
     ds_put_cstr(ds, ", ");
 
     dpif_flow_stats_format(&f->stats, ds);
-    if (dpctl_p->verbosity && !type && f->offloaded) {
+    if (dpctl_p->verbosity && f->attrs.offloaded) {
         ds_put_cstr(ds, ", offloaded:yes");
+    }
+    if (dpctl_p->verbosity && f->attrs.dp_layer) {
+        ds_put_format(ds, ", dp:%s", f->attrs.dp_layer);
     }
     ds_put_cstr(ds, ", actions:");
     format_odp_actions(ds, f->actions, f->actions_len, ports);
@@ -768,6 +796,15 @@ static char *supported_dump_types[] = {
     "offloaded",
     "ovs",
 };
+
+static bool
+flow_passes_type_filter(const struct dpif_flow *f, char *type)
+{
+    if (!strcmp(type, "offloaded")) {
+        return f->attrs.offloaded;
+    }
+    return true;
+}
 
 static struct hmap *
 dpctl_get_portno_names(struct dpif *dpif, const struct dpctl_params *dpctl_p)
@@ -804,7 +841,6 @@ dpctl_dump_flows(int argc, const char *argv[], struct dpctl_params *dpctl_p)
 {
     struct dpif *dpif;
     struct ds ds;
-    char *name;
 
     char *filter = NULL;
     char *type = NULL;
@@ -827,19 +863,8 @@ dpctl_dump_flows(int argc, const char *argv[], struct dpctl_params *dpctl_p)
         }
     }
 
-    /* The datapath name is not a mandatory parameter for this command.
-     * If it is not specified - so argc == 1 - we retrieve it from the
-     * current setup, assuming only one exists. */
-    name = (argc > 1) ? xstrdup(argv[1]) : get_one_dp(dpctl_p);
-    if (!name) {
-        error = EINVAL;
-        goto out_free;
-    }
-
-    error = parsed_dpif_open(name, false, &dpif);
-    free(name);
+    error = opt_dpif_open(argc, argv, dpctl_p, 2, &dpif);
     if (error) {
-        dpctl_error(dpctl_p, error, "opening datapath");
         goto out_free;
     }
 
@@ -925,9 +950,10 @@ dpctl_dump_flows(int argc, const char *argv[], struct dpctl_params *dpctl_p)
             }
             pmd_id = f.pmd_id;
         }
-        format_dpif_flow(&ds, &f, portno_names, type, dpctl_p);
-
-        dpctl_print(dpctl_p, "%s\n", ds_cstr(&ds));
+        if (!type || flow_passes_type_filter(&f, type)) {
+            format_dpif_flow(&ds, &f, portno_names, dpctl_p);
+            dpctl_print(dpctl_p, "%s\n", ds_cstr(&ds));
+        }
     }
     dpif_flow_dump_thread_destroy(flow_dump_thread);
     error = dpif_flow_dump_destroy(flow_dump);
@@ -961,21 +987,11 @@ dpctl_put_flow(int argc, const char *argv[], enum dpif_flow_put_flags flags,
     struct dpif *dpif;
     ovs_u128 ufid;
     bool ufid_present;
-    char *dp_name;
     struct simap port_names;
     int n, error;
 
-    /* The datapath name is not a mandatory parameter for this command.
-     * If it is not specified - so argc < 4 - we retrieve it from the
-     * current setup, assuming only one exists. */
-    dp_name = argc == 4 ? xstrdup(argv[1]) : get_one_dp(dpctl_p);
-    if (!dp_name) {
-        return EINVAL;
-    }
-    error = parsed_dpif_open(dp_name, false, &dpif);
-    free(dp_name);
+    error = opt_dpif_open(argc, argv, dpctl_p, 4, &dpif);
     if (error) {
-        dpctl_error(dpctl_p, error, "opening datapath");
         return error;
     }
 
@@ -1070,24 +1086,14 @@ dpctl_get_flow(int argc, const char *argv[], struct dpctl_params *dpctl_p)
     const char *key_s = argv[argc - 1];
     struct dpif_flow flow;
     struct dpif *dpif;
-    char *dp_name;
     ovs_u128 ufid;
     struct ofpbuf buf;
     uint64_t stub[DPIF_FLOW_BUFSIZE / 8];
     struct ds ds;
     int n, error;
 
-    /* The datapath name is not a mandatory parameter for this command.
-     * If it is not specified - so argc < 3 - we retrieve it from the
-     * current setup, assuming only one exists. */
-    dp_name = argc == 3 ? xstrdup(argv[1]) : get_one_dp(dpctl_p);
-    if (!dp_name) {
-        return EINVAL;
-    }
-    error = parsed_dpif_open(dp_name, false, &dpif);
-    free(dp_name);
+    error = opt_dpif_open(argc, argv, dpctl_p, 3, &dpif);
     if (error) {
-        dpctl_error(dpctl_p, error, "opening datapath");
         return error;
     }
 
@@ -1109,7 +1115,7 @@ dpctl_get_flow(int argc, const char *argv[], struct dpctl_params *dpctl_p)
     }
 
     ds_init(&ds);
-    format_dpif_flow(&ds, &flow, portno_names, NULL, dpctl_p);
+    format_dpif_flow(&ds, &flow, portno_names, dpctl_p);
     dpctl_print(dpctl_p, "%s\n", ds_cstr(&ds));
     ds_destroy(&ds);
 
@@ -1132,21 +1138,11 @@ dpctl_del_flow(int argc, const char *argv[], struct dpctl_params *dpctl_p)
     struct dpif *dpif;
     ovs_u128 ufid;
     bool ufid_present;
-    char *dp_name;
     struct simap port_names;
     int n, error;
 
-    /* The datapath name is not a mandatory parameter for this command.
-     * If it is not specified - so argc < 3 - we retrieve it from the
-     * current setup, assuming only one exists. */
-    dp_name = argc == 3 ? xstrdup(argv[1]) : get_one_dp(dpctl_p);
-    if (!dp_name) {
-        return EINVAL;
-    }
-    error = parsed_dpif_open(dp_name, false, &dpif);
-    free(dp_name);
+    error = opt_dpif_open(argc, argv, dpctl_p, 3, &dpif);
     if (error) {
-        dpctl_error(dpctl_p, error, "opening datapath");
         return error;
     }
 
@@ -1213,20 +1209,9 @@ static int
 dpctl_del_flows(int argc, const char *argv[], struct dpctl_params *dpctl_p)
 {
     struct dpif *dpif;
-    char *name;
-    int error;
 
-    /* The datapath name is not a mandatory parameter for this command.
-     * If it is not specified - so argc < 2 - we retrieve it from the
-     * current setup, assuming only one exists. */
-    name = (argc == 2) ? xstrdup(argv[1]) : get_one_dp(dpctl_p);
-    if (!name) {
-        return EINVAL;
-    }
-    error = parsed_dpif_open(name, false, &dpif);
-    free(name);
+    int error = opt_dpif_open(argc, argv, dpctl_p, 2, &dpif);
     if (error) {
-        dpctl_error(dpctl_p, error, "opening datapath");
         return error;
     }
 
@@ -1268,6 +1253,7 @@ dpctl_list_commands(int argc OVS_UNUSED, const char *argv[] OVS_UNUSED,
 
     return 0;
 }
+
 
 static int
 dpctl_dump_conntrack(int argc, const char *argv[],
@@ -1278,24 +1264,15 @@ dpctl_dump_conntrack(int argc, const char *argv[],
     uint16_t zone, *pzone = NULL;
     int tot_bkts;
     struct dpif *dpif;
-    char *name;
     int error;
 
     if (argc > 1 && ovs_scan(argv[argc - 1], "zone=%"SCNu16, &zone)) {
         pzone = &zone;
         argc--;
     }
-    /* The datapath name is not a mandatory parameter for this command.
-     * If it is not specified - so argc < 2 - we retrieve it from the
-     * current setup, assuming only one exists. */
-    name = (argc == 2) ? xstrdup(argv[1]) : get_one_dp(dpctl_p);
-    if (!name) {
-        return EINVAL;
-    }
-    error = parsed_dpif_open(name, false, &dpif);
-    free(name);
+
+    error = opt_dpif_open(argc, argv, dpctl_p, 2, &dpif);
     if (error) {
-        dpctl_error(dpctl_p, error, "opening datapath");
         return error;
     }
 
@@ -1409,22 +1386,22 @@ dpctl_ct_stats_show(int argc, const char *argv[],
                      struct dpctl_params *dpctl_p)
 {
     struct dpif *dpif;
-    char *name;
-
     struct ct_dpif_dump_state *dump;
     struct ct_dpif_entry cte;
     uint16_t zone, *pzone = NULL;
     int tot_bkts;
-    bool verbose = false;
     int lastargc = 0;
 
     int proto_stats[CT_STATS_MAX];
     int tcp_conn_per_states[CT_DPIF_TCPS_MAX_NUM];
     int error;
 
+    bool verbose = dpctl_p->verbosity;
+
     while (argc > 1 && lastargc != argc) {
         lastargc = argc;
         if (!strncmp(argv[argc - 1], "verbose", 7)) {
+            /* Support "verbose" argument for backwards compatibility. */
             verbose = true;
             argc--;
         } else if (!strncmp(argv[argc - 1], "zone=", 5)) {
@@ -1434,18 +1411,9 @@ dpctl_ct_stats_show(int argc, const char *argv[],
             }
         }
     }
-    /* The datapath name is not a mandatory parameter for this command.
-     * If it is not specified - so argc == 1 - we retrieve it from the
-     * current setup, assuming only one exists. */
-    name = (argc > 1) ? xstrdup(argv[1]) : get_one_dp(dpctl_p);
-    if (!name) {
-        return EINVAL;
-    }
 
-    error = parsed_dpif_open(name, false, &dpif);
-    free(name);
+    error = opt_dpif_open(argc, argv, dpctl_p, 2, &dpif);
     if (error) {
-        dpctl_error(dpctl_p, error, "opening datapath");
         return error;
     }
 
@@ -1510,9 +1478,9 @@ dpctl_ct_stats_show(int argc, const char *argv[],
 
     dpctl_print(dpctl_p, "Connections Stats:\n    Total: %d\n", tot_conn);
     if (proto_stats[CT_STATS_TCP]) {
-        dpctl_print(dpctl_p, "\tTCP: %d\n", proto_stats[CT_STATS_TCP]);
+        dpctl_print(dpctl_p, "  TCP: %d\n", proto_stats[CT_STATS_TCP]);
         if (verbose) {
-            dpctl_print(dpctl_p, "\t  Conn per TCP states:\n");
+            dpctl_print(dpctl_p, "    Conn per TCP states:\n");
             for (int i = 0; i < CT_DPIF_TCPS_MAX_NUM; i++) {
                 if (tcp_conn_per_states[i]) {
                     struct ds s = DS_EMPTY_INITIALIZER;
@@ -1524,25 +1492,25 @@ dpctl_ct_stats_show(int argc, const char *argv[],
         }
     }
     if (proto_stats[CT_STATS_UDP]) {
-        dpctl_print(dpctl_p, "\tUDP: %d\n", proto_stats[CT_STATS_UDP]);
+        dpctl_print(dpctl_p, "  UDP: %d\n", proto_stats[CT_STATS_UDP]);
     }
     if (proto_stats[CT_STATS_UDPLITE]) {
-        dpctl_print(dpctl_p, "\tUDPLITE: %d\n", proto_stats[CT_STATS_UDPLITE]);
+        dpctl_print(dpctl_p, "  UDPLITE: %d\n", proto_stats[CT_STATS_UDPLITE]);
     }
     if (proto_stats[CT_STATS_SCTP]) {
-        dpctl_print(dpctl_p, "\tSCTP: %d\n", proto_stats[CT_STATS_SCTP]);
+        dpctl_print(dpctl_p, "  SCTP: %d\n", proto_stats[CT_STATS_SCTP]);
     }
     if (proto_stats[CT_STATS_ICMP]) {
-        dpctl_print(dpctl_p, "\tICMP: %d\n", proto_stats[CT_STATS_ICMP]);
+        dpctl_print(dpctl_p, "  ICMP: %d\n", proto_stats[CT_STATS_ICMP]);
     }
     if (proto_stats[CT_STATS_DCCP]) {
-        dpctl_print(dpctl_p, "\tDCCP: %d\n", proto_stats[CT_STATS_DCCP]);
+        dpctl_print(dpctl_p, "  DCCP: %d\n", proto_stats[CT_STATS_DCCP]);
     }
     if (proto_stats[CT_STATS_IGMP]) {
-        dpctl_print(dpctl_p, "\tIGMP: %d\n", proto_stats[CT_STATS_IGMP]);
+        dpctl_print(dpctl_p, "  IGMP: %d\n", proto_stats[CT_STATS_IGMP]);
     }
     if (proto_stats[CT_STATS_OTHER]) {
-        dpctl_print(dpctl_p, "\tOther: %d\n", proto_stats[CT_STATS_OTHER]);
+        dpctl_print(dpctl_p, "  Other: %d\n", proto_stats[CT_STATS_OTHER]);
     }
 
     ct_dpif_dump_done(dump);
@@ -1556,8 +1524,6 @@ dpctl_ct_bkts(int argc, const char *argv[],
                      struct dpctl_params *dpctl_p)
 {
     struct dpif *dpif;
-    char *name;
-
     struct ct_dpif_dump_state *dump;
     struct ct_dpif_entry cte;
     uint16_t gt = 0; /* Threshold: display value when greater than gt. */
@@ -1571,18 +1537,8 @@ dpctl_ct_bkts(int argc, const char *argv[],
         }
     }
 
-    /* The datapath name is not a mandatory parameter for this command.
-     * If it is not specified - so argc < 2 - we retrieve it from the
-     * current setup, assuming only one exists. */
-    name = (argc == 2) ? xstrdup(argv[1]) : get_one_dp(dpctl_p);
-    if (!name) {
-        return EINVAL;
-    }
-
-    error = parsed_dpif_open(name, false, &dpif);
-    free(name);
+    error = opt_dpif_open(argc, argv, dpctl_p, 2, &dpif);
     if (error) {
-        dpctl_error(dpctl_p, error, "opening datapath");
         return error;
     }
 
@@ -1657,34 +1613,11 @@ dpctl_ct_bkts(int argc, const char *argv[],
 }
 
 static int
-dpctl_ct_open_dp(int argc, const char *argv[],
-                 struct dpctl_params *dpctl_p, struct dpif **dpif,
-                 uint8_t max_args)
-{
-    int error = 0;
-    /* The datapath name is not a mandatory parameter for this command.
-     * If it is not specified - so argc < max_args - we retrieve it from the
-     * current setup, assuming only one exists. */
-    char *dpname = argc >= max_args ? xstrdup(argv[1]) : get_one_dp(dpctl_p);
-    if (!dpname) {
-        error = EINVAL;
-        dpctl_error(dpctl_p, error, "datapath not found");
-    } else {
-        error = parsed_dpif_open(dpname, false, dpif);
-        free(dpname);
-        if (error) {
-            dpctl_error(dpctl_p, error, "opening datapath");
-        }
-    }
-    return error;
-}
-
-static int
 dpctl_ct_set_maxconns(int argc, const char *argv[],
                       struct dpctl_params *dpctl_p)
 {
     struct dpif *dpif;
-    int error = dpctl_ct_open_dp(argc, argv, dpctl_p, &dpif, 3);
+    int error = opt_dpif_open(argc, argv, dpctl_p, 3, &dpif);
     if (!error) {
         uint32_t maxconns;
         if (ovs_scan(argv[argc - 1], "%"SCNu32, &maxconns)) {
@@ -1710,7 +1643,7 @@ dpctl_ct_get_maxconns(int argc, const char *argv[],
                     struct dpctl_params *dpctl_p)
 {
     struct dpif *dpif;
-    int error = dpctl_ct_open_dp(argc, argv, dpctl_p, &dpif, 2);
+    int error = opt_dpif_open(argc, argv, dpctl_p, 2, &dpif);
     if (!error) {
         uint32_t maxconns;
         error = ct_dpif_get_maxconns(dpif, &maxconns);
@@ -1731,7 +1664,7 @@ dpctl_ct_get_nconns(int argc, const char *argv[],
                     struct dpctl_params *dpctl_p)
 {
     struct dpif *dpif;
-    int error = dpctl_ct_open_dp(argc, argv, dpctl_p, &dpif, 2);
+    int error = opt_dpif_open(argc, argv, dpctl_p, 2, &dpif);
     if (!error) {
         uint32_t nconns;
         error = ct_dpif_get_nconns(dpif, &nconns);
@@ -2040,7 +1973,7 @@ static const struct dpctl_command all_commands[] = {
     { "dump-conntrack", "[dp] [zone=N]", 0, 2, dpctl_dump_conntrack, DP_RO },
     { "flush-conntrack", "[dp] [zone=N] [ct-tuple]", 0, 3,
       dpctl_flush_conntrack, DP_RW },
-    { "ct-stats-show", "[dp] [zone=N] [verbose]",
+    { "ct-stats-show", "[dp] [zone=N]",
       0, 3, dpctl_ct_stats_show, DP_RO },
     { "ct-bkts", "[dp] [gt=N]", 0, 2, dpctl_ct_bkts, DP_RO },
     { "ct-set-maxconns", "[dp] maxconns", 1, 2, dpctl_ct_set_maxconns, DP_RW },

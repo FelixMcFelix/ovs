@@ -158,6 +158,7 @@ Ian Stokes                         ian.stokes@intel.com
 Ilya Maximets                      i.maximets@samsung.com
 Iman Tabrizian                     tabrizian@outlook.com
 Isaku Yamahata                     yamahata@valinux.co.jp
+Ivan Dyukov                        i.dyukov@samsung.com
 IWASE Yusuke                       iwase.yusuke@gmail.com
 Jakub Libosvar                     libosvar@redhat.com
 Jakub Sitnicki                     jkbs@redhat.com
@@ -197,6 +198,7 @@ Kmindg G                           kmindg@gmail.com
 Kris Murphy                        kriskend@linux.vnet.ibm.com
 Krishna Kondaka                    kkondaka@vmware.com
 Kyle Mestery                       mestery@mestery.com
+Kyle Simpson                       kyleandrew.simpson@gmail.com
 Kyle Upton                         kupton@baymicrosystems.com
 Lance Richardson                   lrichard@redhat.com
 Lars Kellogg-Stedman               lars@redhat.com
@@ -216,7 +218,7 @@ Luigi Rizzo                        rizzo@iet.unipi.it
 Luis E. P.                         l31g@hotmail.com
 Lukasz Rzasik                      lukasz.rzasik@gmail.com
 Madhu Challa                       challa@noironetworks.com
-Manohar Krishnappa Chidambaraswamy manohar.krishnappa.chidambaraswamy@ericsson.com
+Manohar K C                        manukc@gmail.com
 Marcin Mirecki                     mmirecki@redhat.com
 Mario Cabrera                      mario.cabrera@hpe.com
 Mark D. Gray                       mark.d.gray@intel.com
@@ -241,6 +243,7 @@ Mika Vaisanen                      mika.vaisanen@gmail.com
 Minoru TAKAHASHI                   takahashi.minoru7@gmail.com
 Murphy McCauley                    murphy.mccauley@gmail.com
 Natasha Gude                       natasha@nicira.com
+Neal Shrader                       neal@digitalocean.com
 Neil McKee                         neil.mckee@inmon.com
 Neil Zhu                           zhuj@centecnetworks.com
 Nimay Desai                        nimaydesai1@gmail.com
@@ -328,6 +331,7 @@ Timo Puha                          timox.puha@intel.com
 Timothy Redaelli                   tredaelli@redhat.com
 Todd Deshane                       deshantm@gmail.com
 Tom Everman                        teverman@google.com
+Toms Atteka                        cpp.code.lv@gmail.com
 Torgny Lindberg                    torgny.lindberg@ericsson.com
 Tsvi Slonim                        tsvi@toroki.com
 Tuan Nguyen                        tuan.nguyen@veriksystems.com
@@ -430,6 +434,7 @@ Darragh O'Reilly                darragh.oreilly@hpe.com
 Dave Walker                     DaveWalker@ubuntu.com
 David Evans                     davidjoshuaevans@gmail.com
 David Palma                     palma@onesource.pt
+David van Moolenbroek           dvmoolenbroek@aimvalley.nl
 Derek Cormier                   derek.cormier@lab.ntt.co.jp
 Dhaval Badiani                  dbadiani@vmware.com
 DK Moon                         dkmoon@nicira.com

@@ -26,34 +26,43 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-
+
+/* Abstract OFPT_BUNDLE_CONTROL message. */
 struct ofputil_bundle_ctrl_msg {
-    uint32_t    bundle_id;
-    uint16_t    type;
-    uint16_t    flags;
-};
-
-struct ofputil_bundle_add_msg {
-    uint32_t            bundle_id;
-    uint16_t            flags;
-    const struct ofp_header   *msg;
+    uint32_t bundle_id;
+    uint16_t type;
+    uint16_t flags;
 };
 
 enum ofperr ofputil_decode_bundle_ctrl(const struct ofp_header *,
                                        struct ofputil_bundle_ctrl_msg *);
-
 struct ofpbuf *ofputil_encode_bundle_ctrl_request(
     enum ofp_version, struct ofputil_bundle_ctrl_msg *);
+void ofputil_format_bundle_ctrl_request(
+    struct ds *, const struct ofputil_bundle_ctrl_msg *);
+
 struct ofpbuf *ofputil_encode_bundle_ctrl_reply(
     const struct ofp_header *, struct ofputil_bundle_ctrl_msg *);
+
+/* Abstract OFPT_BUNDLE_ADD_MESSAGE message. */
+struct ofputil_bundle_add_msg {
+    uint32_t bundle_id;
+    uint16_t flags;
+    const struct ofp_header *msg;
+};
 
 struct ofpbuf *ofputil_encode_bundle_add(enum ofp_version,
                                          struct ofputil_bundle_add_msg *);
-
 enum ofperr ofputil_decode_bundle_add(const struct ofp_header *,
                                       struct ofputil_bundle_add_msg *,
                                       enum ofptype *);
+void ofputil_format_bundle_add(struct ds *,
+                               const struct ofputil_bundle_add_msg *,
+                               const struct ofputil_port_map *,
+                               const struct ofputil_table_map *,
+                               int verbosity);
 
+
 /* Bundle message as produced by ofp-parse. */
 struct ofputil_bundle_msg {
     enum ofptype type;

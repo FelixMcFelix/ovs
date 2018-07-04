@@ -151,11 +151,11 @@ put_stack(enum mf_field_id field, struct ofpact_stack *stack)
     stack->subfield.n_bits = stack->subfield.field->n_bits;
 }
 
-static const struct sbrec_port_binding*
-get_localnet_port(struct hmap *local_datapaths, int64_t tunnel_key)
+static const struct sbrec_port_binding *
+get_localnet_port(const struct hmap *local_datapaths, int64_t tunnel_key)
 {
-    struct local_datapath *ld = get_local_datapath(local_datapaths,
-                                                   tunnel_key);
+    const struct local_datapath *ld = get_local_datapath(local_datapaths,
+                                                         tunnel_key);
     return ld ? ld->localnet_port : NULL;
 }
 
@@ -291,12 +291,12 @@ load_logical_ingress_metadata(const struct sbrec_port_binding *binding,
 }
 
 static void
-consider_port_binding(struct controller_ctx *ctx,
+consider_port_binding(struct ovsdb_idl_index *sbrec_chassis_by_name,
+                      struct ovsdb_idl_index *sbrec_port_binding_by_name,
                       enum mf_field_id mff_ovn_geneve,
                       const struct simap *ct_zones,
-                      const struct chassis_index *chassis_index,
-                      struct sset *active_tunnels,
-                      struct hmap *local_datapaths,
+                      const struct sset *active_tunnels,
+                      const struct hmap *local_datapaths,
                       const struct sbrec_port_binding *binding,
                       const struct sbrec_chassis *chassis,
                       struct ofpbuf *ofpacts_p,
@@ -318,7 +318,7 @@ consider_port_binding(struct controller_ctx *ctx,
         }
 
         const struct sbrec_port_binding *peer = lport_lookup_by_name(
-            ctx->ovnsb_idl, peer_name);
+            sbrec_port_binding_by_name, peer_name);
         if (!peer || strcmp(peer->type, binding->type)) {
             return;
         }
@@ -361,7 +361,7 @@ consider_port_binding(struct controller_ctx *ctx,
     }
 
     struct ovs_list *gateway_chassis
-        = gateway_chassis_get_ordered(binding, chassis_index);
+        = gateway_chassis_get_ordered(sbrec_chassis_by_name, binding);
 
     if (!strcmp(binding->type, "chassisredirect")
         && (binding->chassis == chassis
@@ -385,7 +385,8 @@ consider_port_binding(struct controller_ctx *ctx,
         const char *distributed_port = smap_get_def(&binding->options,
                                                     "distributed-port", "");
         const struct sbrec_port_binding *distributed_binding
-            = lport_lookup_by_name(ctx->ovnsb_idl, distributed_port);
+            = lport_lookup_by_name(sbrec_port_binding_by_name,
+                                   distributed_port);
 
         if (!distributed_binding) {
             /* Packet will be dropped. */
@@ -730,7 +731,7 @@ out:
 static void
 consider_mc_group(enum mf_field_id mff_ovn_geneve,
                   const struct simap *ct_zones,
-                  struct hmap *local_datapaths,
+                  const struct hmap *local_datapaths,
                   const struct sbrec_chassis *chassis,
                   const struct sbrec_multicast_group *mc,
                   struct ofpbuf *ofpacts_p,
@@ -867,16 +868,19 @@ update_ofports(struct simap *old, struct simap *new)
 }
 
 void
-physical_run(struct controller_ctx *ctx, enum mf_field_id mff_ovn_geneve,
+physical_run(struct ovsdb_idl_index *sbrec_chassis_by_name,
+             struct ovsdb_idl_index *sbrec_port_binding_by_name,
+             const struct sbrec_multicast_group_table *multicast_group_table,
+             const struct sbrec_port_binding_table *port_binding_table,
+             enum mf_field_id mff_ovn_geneve,
              const struct ovsrec_bridge *br_int,
              const struct sbrec_chassis *chassis,
              const struct simap *ct_zones,
-             struct hmap *flow_table, struct hmap *local_datapaths,
+             const struct hmap *local_datapaths,
              const struct sset *local_lports,
-             struct chassis_index *chassis_index,
-             struct sset *active_tunnels)
+             const struct sset *active_tunnels,
+             struct hmap *flow_table)
 {
-
     /* This bool tracks physical mapping changes. */
     bool physical_map_changed = false;
 
@@ -994,9 +998,11 @@ physical_run(struct controller_ctx *ctx, enum mf_field_id mff_ovn_geneve,
     /* Set up flows in table 0 for physical-to-logical translation and in table
      * 64 for logical-to-physical translation. */
     const struct sbrec_port_binding *binding;
-    SBREC_PORT_BINDING_FOR_EACH (binding, ctx->ovnsb_idl) {
-        consider_port_binding(ctx, mff_ovn_geneve, ct_zones,
-                              chassis_index, active_tunnels,
+    SBREC_PORT_BINDING_TABLE_FOR_EACH (binding, port_binding_table) {
+        consider_port_binding(sbrec_chassis_by_name,
+                              sbrec_port_binding_by_name,
+                              mff_ovn_geneve, ct_zones,
+                              active_tunnels,
                               local_datapaths, binding, chassis,
                               &ofpacts, flow_table);
     }
@@ -1005,7 +1011,7 @@ physical_run(struct controller_ctx *ctx, enum mf_field_id mff_ovn_geneve,
     const struct sbrec_multicast_group *mc;
     struct ofpbuf remote_ofpacts;
     ofpbuf_init(&remote_ofpacts, 0);
-    SBREC_MULTICAST_GROUP_FOR_EACH (mc, ctx->ovnsb_idl) {
+    SBREC_MULTICAST_GROUP_TABLE_FOR_EACH (mc, multicast_group_table) {
         consider_mc_group(mff_ovn_geneve, ct_zones, local_datapaths, chassis,
                           mc, &ofpacts, &remote_ofpacts, flow_table);
     }
@@ -1061,7 +1067,7 @@ physical_run(struct controller_ctx *ctx, enum mf_field_id mff_ovn_geneve,
             continue;
         }
 
-        SBREC_PORT_BINDING_FOR_EACH (binding, ctx->ovnsb_idl) {
+        SBREC_PORT_BINDING_TABLE_FOR_EACH (binding, port_binding_table) {
             struct match match = MATCH_CATCHALL_INITIALIZER;
 
             if (!binding->chassis ||
@@ -1134,7 +1140,7 @@ physical_run(struct controller_ctx *ctx, enum mf_field_id mff_ovn_geneve,
          * rule with higher priority for every localport in this
          * datapath. */
         const struct sbrec_port_binding *pb = lport_lookup_by_name(
-            ctx->ovnsb_idl, localport);
+            sbrec_port_binding_by_name, localport);
         if (pb && !strcmp(pb->type, "localport")) {
             match_set_reg(&match, MFF_LOG_INPORT - MFF_REG0, pb->tunnel_key);
             match_set_metadata(&match, htonll(pb->datapath->tunnel_key));

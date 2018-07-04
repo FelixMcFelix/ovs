@@ -2162,14 +2162,14 @@ netdev_flow_dump_destroy(struct netdev_flow_dump *dump)
 bool
 netdev_flow_dump_next(struct netdev_flow_dump *dump, struct match *match,
                       struct nlattr **actions, struct dpif_flow_stats *stats,
-                      ovs_u128 *ufid, struct ofpbuf *rbuffer,
-                      struct ofpbuf *wbuffer)
+                      struct dpif_flow_attrs *attrs, ovs_u128 *ufid,
+                      struct ofpbuf *rbuffer, struct ofpbuf *wbuffer)
 {
     const struct netdev_class *class = dump->netdev->netdev_class;
 
     return (class->flow_dump_next
-            ? class->flow_dump_next(dump, match, actions, stats, ufid,
-                                    rbuffer, wbuffer)
+            ? class->flow_dump_next(dump, match, actions, stats, attrs,
+                                    ufid, rbuffer, wbuffer)
             : false);
 }
 
@@ -2190,12 +2190,13 @@ netdev_flow_put(struct netdev *netdev, struct match *match,
 int
 netdev_flow_get(struct netdev *netdev, struct match *match,
                 struct nlattr **actions, const ovs_u128 *ufid,
-                struct dpif_flow_stats *stats, struct ofpbuf *buf)
+                struct dpif_flow_stats *stats,
+                struct dpif_flow_attrs *attrs, struct ofpbuf *buf)
 {
     const struct netdev_class *class = netdev->netdev_class;
 
     return (class->flow_get
-            ? class->flow_get(netdev, match, actions, ufid, stats, buf)
+            ? class->flow_get(netdev, match, actions, ufid, stats, attrs, buf)
             : EOPNOTSUPP);
 }
 
@@ -2222,6 +2223,16 @@ netdev_init_flow_api(struct netdev *netdev)
     return (class->init_flow_api
             ? class->init_flow_api(netdev)
             : EOPNOTSUPP);
+}
+
+uint32_t
+netdev_get_block_id(struct netdev *netdev)
+{
+    const struct netdev_class *class = netdev->netdev_class;
+
+    return (class->get_block_id
+            ? class->get_block_id(netdev)
+            : 0);
 }
 
 bool
@@ -2430,7 +2441,8 @@ netdev_ports_flow_del(const struct dpif_class *dpif_class,
 int
 netdev_ports_flow_get(const struct dpif_class *dpif_class, struct match *match,
                       struct nlattr **actions, const ovs_u128 *ufid,
-                      struct dpif_flow_stats *stats, struct ofpbuf *buf)
+                      struct dpif_flow_stats *stats,
+                      struct dpif_flow_attrs *attrs, struct ofpbuf *buf)
 {
     struct port_to_netdev_data *data;
 
@@ -2438,7 +2450,7 @@ netdev_ports_flow_get(const struct dpif_class *dpif_class, struct match *match,
     HMAP_FOR_EACH (data, portno_node, &port_to_netdev) {
         if (data->dpif_class == dpif_class
             && !netdev_flow_get(data->netdev, match, actions,
-                                ufid, stats, buf)) {
+                                ufid, stats, attrs, buf)) {
             ovs_mutex_unlock(&netdev_hmap_mutex);
             return 0;
         }

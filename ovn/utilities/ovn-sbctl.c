@@ -842,9 +842,14 @@ cmd_lflow_list(struct ctl_context *ctx)
 {
     const struct sbrec_datapath_binding *datapath = NULL;
     if (ctx->argc > 1) {
-        datapath = (const struct sbrec_datapath_binding *)
-            ctl_get_row(ctx, &sbrec_table_datapath_binding,
-                        ctx->argv[1], false);
+        const struct ovsdb_idl_row *row;
+        char *error = ctl_get_row(ctx, &sbrec_table_datapath_binding,
+                                  ctx->argv[1], false, &row);
+        if (error) {
+            ctl_fatal("%s", error);
+        }
+
+        datapath = (const struct sbrec_datapath_binding *)row;
         if (datapath) {
             ctx->argc--;
             ctx->argv++;
@@ -1234,6 +1239,9 @@ run_prerequisites(struct ctl_command *commands, size_t n_commands,
 
             sbctl_context_init(&sbctl_ctx, c, idl, NULL, NULL);
             (c->syntax->prerequisites)(&sbctl_ctx.base);
+            if (sbctl_ctx.base.error) {
+                ctl_fatal("%s", sbctl_ctx.base.error);
+            }
             sbctl_context_done(&sbctl_ctx, c);
 
             ovs_assert(!c->output.string);
@@ -1278,6 +1286,9 @@ do_sbctl(const char *args, struct ctl_command *commands, size_t n_commands,
         if (c->syntax->run) {
             (c->syntax->run)(&sbctl_ctx.base);
         }
+        if (sbctl_ctx.base.error) {
+            ctl_fatal("%s", sbctl_ctx.base.error);
+        }
         sbctl_context_done_command(&sbctl_ctx, c);
 
         if (sbctl_ctx.base.try_again) {
@@ -1313,6 +1324,9 @@ do_sbctl(const char *args, struct ctl_command *commands, size_t n_commands,
             if (c->syntax->postprocess) {
                 sbctl_context_init(&sbctl_ctx, c, idl, txn, symtab);
                 (c->syntax->postprocess)(&sbctl_ctx.base);
+                if (sbctl_ctx.base.error) {
+                    ctl_fatal("%s", sbctl_ctx.base.error);
+                }
                 sbctl_context_done(&sbctl_ctx, c);
             }
         }

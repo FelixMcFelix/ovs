@@ -3,34 +3,34 @@ AT_BANNER([bfd])
 m4_define([BFD_CHECK], [
 AT_CHECK([ovs-appctl bfd/show $1 | sed -e '/Time:/d' | sed -e '/Discriminator/d' | sed -e '/Interval:/d'| sed -e '/Multiplier/d'],[0],
 [dnl
-	Forwarding: $2
-	Concatenated Path Down: $3
+  Forwarding: $2
+  Concatenated Path Down: $3
 
-	Local Flags: $4
-	Local Session State: $5
-	Local Diagnostic: $6
+  Local Flags: $4
+  Local Session State: $5
+  Local Diagnostic: $6
 
-	Remote Flags: $7
-	Remote Session State: $8
-	Remote Diagnostic: $9
+  Remote Flags: $7
+  Remote Session State: $8
+  Remote Diagnostic: $9
 ])
 ])
 
 m4_define([BFD_CHECK_TX], [
 AT_CHECK([ovs-appctl bfd/show $1 | sed -n '/TX Interval/p'],[0],
 [dnl
-	TX Interval: Approx $2
-	Local Minimum TX Interval: $3
-	Remote Minimum TX Interval: $4
+  TX Interval: Approx $2
+  Local Minimum TX Interval: $3
+  Remote Minimum TX Interval: $4
 ])
 ])
 
 m4_define([BFD_CHECK_RX], [
 AT_CHECK([ovs-appctl bfd/show $1 | sed -n '/RX Interval/p'],[0],
 [dnl
-	RX Interval: Approx $2
-	Local Minimum RX Interval: $3
-	Remote Minimum RX Interval: $4
+  RX Interval: Approx $2
+  Local Minimum RX Interval: $3
+  Remote Minimum RX Interval: $4
 ])
 ])
 
@@ -44,8 +44,8 @@ $3
 m4_define([BFD_CHECK_MULT], [
 AT_CHECK([ovs-appctl bfd/show $1 | sed -n '/Detect Multiplier/p'],[0],
 [dnl
-	Detect Multiplier: $2
-	Remote Detect Multiplier: $3
+  Detect Multiplier: $2
+  Remote Detect Multiplier: $3
 ])
 ])
 
@@ -241,7 +241,7 @@ AT_CHECK([ovs-appctl ofproto/trace --l7-len 0 ovs-dummy 'tunnel(tun_id=0x1,src=2
 # check that the packet should be handled as BFD packet.
 AT_CHECK([tail -2 stdout], [0], [dnl
 This flow is handled by the userspace slow path because it:
-	- Consists of BFD packets.
+  - Consists of BFD packets.
 ], [])
 
 # turn on the check_tnl_key.
@@ -258,7 +258,7 @@ AT_CHECK([ovs-appctl ofproto/trace --l7-len 0 ovs-dummy 'tunnel(tun_id=0x0,src=2
 # check that the packet should be handled as BFD packet.
 AT_CHECK([tail -2 stdout], [0], [dnl
 This flow is handled by the userspace slow path because it:
-	- Consists of BFD packets.
+  - Consists of BFD packets.
 ], [])
 
 OVS_VSWITCHD_STOP
@@ -846,12 +846,12 @@ check_liveness () {
     printf '\n\n--- check_liveness %d ---\n\n\n' $1
     shift
 
-	echo >>expout "OFPT_PORT_STATUS (OF1.3): MOD: 1(p0): addr:
+        echo >>expout "OFPT_PORT_STATUS (OF1.3): MOD: 1(p0): addr:
      config:     0
      state:      $1
      speed: 0 Mbps now, 0 Mbps max"
 
-	AT_CHECK(
+        AT_CHECK(
       [[sed '
 s/ (xid=0x[0-9a-fA-F]*)//
 s/ *duration.*//
@@ -917,12 +917,12 @@ check_liveness () {
     printf '\n\n--- check_liveness %d ---\n\n\n' $1
     shift
 
-	echo >>expout "OFPT_PORT_STATUS (OF1.4): MOD: 1(p0): addr:
+        echo >>expout "OFPT_PORT_STATUS (OF1.4): MOD: 1(p0): addr:
      config:     0
      state:      $1
      speed: 0 Mbps now, 0 Mbps max"
 
-	AT_CHECK(
+        AT_CHECK(
       [[sed '
 s/ (xid=0x[0-9a-fA-F]*)//
 s/ *duration.*//
@@ -988,12 +988,12 @@ check_liveness () {
     printf '\n\n--- check_liveness %d ---\n\n\n' $1
     shift
 
-	echo >>expout "OFPT_PORT_STATUS (OF1.5): MOD: 1(p0): addr:
+        echo >>expout "OFPT_PORT_STATUS (OF1.5): MOD: 1(p0): addr:
      config:     0
      state:      $1
      speed: 0 Mbps now, 0 Mbps max"
 
-	AT_CHECK(
+        AT_CHECK(
       [[sed '
 s/ (xid=0x[0-9a-fA-F]*)//
 s/ *duration.*//

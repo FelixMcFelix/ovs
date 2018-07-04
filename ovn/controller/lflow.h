@@ -35,11 +35,14 @@
 
 #include <stdint.h>
 
-struct chassis_index;
-struct controller_ctx;
 struct ovn_extend_table;
+struct ovsdb_idl_index;
 struct hmap;
 struct sbrec_chassis;
+struct sbrec_dhcp_options_table;
+struct sbrec_dhcpv6_options_table;
+struct sbrec_logical_flow_table;
+struct sbrec_mac_binding_table;
 struct simap;
 struct sset;
 struct uuid;
@@ -62,17 +65,22 @@ struct uuid;
 #define LOG_PIPELINE_LEN 24
 
 void lflow_init(void);
-void lflow_run(struct controller_ctx *,
+void lflow_run(struct ovsdb_idl_index *sbrec_chassis_by_name,
+               struct ovsdb_idl_index *sbrec_multicast_group_by_name_datapath,
+               struct ovsdb_idl_index *sbrec_port_binding_by_name,
+               const struct sbrec_dhcp_options_table *,
+               const struct sbrec_dhcpv6_options_table *,
+               const struct sbrec_logical_flow_table *,
+               const struct sbrec_mac_binding_table *,
                const struct sbrec_chassis *chassis,
-               const struct chassis_index *,
                const struct hmap *local_datapaths,
-               struct ovn_extend_table *group_table,
-               struct ovn_extend_table *meter_table,
                const struct shash *addr_sets,
                const struct shash *port_groups,
+               const struct sset *active_tunnels,
+               const struct sset *local_lport_ids,
                struct hmap *flow_table,
-               struct sset *active_tunnels,
-               struct sset *local_lport_ids);
+               struct ovn_extend_table *group_table,
+               struct ovn_extend_table *meter_table);
 void lflow_destroy(void);
 
 #endif /* ovn/lflow.h */

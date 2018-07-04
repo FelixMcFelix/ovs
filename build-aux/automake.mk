@@ -4,6 +4,8 @@ EXTRA_DIST += \
 	build-aux/cksum-schema-check \
 	build-aux/dist-docs \
 	build-aux/dpdkstrip.py \
+	build-aux/generate-dhparams-c \
+	build-aux/initial-tab-whitelist \
 	build-aux/sodepends.py \
 	build-aux/soexpand.py \
 	build-aux/text2c \

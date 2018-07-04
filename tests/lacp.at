@@ -21,30 +21,30 @@ ovs-appctl time/warp 300 100
 
 AT_CHECK([ovs-appctl lacp/show], [0], [dnl
 ---- p1 ----
-	status: active negotiated
-	sys_id: aa:55:aa:55:00:00
-	sys_priority: 65535
-	aggregation key: 1
-	lacp_time: slow
+  status: active negotiated
+  sys_id: aa:55:aa:55:00:00
+  sys_priority: 65535
+  aggregation key: 1
+  lacp_time: slow
 
 slave: p1: expired attached
-	port_id: 1
-	port_priority: 65535
-	may_enable: false
+  port_id: 1
+  port_priority: 65535
+  may_enable: false
 
-	actor sys_id: aa:55:aa:55:00:00
-	actor sys_priority: 65535
-	actor port_id: 1
-	actor port_priority: 65535
-	actor key: 1
-	actor state: activity synchronized collecting distributing expired
+  actor sys_id: aa:55:aa:55:00:00
+  actor sys_priority: 65535
+  actor port_id: 1
+  actor port_priority: 65535
+  actor key: 1
+  actor state: activity synchronized collecting distributing expired
 
-	partner sys_id: 00:00:00:00:00:00
-	partner sys_priority: 0
-	partner port_id: 0
-	partner port_priority: 0
-	partner key: 0
-	partner state: timeout
+  partner sys_id: 00:00:00:00:00:00
+  partner sys_priority: 0
+  partner port_id: 0
+  partner port_priority: 0
+  partner key: 0
+  partner state: timeout
 ])
 AT_CHECK([ovs-appctl bond/show])
 OVS_VSWITCHD_STOP
@@ -72,49 +72,49 @@ ovs-appctl time/warp 300 100
 AT_CHECK([ovs-appctl lacp/show], [0], [stdout])
 AT_CHECK([sed -e 's/aggregation key:.*/aggregation key: <omitted>/' < stdout], [0], [dnl
 ---- bond ----
-	status: active negotiated
-	sys_id: 11:22:33:44:55:66
-	sys_priority: 54321
-	aggregation key: <omitted>
-	lacp_time: fast
+  status: active negotiated
+  sys_id: 11:22:33:44:55:66
+  sys_priority: 54321
+  aggregation key: <omitted>
+  lacp_time: fast
 
 slave: p1: expired attached
-	port_id: 11
-	port_priority: 111
-	may_enable: false
+  port_id: 11
+  port_priority: 111
+  may_enable: false
 
-	actor sys_id: 11:22:33:44:55:66
-	actor sys_priority: 54321
-	actor port_id: 11
-	actor port_priority: 111
-	actor key: 3333
-	actor state: activity timeout aggregation synchronized collecting distributing expired
+  actor sys_id: 11:22:33:44:55:66
+  actor sys_priority: 54321
+  actor port_id: 11
+  actor port_priority: 111
+  actor key: 3333
+  actor state: activity timeout aggregation synchronized collecting distributing expired
 
-	partner sys_id: 00:00:00:00:00:00
-	partner sys_priority: 0
-	partner port_id: 0
-	partner port_priority: 0
-	partner key: 0
-	partner state: timeout
+  partner sys_id: 00:00:00:00:00:00
+  partner sys_priority: 0
+  partner port_id: 0
+  partner port_priority: 0
+  partner key: 0
+  partner state: timeout
 
 slave: p2: expired attached
-	port_id: 22
-	port_priority: 222
-	may_enable: false
+  port_id: 22
+  port_priority: 222
+  may_enable: false
 
-	actor sys_id: 11:22:33:44:55:66
-	actor sys_priority: 54321
-	actor port_id: 22
-	actor port_priority: 222
-	actor key: 3333
-	actor state: activity timeout aggregation synchronized collecting distributing expired
+  actor sys_id: 11:22:33:44:55:66
+  actor sys_priority: 54321
+  actor port_id: 22
+  actor port_priority: 222
+  actor key: 3333
+  actor state: activity timeout aggregation synchronized collecting distributing expired
 
-	partner sys_id: 00:00:00:00:00:00
-	partner sys_priority: 0
-	partner port_id: 0
-	partner port_priority: 0
-	partner key: 0
-	partner state: timeout
+  partner sys_id: 00:00:00:00:00:00
+  partner sys_priority: 0
+  partner port_id: 0
+  partner port_priority: 0
+  partner key: 0
+  partner state: timeout
 ])
 AT_CHECK([ovs-appctl bond/show], [0], [dnl
 ---- bond ----
@@ -128,10 +128,10 @@ lacp_fallback_ab: false
 active slave mac: 00:00:00:00:00:00(none)
 
 slave p1: disabled
-	may_enable: false
+  may_enable: false
 
 slave p2: disabled
-	may_enable: false
+  may_enable: false
 
 ])
 OVS_VSWITCHD_STOP
@@ -195,93 +195,93 @@ ovs-appctl bond/show bond0 | STRIP_RECIRC_ID | STRIP_ACTIVE_SLAVE_MAC
 ovs-appctl bond/show bond1 | STRIP_RECIRC_ID | STRIP_ACTIVE_SLAVE_MAC ], [0], [stdout])
 AT_CHECK([sed '/active slave/d' stdout], [0], [dnl
 ---- bond0 ----
-	status: active negotiated
-	sys_id: aa:55:aa:55:00:00
-	sys_priority: 65534
-	aggregation key: 2
-	lacp_time: fast
+  status: active negotiated
+  sys_id: aa:55:aa:55:00:00
+  sys_priority: 65534
+  aggregation key: 2
+  lacp_time: fast
 
 slave: p0: current attached
-	port_id: 1
-	port_priority: 65535
-	may_enable: true
+  port_id: 1
+  port_priority: 65535
+  may_enable: true
 
-	actor sys_id: aa:55:aa:55:00:00
-	actor sys_priority: 65534
-	actor port_id: 1
-	actor port_priority: 65535
-	actor key: 2
-	actor state: activity timeout aggregation synchronized collecting distributing
+  actor sys_id: aa:55:aa:55:00:00
+  actor sys_priority: 65534
+  actor port_id: 1
+  actor port_priority: 65535
+  actor key: 2
+  actor state: activity timeout aggregation synchronized collecting distributing
 
-	partner sys_id: aa:66:aa:66:00:00
-	partner sys_priority: 65534
-	partner port_id: 3
-	partner port_priority: 65535
-	partner key: 4
-	partner state: activity timeout aggregation synchronized collecting distributing
+  partner sys_id: aa:66:aa:66:00:00
+  partner sys_priority: 65534
+  partner port_id: 3
+  partner port_priority: 65535
+  partner key: 4
+  partner state: activity timeout aggregation synchronized collecting distributing
 
 slave: p1: current attached
-	port_id: 2
-	port_priority: 65535
-	may_enable: true
+  port_id: 2
+  port_priority: 65535
+  may_enable: true
 
-	actor sys_id: aa:55:aa:55:00:00
-	actor sys_priority: 65534
-	actor port_id: 2
-	actor port_priority: 65535
-	actor key: 2
-	actor state: activity timeout aggregation synchronized collecting distributing
+  actor sys_id: aa:55:aa:55:00:00
+  actor sys_priority: 65534
+  actor port_id: 2
+  actor port_priority: 65535
+  actor key: 2
+  actor state: activity timeout aggregation synchronized collecting distributing
 
-	partner sys_id: aa:66:aa:66:00:00
-	partner sys_priority: 65534
-	partner port_id: 4
-	partner port_priority: 65535
-	partner key: 4
-	partner state: activity timeout aggregation synchronized collecting distributing
+  partner sys_id: aa:66:aa:66:00:00
+  partner sys_priority: 65534
+  partner port_id: 4
+  partner port_priority: 65535
+  partner key: 4
+  partner state: activity timeout aggregation synchronized collecting distributing
 ---- bond1 ----
-	status: active negotiated
-	sys_id: aa:66:aa:66:00:00
-	sys_priority: 65534
-	aggregation key: 4
-	lacp_time: fast
+  status: active negotiated
+  sys_id: aa:66:aa:66:00:00
+  sys_priority: 65534
+  aggregation key: 4
+  lacp_time: fast
 
 slave: p2: current attached
-	port_id: 3
-	port_priority: 65535
-	may_enable: true
+  port_id: 3
+  port_priority: 65535
+  may_enable: true
 
-	actor sys_id: aa:66:aa:66:00:00
-	actor sys_priority: 65534
-	actor port_id: 3
-	actor port_priority: 65535
-	actor key: 4
-	actor state: activity timeout aggregation synchronized collecting distributing
+  actor sys_id: aa:66:aa:66:00:00
+  actor sys_priority: 65534
+  actor port_id: 3
+  actor port_priority: 65535
+  actor key: 4
+  actor state: activity timeout aggregation synchronized collecting distributing
 
-	partner sys_id: aa:55:aa:55:00:00
-	partner sys_priority: 65534
-	partner port_id: 1
-	partner port_priority: 65535
-	partner key: 2
-	partner state: activity timeout aggregation synchronized collecting distributing
+  partner sys_id: aa:55:aa:55:00:00
+  partner sys_priority: 65534
+  partner port_id: 1
+  partner port_priority: 65535
+  partner key: 2
+  partner state: activity timeout aggregation synchronized collecting distributing
 
 slave: p3: current attached
-	port_id: 4
-	port_priority: 65535
-	may_enable: true
+  port_id: 4
+  port_priority: 65535
+  may_enable: true
 
-	actor sys_id: aa:66:aa:66:00:00
-	actor sys_priority: 65534
-	actor port_id: 4
-	actor port_priority: 65535
-	actor key: 4
-	actor state: activity timeout aggregation synchronized collecting distributing
+  actor sys_id: aa:66:aa:66:00:00
+  actor sys_priority: 65534
+  actor port_id: 4
+  actor port_priority: 65535
+  actor key: 4
+  actor state: activity timeout aggregation synchronized collecting distributing
 
-	partner sys_id: aa:55:aa:55:00:00
-	partner sys_priority: 65534
-	partner port_id: 2
-	partner port_priority: 65535
-	partner key: 2
-	partner state: activity timeout aggregation synchronized collecting distributing
+  partner sys_id: aa:55:aa:55:00:00
+  partner sys_priority: 65534
+  partner port_id: 2
+  partner port_priority: 65535
+  partner key: 2
+  partner state: activity timeout aggregation synchronized collecting distributing
 ---- bond0 ----
 bond_mode: balance-tcp
 bond may use recirculation: yes, <del>
@@ -292,10 +292,10 @@ lacp_status: negotiated
 lacp_fallback_ab: false
 
 slave p0: enabled
-	may_enable: true
+  may_enable: true
 
 slave p1: enabled
-	may_enable: true
+  may_enable: true
 
 ---- bond1 ----
 bond_mode: balance-tcp
@@ -307,15 +307,15 @@ lacp_status: negotiated
 lacp_fallback_ab: false
 
 slave p2: enabled
-	may_enable: true
+  may_enable: true
 
 slave p3: enabled
-	may_enable: true
+  may_enable: true
 
 ])
 AT_CHECK([grep 'active slave$' stdout], [0], [dnl
-	active slave
-	active slave
+  active slave
+  active slave
 ])
 
 # Redirect the patch link between p0 and p2 so that no packets get
@@ -332,93 +332,93 @@ ovs-appctl lacp/show bond1
 ovs-appctl bond/show bond0 | STRIP_RECIRC_ID | STRIP_ACTIVE_SLAVE_MAC
 ovs-appctl bond/show bond1 | STRIP_RECIRC_ID | STRIP_ACTIVE_SLAVE_MAC ], [0], [dnl
 ---- bond0 ----
-	status: active negotiated
-	sys_id: aa:55:aa:55:00:00
-	sys_priority: 65534
-	aggregation key: 2
-	lacp_time: fast
+  status: active negotiated
+  sys_id: aa:55:aa:55:00:00
+  sys_priority: 65534
+  aggregation key: 2
+  lacp_time: fast
 
 slave: p0: expired attached
-	port_id: 1
-	port_priority: 65535
-	may_enable: false
+  port_id: 1
+  port_priority: 65535
+  may_enable: false
 
-	actor sys_id: aa:55:aa:55:00:00
-	actor sys_priority: 65534
-	actor port_id: 1
-	actor port_priority: 65535
-	actor key: 2
-	actor state: activity timeout aggregation synchronized collecting distributing expired
+  actor sys_id: aa:55:aa:55:00:00
+  actor sys_priority: 65534
+  actor port_id: 1
+  actor port_priority: 65535
+  actor key: 2
+  actor state: activity timeout aggregation synchronized collecting distributing expired
 
-	partner sys_id: aa:66:aa:66:00:00
-	partner sys_priority: 65534
-	partner port_id: 3
-	partner port_priority: 65535
-	partner key: 4
-	partner state: activity timeout aggregation collecting distributing
+  partner sys_id: aa:66:aa:66:00:00
+  partner sys_priority: 65534
+  partner port_id: 3
+  partner port_priority: 65535
+  partner key: 4
+  partner state: activity timeout aggregation collecting distributing
 
 slave: p1: current attached
-	port_id: 2
-	port_priority: 65535
-	may_enable: true
+  port_id: 2
+  port_priority: 65535
+  may_enable: true
 
-	actor sys_id: aa:55:aa:55:00:00
-	actor sys_priority: 65534
-	actor port_id: 2
-	actor port_priority: 65535
-	actor key: 2
-	actor state: activity timeout aggregation synchronized collecting distributing
+  actor sys_id: aa:55:aa:55:00:00
+  actor sys_priority: 65534
+  actor port_id: 2
+  actor port_priority: 65535
+  actor key: 2
+  actor state: activity timeout aggregation synchronized collecting distributing
 
-	partner sys_id: aa:66:aa:66:00:00
-	partner sys_priority: 65534
-	partner port_id: 4
-	partner port_priority: 65535
-	partner key: 4
-	partner state: activity timeout aggregation synchronized collecting distributing
+  partner sys_id: aa:66:aa:66:00:00
+  partner sys_priority: 65534
+  partner port_id: 4
+  partner port_priority: 65535
+  partner key: 4
+  partner state: activity timeout aggregation synchronized collecting distributing
 ---- bond1 ----
-	status: active negotiated
-	sys_id: aa:66:aa:66:00:00
-	sys_priority: 65534
-	aggregation key: 4
-	lacp_time: fast
+  status: active negotiated
+  sys_id: aa:66:aa:66:00:00
+  sys_priority: 65534
+  aggregation key: 4
+  lacp_time: fast
 
 slave: p2: expired attached
-	port_id: 3
-	port_priority: 65535
-	may_enable: false
+  port_id: 3
+  port_priority: 65535
+  may_enable: false
 
-	actor sys_id: aa:66:aa:66:00:00
-	actor sys_priority: 65534
-	actor port_id: 3
-	actor port_priority: 65535
-	actor key: 4
-	actor state: activity timeout aggregation synchronized collecting distributing expired
+  actor sys_id: aa:66:aa:66:00:00
+  actor sys_priority: 65534
+  actor port_id: 3
+  actor port_priority: 65535
+  actor key: 4
+  actor state: activity timeout aggregation synchronized collecting distributing expired
 
-	partner sys_id: aa:55:aa:55:00:00
-	partner sys_priority: 65534
-	partner port_id: 1
-	partner port_priority: 65535
-	partner key: 2
-	partner state: activity timeout aggregation collecting distributing
+  partner sys_id: aa:55:aa:55:00:00
+  partner sys_priority: 65534
+  partner port_id: 1
+  partner port_priority: 65535
+  partner key: 2
+  partner state: activity timeout aggregation collecting distributing
 
 slave: p3: current attached
-	port_id: 4
-	port_priority: 65535
-	may_enable: true
+  port_id: 4
+  port_priority: 65535
+  may_enable: true
 
-	actor sys_id: aa:66:aa:66:00:00
-	actor sys_priority: 65534
-	actor port_id: 4
-	actor port_priority: 65535
-	actor key: 4
-	actor state: activity timeout aggregation synchronized collecting distributing
+  actor sys_id: aa:66:aa:66:00:00
+  actor sys_priority: 65534
+  actor port_id: 4
+  actor port_priority: 65535
+  actor key: 4
+  actor state: activity timeout aggregation synchronized collecting distributing
 
-	partner sys_id: aa:55:aa:55:00:00
-	partner sys_priority: 65534
-	partner port_id: 2
-	partner port_priority: 65535
-	partner key: 2
-	partner state: activity timeout aggregation synchronized collecting distributing
+  partner sys_id: aa:55:aa:55:00:00
+  partner sys_priority: 65534
+  partner port_id: 2
+  partner port_priority: 65535
+  partner key: 2
+  partner state: activity timeout aggregation synchronized collecting distributing
 ---- bond0 ----
 bond_mode: balance-tcp
 bond may use recirculation: yes, <del>
@@ -430,11 +430,11 @@ lacp_fallback_ab: false
 <active slave mac del>
 
 slave p0: disabled
-	may_enable: false
+  may_enable: false
 
 slave p1: enabled
-	active slave
-	may_enable: true
+  active slave
+  may_enable: true
 
 ---- bond1 ----
 bond_mode: balance-tcp
@@ -447,11 +447,11 @@ lacp_fallback_ab: false
 <active slave mac del>
 
 slave p2: disabled
-	may_enable: false
+  may_enable: false
 
 slave p3: enabled
-	active slave
-	may_enable: true
+  active slave
+  may_enable: true
 
 ])
 
@@ -464,93 +464,93 @@ ovs-appctl lacp/show bond1
 ovs-appctl bond/show bond0 | STRIP_RECIRC_ID | STRIP_ACTIVE_SLAVE_MAC
 ovs-appctl bond/show bond1 | STRIP_RECIRC_ID | STRIP_ACTIVE_SLAVE_MAC ], [0], [dnl
 ---- bond0 ----
-	status: active negotiated
-	sys_id: aa:55:aa:55:00:00
-	sys_priority: 65534
-	aggregation key: 2
-	lacp_time: fast
+  status: active negotiated
+  sys_id: aa:55:aa:55:00:00
+  sys_priority: 65534
+  aggregation key: 2
+  lacp_time: fast
 
 slave: p0: defaulted detached
-	port_id: 1
-	port_priority: 65535
-	may_enable: false
+  port_id: 1
+  port_priority: 65535
+  may_enable: false
 
-	actor sys_id: aa:55:aa:55:00:00
-	actor sys_priority: 65534
-	actor port_id: 1
-	actor port_priority: 65535
-	actor key: 2
-	actor state: activity timeout aggregation defaulted
+  actor sys_id: aa:55:aa:55:00:00
+  actor sys_priority: 65534
+  actor port_id: 1
+  actor port_priority: 65535
+  actor key: 2
+  actor state: activity timeout aggregation defaulted
 
-	partner sys_id: 00:00:00:00:00:00
-	partner sys_priority: 0
-	partner port_id: 0
-	partner port_priority: 0
-	partner key: 0
-	partner state:
+  partner sys_id: 00:00:00:00:00:00
+  partner sys_priority: 0
+  partner port_id: 0
+  partner port_priority: 0
+  partner key: 0
+  partner state:
 
 slave: p1: current attached
-	port_id: 2
-	port_priority: 65535
-	may_enable: true
+  port_id: 2
+  port_priority: 65535
+  may_enable: true
 
-	actor sys_id: aa:55:aa:55:00:00
-	actor sys_priority: 65534
-	actor port_id: 2
-	actor port_priority: 65535
-	actor key: 2
-	actor state: activity timeout aggregation synchronized collecting distributing
+  actor sys_id: aa:55:aa:55:00:00
+  actor sys_priority: 65534
+  actor port_id: 2
+  actor port_priority: 65535
+  actor key: 2
+  actor state: activity timeout aggregation synchronized collecting distributing
 
-	partner sys_id: aa:66:aa:66:00:00
-	partner sys_priority: 65534
-	partner port_id: 4
-	partner port_priority: 65535
-	partner key: 4
-	partner state: activity timeout aggregation synchronized collecting distributing
+  partner sys_id: aa:66:aa:66:00:00
+  partner sys_priority: 65534
+  partner port_id: 4
+  partner port_priority: 65535
+  partner key: 4
+  partner state: activity timeout aggregation synchronized collecting distributing
 ---- bond1 ----
-	status: active negotiated
-	sys_id: aa:66:aa:66:00:00
-	sys_priority: 65534
-	aggregation key: 4
-	lacp_time: fast
+  status: active negotiated
+  sys_id: aa:66:aa:66:00:00
+  sys_priority: 65534
+  aggregation key: 4
+  lacp_time: fast
 
 slave: p2: defaulted detached
-	port_id: 3
-	port_priority: 65535
-	may_enable: false
+  port_id: 3
+  port_priority: 65535
+  may_enable: false
 
-	actor sys_id: aa:66:aa:66:00:00
-	actor sys_priority: 65534
-	actor port_id: 3
-	actor port_priority: 65535
-	actor key: 4
-	actor state: activity timeout aggregation defaulted
+  actor sys_id: aa:66:aa:66:00:00
+  actor sys_priority: 65534
+  actor port_id: 3
+  actor port_priority: 65535
+  actor key: 4
+  actor state: activity timeout aggregation defaulted
 
-	partner sys_id: 00:00:00:00:00:00
-	partner sys_priority: 0
-	partner port_id: 0
-	partner port_priority: 0
-	partner key: 0
-	partner state:
+  partner sys_id: 00:00:00:00:00:00
+  partner sys_priority: 0
+  partner port_id: 0
+  partner port_priority: 0
+  partner key: 0
+  partner state:
 
 slave: p3: current attached
-	port_id: 4
-	port_priority: 65535
-	may_enable: true
+  port_id: 4
+  port_priority: 65535
+  may_enable: true
 
-	actor sys_id: aa:66:aa:66:00:00
-	actor sys_priority: 65534
-	actor port_id: 4
-	actor port_priority: 65535
-	actor key: 4
-	actor state: activity timeout aggregation synchronized collecting distributing
+  actor sys_id: aa:66:aa:66:00:00
+  actor sys_priority: 65534
+  actor port_id: 4
+  actor port_priority: 65535
+  actor key: 4
+  actor state: activity timeout aggregation synchronized collecting distributing
 
-	partner sys_id: aa:55:aa:55:00:00
-	partner sys_priority: 65534
-	partner port_id: 2
-	partner port_priority: 65535
-	partner key: 2
-	partner state: activity timeout aggregation synchronized collecting distributing
+  partner sys_id: aa:55:aa:55:00:00
+  partner sys_priority: 65534
+  partner port_id: 2
+  partner port_priority: 65535
+  partner key: 2
+  partner state: activity timeout aggregation synchronized collecting distributing
 ---- bond0 ----
 bond_mode: balance-tcp
 bond may use recirculation: yes, <del>
@@ -562,11 +562,11 @@ lacp_fallback_ab: false
 <active slave mac del>
 
 slave p0: disabled
-	may_enable: false
+  may_enable: false
 
 slave p1: enabled
-	active slave
-	may_enable: true
+  active slave
+  may_enable: true
 
 ---- bond1 ----
 bond_mode: balance-tcp
@@ -579,11 +579,11 @@ lacp_fallback_ab: false
 <active slave mac del>
 
 slave p2: disabled
-	may_enable: false
+  may_enable: false
 
 slave p3: enabled
-	active slave
-	may_enable: true
+  active slave
+  may_enable: true
 
 ])
 
@@ -601,93 +601,93 @@ ovs-appctl lacp/show bond1
 ovs-appctl bond/show bond0 | STRIP_RECIRC_ID | STRIP_ACTIVE_SLAVE_MAC
 ovs-appctl bond/show bond1 | STRIP_RECIRC_ID | STRIP_ACTIVE_SLAVE_MAC ], [0], [dnl
 ---- bond0 ----
-	status: active negotiated
-	sys_id: aa:55:aa:55:00:00
-	sys_priority: 65534
-	aggregation key: 2
-	lacp_time: fast
+  status: active negotiated
+  sys_id: aa:55:aa:55:00:00
+  sys_priority: 65534
+  aggregation key: 2
+  lacp_time: fast
 
 slave: p0: current attached
-	port_id: 1
-	port_priority: 65535
-	may_enable: true
+  port_id: 1
+  port_priority: 65535
+  may_enable: true
 
-	actor sys_id: aa:55:aa:55:00:00
-	actor sys_priority: 65534
-	actor port_id: 1
-	actor port_priority: 65535
-	actor key: 2
-	actor state: activity timeout aggregation synchronized collecting distributing
+  actor sys_id: aa:55:aa:55:00:00
+  actor sys_priority: 65534
+  actor port_id: 1
+  actor port_priority: 65535
+  actor key: 2
+  actor state: activity timeout aggregation synchronized collecting distributing
 
-	partner sys_id: aa:66:aa:66:00:00
-	partner sys_priority: 65534
-	partner port_id: 3
-	partner port_priority: 65535
-	partner key: 4
-	partner state: activity timeout aggregation synchronized collecting distributing
+  partner sys_id: aa:66:aa:66:00:00
+  partner sys_priority: 65534
+  partner port_id: 3
+  partner port_priority: 65535
+  partner key: 4
+  partner state: activity timeout aggregation synchronized collecting distributing
 
 slave: p1: current attached
-	port_id: 2
-	port_priority: 65535
-	may_enable: true
+  port_id: 2
+  port_priority: 65535
+  may_enable: true
 
-	actor sys_id: aa:55:aa:55:00:00
-	actor sys_priority: 65534
-	actor port_id: 2
-	actor port_priority: 65535
-	actor key: 2
-	actor state: activity timeout aggregation synchronized collecting distributing
+  actor sys_id: aa:55:aa:55:00:00
+  actor sys_priority: 65534
+  actor port_id: 2
+  actor port_priority: 65535
+  actor key: 2
+  actor state: activity timeout aggregation synchronized collecting distributing
 
-	partner sys_id: aa:66:aa:66:00:00
-	partner sys_priority: 65534
-	partner port_id: 4
-	partner port_priority: 65535
-	partner key: 4
-	partner state: activity timeout aggregation synchronized collecting distributing
+  partner sys_id: aa:66:aa:66:00:00
+  partner sys_priority: 65534
+  partner port_id: 4
+  partner port_priority: 65535
+  partner key: 4
+  partner state: activity timeout aggregation synchronized collecting distributing
 ---- bond1 ----
-	status: active negotiated
-	sys_id: aa:66:aa:66:00:00
-	sys_priority: 65534
-	aggregation key: 4
-	lacp_time: fast
+  status: active negotiated
+  sys_id: aa:66:aa:66:00:00
+  sys_priority: 65534
+  aggregation key: 4
+  lacp_time: fast
 
 slave: p2: current attached
-	port_id: 3
-	port_priority: 65535
-	may_enable: true
+  port_id: 3
+  port_priority: 65535
+  may_enable: true
 
-	actor sys_id: aa:66:aa:66:00:00
-	actor sys_priority: 65534
-	actor port_id: 3
-	actor port_priority: 65535
-	actor key: 4
-	actor state: activity timeout aggregation synchronized collecting distributing
+  actor sys_id: aa:66:aa:66:00:00
+  actor sys_priority: 65534
+  actor port_id: 3
+  actor port_priority: 65535
+  actor key: 4
+  actor state: activity timeout aggregation synchronized collecting distributing
 
-	partner sys_id: aa:55:aa:55:00:00
-	partner sys_priority: 65534
-	partner port_id: 1
-	partner port_priority: 65535
-	partner key: 2
-	partner state: activity timeout aggregation synchronized collecting distributing
+  partner sys_id: aa:55:aa:55:00:00
+  partner sys_priority: 65534
+  partner port_id: 1
+  partner port_priority: 65535
+  partner key: 2
+  partner state: activity timeout aggregation synchronized collecting distributing
 
 slave: p3: current attached
-	port_id: 4
-	port_priority: 65535
-	may_enable: true
+  port_id: 4
+  port_priority: 65535
+  may_enable: true
 
-	actor sys_id: aa:66:aa:66:00:00
-	actor sys_priority: 65534
-	actor port_id: 4
-	actor port_priority: 65535
-	actor key: 4
-	actor state: activity timeout aggregation synchronized collecting distributing
+  actor sys_id: aa:66:aa:66:00:00
+  actor sys_priority: 65534
+  actor port_id: 4
+  actor port_priority: 65535
+  actor key: 4
+  actor state: activity timeout aggregation synchronized collecting distributing
 
-	partner sys_id: aa:55:aa:55:00:00
-	partner sys_priority: 65534
-	partner port_id: 2
-	partner port_priority: 65535
-	partner key: 2
-	partner state: activity timeout aggregation synchronized collecting distributing
+  partner sys_id: aa:55:aa:55:00:00
+  partner sys_priority: 65534
+  partner port_id: 2
+  partner port_priority: 65535
+  partner key: 2
+  partner state: activity timeout aggregation synchronized collecting distributing
 ---- bond0 ----
 bond_mode: balance-tcp
 bond may use recirculation: yes, <del>
@@ -699,11 +699,11 @@ lacp_fallback_ab: false
 <active slave mac del>
 
 slave p0: enabled
-	may_enable: true
+  may_enable: true
 
 slave p1: enabled
-	active slave
-	may_enable: true
+  active slave
+  may_enable: true
 
 ---- bond1 ----
 bond_mode: balance-tcp
@@ -716,11 +716,11 @@ lacp_fallback_ab: false
 <active slave mac del>
 
 slave p2: enabled
-	may_enable: true
+  may_enable: true
 
 slave p3: enabled
-	active slave
-	may_enable: true
+  active slave
+  may_enable: true
 
 ])
 
@@ -735,12 +735,12 @@ check_liveness () {
     printf '\n\n--- check_liveness %d ---\n\n\n' $1
     shift
 
-	echo >>expout "OFPT_PORT_STATUS (OF1.3): MOD: 1(p0): addr:
+        echo >>expout "OFPT_PORT_STATUS (OF1.3): MOD: 1(p0): addr:
      config:     0
      state:      $1
      speed: 0 Mbps now, 0 Mbps max"
 
-	AT_CHECK(
+        AT_CHECK(
       [[sed '
 s/ (xid=0x[0-9a-fA-F]*)//
 s/ *duration.*//
@@ -831,12 +831,12 @@ check_liveness () {
     printf '\n\n--- check_liveness %d ---\n\n\n' $1
     shift
 
-	echo >>expout "OFPT_PORT_STATUS (OF1.4): MOD: 1(p0): addr:
+        echo >>expout "OFPT_PORT_STATUS (OF1.4): MOD: 1(p0): addr:
      config:     0
      state:      $1
      speed: 0 Mbps now, 0 Mbps max"
 
-	AT_CHECK(
+        AT_CHECK(
       [[sed '
 s/ (xid=0x[0-9a-fA-F]*)//
 s/ *duration.*//
@@ -927,12 +927,12 @@ check_liveness () {
     printf '\n\n--- check_liveness %d ---\n\n\n' $1
     shift
 
-	echo >>expout "OFPT_PORT_STATUS (OF1.5): MOD: 1(p0): addr:
+        echo >>expout "OFPT_PORT_STATUS (OF1.5): MOD: 1(p0): addr:
      config:     0
      state:      $1
      speed: 0 Mbps now, 0 Mbps max"
 
-	AT_CHECK(
+        AT_CHECK(
       [[sed '
 s/ (xid=0x[0-9a-fA-F]*)//
 s/ *duration.*//

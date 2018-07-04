@@ -27,13 +27,13 @@
 
 #include "openvswitch/meta-flow.h"
 
-struct controller_ctx;
 struct hmap;
-struct ovsdb_idl;
+struct ovsdb_idl_index;
 struct ovsrec_bridge;
 struct simap;
+struct sbrec_multicast_group_table;
+struct sbrec_port_binding_table;
 struct sset;
-struct chassis_index;
 
 /* OVN Geneve option information.
  *
@@ -43,13 +43,17 @@ struct chassis_index;
 #define OVN_GENEVE_LEN 4
 
 void physical_register_ovs_idl(struct ovsdb_idl *);
-void physical_run(struct controller_ctx *, enum mf_field_id mff_ovn_geneve,
+void physical_run(struct ovsdb_idl_index *sbrec_chassis_by_name,
+                  struct ovsdb_idl_index *sbrec_port_binding_by_name,
+                  const struct sbrec_multicast_group_table *,
+                  const struct sbrec_port_binding_table *,
+                  enum mf_field_id mff_ovn_geneve,
                   const struct ovsrec_bridge *br_int,
                   const struct sbrec_chassis *chassis,
                   const struct simap *ct_zones,
-                  struct hmap *flow_table, struct hmap *local_datapaths,
+                  const struct hmap *local_datapaths,
                   const struct sset *local_lports,
-                  struct chassis_index *chassis_index,
-                  struct sset *active_tunnels);
+                  const struct sset *active_tunnels,
+                  struct hmap *flow_table);
 
 #endif /* ovn/physical.h */

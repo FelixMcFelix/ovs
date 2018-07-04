@@ -59,6 +59,8 @@ void ctl_init__(const struct ovsdb_idl_class *, const struct ctl_table_class *,
                 const struct cmd_show_table *cmd_show_tables,
                 void (*ctl_exit_func)(int status));
 char *ctl_default_db(void);
+void ctl_error(struct ctl_context *, const char *, ...)
+OVS_PRINTF_FORMAT(2, 3);
 OVS_NO_RETURN void ctl_fatal(const char *, ...) OVS_PRINTF_FORMAT(1, 2);
 
 /* *ctl command syntax structure, to be defined by each command implementation.
@@ -222,6 +224,7 @@ struct ctl_context {
     struct shash options;
 
     /* Modifiable state. */
+    char *error;
     struct ds output;
     struct table *table;
     struct ovsdb_idl *idl;
@@ -269,13 +272,11 @@ struct ctl_table_class {
     struct ctl_row_id row_ids[4];
 };
 
-const struct ovsdb_idl_row *ctl_get_row(struct ctl_context *,
-                                        const struct ovsdb_idl_table_class *,
-                                        const char *record_id,
-                                        bool must_exist);
+char *ctl_get_row(struct ctl_context *, const struct ovsdb_idl_table_class *,
+                  const char *record_id, bool must_exist,
+                  const struct ovsdb_idl_row **);
 
-void ctl_set_column(const char *table_name,
-                    const struct ovsdb_idl_row *, const char *arg,
-                    struct ovsdb_symbol_table *);
+char *ctl_set_column(const char *table_name, const struct ovsdb_idl_row *,
+                     const char *arg, struct ovsdb_symbol_table *);
 
 #endif /* db-ctl-base.h */

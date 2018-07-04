@@ -233,6 +233,18 @@ enum {
     VALID_FEATURES          = 1 << 7,
 };
 
+struct linux_lag_slave {
+   uint32_t block_id;
+   struct shash_node *node;
+};
+
+/* Protects 'lag_shash' and the mutable members of struct linux_lag_slave. */
+static struct ovs_mutex lag_mutex = OVS_MUTEX_INITIALIZER;
+
+/* All slaves whose LAG masters are network devices in OvS. */
+static struct shash lag_shash OVS_GUARDED_BY(lag_mutex)
+    = SHASH_INITIALIZER(&lag_shash);
+
 /* Traffic control. */
 
 /* An instance of a traffic control class.  Always associated with a particular
@@ -509,6 +521,9 @@ struct netdev_linux {
     int tap_fd;
     bool present;               /* If the device is present in the namespace */
     uint64_t tx_dropped;        /* tap device can drop if the iface is down */
+
+    /* LAG information. */
+    bool is_lag_master;         /* True if the netdev is a LAG master. */
 };
 
 struct netdev_rxq_linux {
@@ -587,7 +602,13 @@ netdev_linux_netnsid_update__(struct netdev_linux *netdev)
 
     error = dpif_netlink_vport_get(netdev_get_name(&netdev->up), &reply, &buf);
     if (error) {
-        netnsid_unset(&netdev->netnsid);
+        if (error == ENOENT) {
+            /* Assume it is local if there is no API (e.g. if the openvswitch
+             * kernel module is not loaded). */
+            netnsid_set_local(&netdev->netnsid);
+        } else {
+            netnsid_unset(&netdev->netnsid);
+        }
         return error;
     }
 
@@ -600,7 +621,11 @@ static int
 netdev_linux_netnsid_update(struct netdev_linux *netdev)
 {
     if (netnsid_is_unset(netdev->netnsid)) {
-        return netdev_linux_netnsid_update__(netdev);
+        if (netdev_get_class(&netdev->up) == &netdev_tap_class) {
+            netnsid_set_local(&netdev->netnsid);
+        } else {
+            return netdev_linux_netnsid_update__(netdev);
+        }
     }
 
     return 0;
@@ -668,6 +693,71 @@ netdev_linux_miimon_enabled(void)
     return atomic_count_get(&miimon_cnt) > 0;
 }
 
+static bool
+netdev_linux_kind_is_lag(const char *kind)
+{
+    if (!strcmp(kind, "bond") || !strcmp(kind, "team")) {
+        return true;
+    }
+
+    return false;
+}
+
+static void
+netdev_linux_update_lag(struct rtnetlink_change *change)
+    OVS_REQUIRES(lag_mutex)
+{
+    struct linux_lag_slave *lag;
+
+    if (!rtnetlink_type_is_rtnlgrp_link(change->nlmsg_type)) {
+        return;
+    }
+
+    if (change->slave && netdev_linux_kind_is_lag(change->slave)) {
+        lag = shash_find_data(&lag_shash, change->ifname);
+
+        if (!lag) {
+            struct netdev *master_netdev;
+            char master_name[IFNAMSIZ];
+            uint32_t block_id;
+            int error = 0;
+
+            if_indextoname(change->master_ifindex, master_name);
+            master_netdev = netdev_from_name(master_name);
+
+            if (is_netdev_linux_class(master_netdev->netdev_class)) {
+                block_id = netdev_get_block_id(master_netdev);
+                if (!block_id) {
+                   return;
+                }
+
+                lag = xmalloc(sizeof *lag);
+                lag->block_id = block_id;
+                lag->node = shash_add(&lag_shash, change->ifname, lag);
+
+                /* LAG master is linux netdev so add slave to same block. */
+                error = tc_add_del_ingress_qdisc(change->if_index, true,
+                                                 block_id);
+                if (error) {
+                    VLOG_WARN("failed to bind LAG slave to master's block");
+                    shash_delete(&lag_shash, lag->node);
+                    free(lag);
+                }
+            }
+        }
+    } else if (change->master_ifindex == 0) {
+        /* Check if this was a lag slave that has been freed. */
+        lag = shash_find_data(&lag_shash, change->ifname);
+
+        if (lag) {
+            tc_add_del_ingress_qdisc(change->if_index, false,
+                                     lag->block_id);
+            shash_delete(&lag_shash, lag->node);
+            free(lag);
+        }
+    }
+}
+
 static void
 netdev_linux_run(const struct netdev_class *netdev_class OVS_UNUSED)
 {
@@ -710,6 +800,12 @@ netdev_linux_run(const struct netdev_class *netdev_class OVS_UNUSED)
                     ovs_mutex_lock(&netdev->mutex);
                     netdev_linux_update(netdev, nsid, &change);
                     ovs_mutex_unlock(&netdev->mutex);
+                }
+                else if (!netdev_ && change.ifname) {
+                    /* Netdev is not present in OvS but its master could be. */
+                    ovs_mutex_lock(&lag_mutex);
+                    netdev_linux_update_lag(&change);
+                    ovs_mutex_unlock(&lag_mutex);
                 }
                 netdev_close(netdev_);
             }
@@ -800,6 +896,10 @@ netdev_linux_update__(struct netdev_linux *dev,
 
                 /* The mac addr has been changed, report it now. */
                 rtnetlink_report_link();
+            }
+
+            if (change->master && netdev_linux_kind_is_lag(change->master)) {
+                dev->is_lag_master = true;
             }
 
             dev->ifindex = change->if_index;
@@ -940,6 +1040,7 @@ netdev_linux_construct_tap(struct netdev *netdev_)
         goto error_close;
     }
 
+    netdev->present = true;
     return 0;
 
 error_close:
@@ -2264,7 +2365,7 @@ netdev_linux_set_policing(struct netdev *netdev_,
 
     COVERAGE_INC(netdev_set_policing);
     /* Remove any existing ingress qdisc. */
-    error = tc_add_del_ingress_qdisc(ifindex, false);
+    error = tc_add_del_ingress_qdisc(ifindex, false, 0);
     if (error) {
         VLOG_WARN_RL(&rl, "%s: removing policing failed: %s",
                      netdev_name, ovs_strerror(error));
@@ -2272,7 +2373,7 @@ netdev_linux_set_policing(struct netdev *netdev_,
     }
 
     if (kbits_rate) {
-        error = tc_add_del_ingress_qdisc(ifindex, true);
+        error = tc_add_del_ingress_qdisc(ifindex, true, 0);
         if (error) {
             VLOG_WARN_RL(&rl, "%s: adding policing qdisc failed: %s",
                          netdev_name, ovs_strerror(error));
@@ -2917,6 +3018,27 @@ netdev_internal_get_status(const struct netdev *netdev OVS_UNUSED,
     return 0;
 }
 
+static uint32_t
+netdev_linux_get_block_id(struct netdev *netdev_)
+{
+    struct netdev_linux *netdev = netdev_linux_cast(netdev_);
+    uint32_t block_id = 0;
+
+    ovs_mutex_lock(&netdev->mutex);
+    /* Ensure the linux netdev has had its fields populated. */
+    if (!(netdev->cache_valid & VALID_IFINDEX)) {
+        netdev_linux_update_via_netlink(netdev);
+    }
+
+    /* Only assigning block ids to linux netdevs that are LAG masters. */
+    if (netdev->is_lag_master) {
+        block_id = netdev->ifindex;
+    }
+    ovs_mutex_unlock(&netdev->mutex);
+
+    return block_id;
+}
+
 /* Looks up the ARP table entry for 'ip' on 'netdev'.  If one exists and can be
  * successfully retrieved, it stores the corresponding MAC address in 'mac' and
  * returns 0.  Otherwise, it returns a positive errno value; in particular,
@@ -3032,7 +3154,7 @@ exit:
 
 #define NETDEV_LINUX_CLASS(NAME, CONSTRUCT, GET_STATS,          \
                            GET_FEATURES, GET_STATUS,            \
-                           FLOW_OFFLOAD_API)                    \
+                           FLOW_OFFLOAD_API, GET_BLOCK_ID)      \
 {                                                               \
     NAME,                                                       \
     false,                      /* is_pmd */                    \
@@ -3104,7 +3226,8 @@ exit:
     netdev_linux_rxq_wait,                                      \
     netdev_linux_rxq_drain,                                     \
                                                                 \
-    FLOW_OFFLOAD_API                                            \
+    FLOW_OFFLOAD_API,                                           \
+    GET_BLOCK_ID                                                \
 }
 
 const struct netdev_class netdev_linux_class =
@@ -3114,7 +3237,8 @@ const struct netdev_class netdev_linux_class =
         netdev_linux_get_stats,
         netdev_linux_get_features,
         netdev_linux_get_status,
-        LINUX_FLOW_OFFLOAD_API);
+        LINUX_FLOW_OFFLOAD_API,
+        netdev_linux_get_block_id);
 
 const struct netdev_class netdev_tap_class =
     NETDEV_LINUX_CLASS(
@@ -3123,7 +3247,8 @@ const struct netdev_class netdev_tap_class =
         netdev_tap_get_stats,
         netdev_linux_get_features,
         netdev_linux_get_status,
-        NO_OFFLOAD_API);
+        NO_OFFLOAD_API,
+        NULL);
 
 const struct netdev_class netdev_internal_class =
     NETDEV_LINUX_CLASS(
@@ -3132,7 +3257,8 @@ const struct netdev_class netdev_internal_class =
         netdev_internal_get_stats,
         NULL,                  /* get_features */
         netdev_internal_get_status,
-        NO_OFFLOAD_API);
+        NO_OFFLOAD_API,
+        NULL);
 
 
 #define CODEL_N_QUEUES 0x0000
@@ -5751,6 +5877,9 @@ netdev_linux_update_via_netlink(struct netdev_linux *netdev)
             netdev->cache_valid |= VALID_IFINDEX;
             netdev->get_ifindex_error = 0;
             changed = true;
+        }
+        if (change->master && netdev_linux_kind_is_lag(change->master)) {
+            netdev->is_lag_master = true;
         }
         if (changed) {
             netdev_change_seq_changed(&netdev->up);

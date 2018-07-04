@@ -63,7 +63,7 @@ tc_get_minor(unsigned int handle)
 struct tcmsg *tc_make_request(int ifindex, int type,
                               unsigned int flags, struct ofpbuf *);
 int tc_transact(struct ofpbuf *request, struct ofpbuf **replyp);
-int tc_add_del_ingress_qdisc(int ifindex, bool add);
+int tc_add_del_ingress_qdisc(int ifindex, bool add, uint32_t block_id);
 
 struct tc_cookie {
     const void *data;
@@ -141,6 +141,12 @@ struct tc_action {
      enum tc_action_type type;
 };
 
+enum tc_offloaded_state {
+    TC_OFFLOADED_STATE_UNDEFINED,
+    TC_OFFLOADED_STATE_IN_HW,
+    TC_OFFLOADED_STATE_NOT_IN_HW,
+};
+
 struct tc_flower {
     uint32_t handle;
     uint32_t prio;
@@ -180,6 +186,8 @@ struct tc_flower {
     struct tc_cookie act_cookie;
 
     bool needs_full_ip_proto_mask;
+
+    enum tc_offloaded_state offloaded_state;
 };
 
 /* assert that if we overflow with a masked write of uint32_t to the last byte
@@ -190,12 +198,12 @@ BUILD_ASSERT_DECL(offsetof(struct tc_flower, rewrite)
                   + sizeof(uint32_t) - 2 < sizeof(struct tc_flower));
 
 int tc_replace_flower(int ifindex, uint16_t prio, uint32_t handle,
-                      struct tc_flower *flower);
-int tc_del_filter(int ifindex, int prio, int handle);
+                      struct tc_flower *flower, uint32_t block_id);
+int tc_del_filter(int ifindex, int prio, int handle, uint32_t block_id);
 int tc_get_flower(int ifindex, int prio, int handle,
-                  struct tc_flower *flower);
-int tc_flush(int ifindex);
-int tc_dump_flower_start(int ifindex, struct nl_dump *dump);
+                  struct tc_flower *flower, uint32_t block_id);
+int tc_flush(int ifindex, uint32_t block_id);
+int tc_dump_flower_start(int ifindex, struct nl_dump *dump, uint32_t block_id);
 int parse_netlink_to_tc_flower(struct ofpbuf *reply,
                                struct tc_flower *flower);
 void tc_set_policy(const char *policy);

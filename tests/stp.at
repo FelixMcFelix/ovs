@@ -562,6 +562,9 @@ OVS_WAIT_UNTIL([ovs-appctl mdb/show br0 | grep 'querier'])
 OVS_WAIT_UNTIL([ovs-appctl mdb/show br1 | grep 'querier'])
 OVS_WAIT_UNTIL([ovs-appctl mdb/show br2 | grep 'querier'])
 
+# Make sure that  validation of flows was before changing of topology.
+ovs-appctl revalidator/wait
+
 # del p2 on the br0, the topology will be changed
 AT_CHECK([ovs-vsctl del-port br0 p2])
 
@@ -617,10 +620,10 @@ ovs-appctl time/stop
 ovs-appctl time/warp 31000 1000
 
 AT_CHECK([ovs-appctl stp/show br0 | grep p1], [0], [dnl
-	p1         designated forwarding 19    128.1
+  p1         designated forwarding 19    128.1
 ])
 AT_CHECK([ovs-appctl stp/show br0 | grep p2], [0], [dnl
-	p2         designated forwarding 19    128.2
+  p2         designated forwarding 19    128.2
 ])
 
 # add a stp port
@@ -634,10 +637,10 @@ ovs-appctl netdev-dummy/set-admin-state p3 down
 
 # We should not show the p3 because its link-state is down
 AT_CHECK([ovs-appctl stp/show br0 | grep p1], [0], [dnl
-	p1         designated forwarding 19    128.1
+  p1         designated forwarding 19    128.1
 ])
 AT_CHECK([ovs-appctl stp/show br0 | grep p2], [0], [dnl
-	p2         designated forwarding 19    128.2
+  p2         designated forwarding 19    128.2
 ])
 AT_CHECK([ovs-appctl stp/show br0 | grep p3], [1], [dnl
 ])
@@ -645,13 +648,13 @@ AT_CHECK([ovs-appctl stp/show br0 | grep p3], [1], [dnl
 ovs-appctl netdev-dummy/set-admin-state p3 up
 
 AT_CHECK([ovs-appctl stp/show br0 | grep p1], [0], [dnl
-	p1         designated forwarding 19    128.1
+  p1         designated forwarding 19    128.1
 ])
 AT_CHECK([ovs-appctl stp/show br0 | grep p2], [0], [dnl
-	p2         designated forwarding 19    128.2
+  p2         designated forwarding 19    128.2
 ])
 AT_CHECK([ovs-appctl stp/show br0 | grep p3], [0], [dnl
-	p3         designated listening  19    128.3
+  p3         designated listening  19    128.3
 ])
 
 

@@ -22,6 +22,7 @@ in_port(1),eth(src=00:01:02:03:04:05,dst=10:11:12:13:14:15),eth_type(0x86dd),ipv
 in_port(1),eth(src=00:01:02:03:04:05,dst=10:11:12:13:14:15),eth_type(0x86dd),ipv6(src=::1,dst=::2,label=0,proto=58,tclass=0,hlimit=128,frag=no),icmpv6(type=136,code=0),nd(target=::3,sll=00:05:06:07:08:09,tll=00:0a:0b:0c:0d:0e)
 in_port(1),eth(src=00:01:02:03:04:05,dst=10:11:12:13:14:15),eth_type(0x0806),arp(sip=1.2.3.4,tip=5.6.7.8,op=1,sha=00:0f:10:11:12:13,tha=00:14:15:16:17:18)
 in_port(1),eth(src=00:01:02:03:04:05,dst=10:11:12:13:14:15),eth_type(0x86dd),ipv6(src=::1,dst=::2,label=0,proto=58,tclass=0,hlimit=128,frag=no),icmpv6(type=136,code=0),nd(target=::3,sll=00:05:06:07:08:09,tll=00:0a:0b:0c:0d:0e)
+in_port(1),eth(src=00:01:02:03:04:05,dst=10:11:12:13:14:15),eth_type(0x86dd),ipv6(src=::1,dst=::2,label=0,proto=58,tclass=0,hlimit=128,frag=no),icmpv6(type=136,code=0),nd(target=::3,sll=00:05:06:07:08:09,tll=00:0a:0b:0c:0d:0e),nd_ext(nd_reserved=0x0,nd_options_type=2)
 in_port(1),eth(src=00:01:02:03:04:05,dst=10:11:12:13:14:15),eth_type(0x8847),mpls(label=100,tc=3,ttl=64,bos=1)
 in_port(1),eth(src=00:01:02:03:04:05,dst=10:11:12:13:14:15),eth_type(0x8847),mpls(label=100,tc=7,ttl=100,bos=1)
 in_port(1),eth(src=00:01:02:03:04:05,dst=10:11:12:13:14:15),eth_type(0x8847),mpls(label=100,tc=7,ttl=100,bos=0)
@@ -83,13 +84,11 @@ sed 's/^/skb_priority(0),skb_mark(0),recirc_id(0),dp_hash(0),/' odp-base.txt | s
 
  echo
  echo '# Valid forms with tunnel and ERSPAN v1 headers.'
- sed
- 's/^/skb_priority(0),tunnel(tun_id=0xfedcba9876543210,src=10.0.0.1,dst=10.0.0.2,ttl=128,erspan(ver=1,idx=0x7),flags(df|key)),skb_mark(0),recirc_id(0),dp_hash(0),/' odp-base.txt
+ sed 's/^/skb_priority(0),tunnel(tun_id=0xfedcba9876543210,src=10.0.0.1,dst=10.0.0.2,ttl=128,erspan(ver=1,idx=0x7),flags(df|key)),skb_mark(0),recirc_id(0),dp_hash(0),/' odp-base.txt
 
  echo
  echo '# Valid forms with tunnel and ERSPAN v2 headers.'
- sed
- 's/^/skb_priority(0),tunnel(tun_id=0xfedcba9876543210,src=10.0.0.1,dst=10.0.0.2,ttl=128,erspan(ver=2,dir=0x1,hwid=0x7),flags(df|key)),skb_mark(0),recirc_id(0),dp_hash(0),/' odp-base.txt
+ sed 's/^/skb_priority(0),tunnel(tun_id=0xfedcba9876543210,src=10.0.0.1,dst=10.0.0.2,ttl=128,erspan(ver=2,dir=1,hwid=0x7),flags(df|key)),skb_mark(0),recirc_id(0),dp_hash(0),/' odp-base.txt
 ) > odp-in.txt
 AT_CAPTURE_FILE([odp-in.txt])
 
@@ -102,9 +101,9 @@ s/^/ODP_FIT_TOO_LITTLE: /
 
 dnl Some fields are always printed for this test, because wildcards aren't
 dnl specified. We can skip these.
-sed -i 's/\(skb_mark(0)\),\(ct\)/\1,ct_state(0),ct_zone(0),\2/' odp-out.txt
-sed -i 's/\(skb_mark([[^)]]*)\),\(recirc\)/\1,ct_state(0),ct_zone(0),ct_mark(0),ct_label(0),\2/' odp-out.txt
-sed -i 's/\(in_port(1)\),\(eth\)/\1,packet_type(ns=0,id=0),\2/' odp-out.txt
+sed -i'back' 's/\(skb_mark(0)\),\(ct\)/\1,ct_state(0),ct_zone(0),\2/' odp-out.txt
+sed -i'back' 's/\(skb_mark([[^)]]*)\),\(recirc\)/\1,ct_state(0),ct_zone(0),ct_mark(0),ct_label(0),\2/' odp-out.txt
+sed -i'back' 's/\(in_port(1)\),\(eth\)/\1,packet_type(ns=0,id=0),\2/' odp-out.txt
 
 AT_CHECK_UNQUOTED([ovstest test-odp parse-keys < odp-in.txt], [0], [`cat odp-out.txt`
 ])
@@ -186,13 +185,11 @@ sed -n 's/,frag=no),.*/,frag=later)/p' odp-base.txt
 
  echo
  echo '# Valid forms with tunnel and ERSPAN v1 headers.'
- sed
- 's/^/skb_priority(0),tunnel(tun_id=0xfedcba9876543210,src=10.0.0.1,dst=10.0.0.2,ttl=128,erspan(ver=1/0,idx=0x7/0xf),flags(df|key)),skb_mark(0),recirc_id(0),dp_hash(0),/' odp-base.txt
+ sed 's/^/skb_priority(0),tunnel(tun_id=0xfedcba9876543210,src=10.0.0.1,dst=10.0.0.2,ttl=128,erspan(ver=1/0,idx=0x7/0xf),flags(df|key)),skb_mark(0),recirc_id(0),dp_hash(0),/' odp-base.txt
 
  echo
  echo '# Valid forms with tunnel and ERSPAN v2 headers.'
- sed
- 's/^/skb_priority(0),tunnel(tun_id=0xfedcba9876543210,src=10.0.0.1,dst=10.0.0.2,ttl=128,erspan(ver=2,dir=0x1,hwid=0x7/0xf),flags(df|key)),skb_mark(0),recirc_id(0),dp_hash(0),/' odp-base.txt
+ sed 's/^/skb_priority(0),tunnel(tun_id=0xfedcba9876543210,src=10.0.0.1,dst=10.0.0.2,ttl=128,erspan(ver=2,dir=1,hwid=0x7/0xf),flags(df|key)),skb_mark(0),recirc_id(0),dp_hash(0),/' odp-base.txt
 ) > odp.txt
 AT_CAPTURE_FILE([odp.txt])
 AT_CHECK_UNQUOTED([ovstest test-odp parse-wc-keys < odp.txt], [0], [`cat odp.txt`
@@ -392,5 +389,14 @@ dnl This caused a hang in older versions.
 AT_CHECK([echo 'encap_nsh@:{@' | ovstest test-odp parse-actions
 ], [0], [dnl
 odp_actions_from_string: error
+])
+AT_CLEANUP
+
+AT_SETUP([OVS datapath keys parsing and formatting - 33 nested encap ])
+AT_DATA([odp-in.txt], [dnl
+encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap()))))))))))))))))))))))))))))))))
+])
+AT_CHECK_UNQUOTED([ovstest test-odp parse-keys < odp-in.txt], [0], [dnl
+odp_flow_from_string: error (syntax error at encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap(encap())))))))))))))))))))))))))))))))))
 ])
 AT_CLEANUP

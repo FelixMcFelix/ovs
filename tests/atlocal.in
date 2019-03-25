@@ -1,11 +1,16 @@
 # -*- shell-script -*-
 HAVE_OPENSSL='@HAVE_OPENSSL@'
 HAVE_PYTHON='@HAVE_PYTHON@'
+HAVE_PYTHON2='@HAVE_PYTHON2@'
 HAVE_PYTHON3='@HAVE_PYTHON3@'
 EGREP='@EGREP@'
 
 if test x"$PYTHON" = x; then
     PYTHON='@PYTHON@'
+fi
+
+if test x"$PYTHON2" = x; then
+    PYTHON2='@PYTHON2@'
 fi
 
 if test x"$PYTHON3" = x; then
@@ -73,8 +78,11 @@ FreeBSD)
     [789].*)
         MALLOC_CONF=AJ
         ;;
-    *)
+    1[01].*)
         MALLOC_CONF=abort:true,junk:true,redzone:true
+        ;;
+    *)
+        MALLOC_CONF=abort:true,junk:true
         ;;
     esac
     export MALLOC_CONF
@@ -185,6 +193,9 @@ fi
 # Set HAVE_TCPDUMP
 find_command tcpdump
 
+# Set HAVE_LFTP
+find_command lftp
+
 CURL_OPT="-g -v --max-time 1 --retry 2 --retry-delay 1 --connect-timeout 1"
 
 # Determine whether "diff" supports "normal" diffs.  (busybox diff does not.)
@@ -207,3 +218,19 @@ unset NO_PROXY
 # Avoid OVN environment variables leaking in from external environment.
 unset OVN_NB_DB
 unset OVN_SB_DB
+
+# Prevent logging to syslog during tests.
+OVS_SYSLOG_METHOD=null
+export OVS_SYSLOG_METHOD
+
+# Set default timeout for control utils
+OVS_CTL_TIMEOUT=30
+export OVS_CTL_TIMEOUT
+
+# Add some default flags to make the tests run better under Address
+# Sanitizer, if it was used for the build.
+#
+# We disable leak detection because otherwise minor leaks that don't
+# matter break everything.
+ASAN_OPTIONS=detect_leaks=0:abort_on_error=true:log_path=asan:$ASAN_OPTIONS
+export ASAN_OPTIONS

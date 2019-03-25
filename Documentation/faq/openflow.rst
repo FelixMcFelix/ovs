@@ -30,17 +30,17 @@ Q: What versions of OpenFlow does Open vSwitch support?
     A: The following table lists the versions of OpenFlow supported by each
     version of Open vSwitch:
 
-    =============== ===== ===== ===== ===== ===== ===== =====
-    Open vSwitch    OF1.0 OF1.1 OF1.2 OF1.3 OF1.4 OF1.5 OF1.6
-    =============== ===== ===== ===== ===== ===== ===== =====
-    1.9 and earlier  yes   ---   ---   ---   ---   ---   ---
-    1.10, 1.11       yes   ---   (*)   (*)   ---   ---   ---
-    2.0, 2.1         yes   (*)   (*)   (*)   ---   ---   ---
-    2.2              yes   (*)   (*)   (*)   (%)   (*)   ---
-    2.3, 2.4         yes   yes   yes   yes   (*)   (*)   ---
-    2.5, 2.6, 2.7    yes   yes   yes   yes   (*)   (*)   (*)
-    2.8              yes   yes   yes   yes   yes   (*)   (*)
-    =============== ===== ===== ===== ===== ===== ===== =====
+    =============== ===== ===== ===== ===== ===== =====
+    Open vSwitch    OF1.0 OF1.1 OF1.2 OF1.3 OF1.4 OF1.5
+    =============== ===== ===== ===== ===== ===== =====
+    1.9 and earlier  yes   ---   ---   ---   ---   ---
+    1.10, 1.11       yes   ---   (*)   (*)   ---   ---
+    2.0, 2.1         yes   (*)   (*)   (*)   ---   ---
+    2.2              yes   (*)   (*)   (*)   (%)   (*)
+    2.3, 2.4         yes   yes   yes   yes   (*)   (*)
+    2.5, 2.6, 2.7    yes   yes   yes   yes   (*)   (*)
+    2.8              yes   yes   yes   yes   yes   (*)
+    =============== ===== ===== ===== ===== ===== =====
 
     --- Not supported.
     yes Supported and enabled by default
@@ -73,8 +73,8 @@ Q: What versions of OpenFlow does Open vSwitch support?
     could cause crashes.  We don't recommend enabling it.)
 
     :doc:`/topics/openflow` tracks support for OpenFlow 1.1 and later features.
-    When support for OpenFlow 1.5 and 1.6 is solidly implemented, Open vSwitch
-    will enable those version by default.
+    When support for OpenFlow 1.5 is solidly implemented, Open vSwitch will
+    enable it by default.
 
 Q: Does Open vSwitch support MPLS?
 
@@ -515,44 +515,6 @@ but the packets are getting dropped instead.  Why?
         $ ovs-ofctl add-flow br0 tcp,tcp_dst=123,actions=mod_tp_dst:443,normal
 
     See also the preceding question.
-
-Q: The "learn" action can't learn the action I want, can you improve it?
-
-    A: By itself, the "learn" action can only put two kinds of actions into the
-    flows that it creates: "load" and "output" actions.  If "learn" is used in
-    isolation, these are severe limits.
-
-    However, "learn" is not meant to be used in isolation.  It is a primitive
-    meant to be used together with other Open vSwitch features to accomplish a
-    task.  Its existing features are enough to accomplish most tasks.
-
-    Here is an outline of a typical pipeline structure that allows for
-    versatile behavior using "learn":
-
-    - Flows in table A contain a "learn" action, that populates flows in table
-      L, that use a "load" action to populate register R with information about
-      what was learned.
-
-    - Flows in table B contain two sequential resubmit actions: one to table L
-      and another one to table B+1.
-
-    - Flows in table B+1 match on register R and act differently depending on
-      what the flows in table L loaded into it.
-
-    This approach can be used to implement many "learn"-based features.  For
-    example:
-
-    - Resubmit to a table selected based on learned information, e.g. see:
-      https://mail.openvswitch.org/pipermail/ovs-discuss/2016-June/021694.html
-
-    - MAC learning in the middle of a pipeline, as described in
-      :doc:`/tutorials/ovs-advanced`
-
-    - TCP state based firewalling, by learning outgoing connections based on
-      SYN packets and matching them up with incoming packets.
-
-    - At least some of the features described in T. A. Hoff, "Extending Open
-      vSwitch to Facilitate Creation of Stateful SDN Applications".
 
 Q: When using the "ct" action with FTP connections, it doesn't seem to matter
 if I set the "alg=ftp" parameter in the action. Is this required?

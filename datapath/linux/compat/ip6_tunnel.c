@@ -355,7 +355,7 @@ static struct ip6_tnl *ip6_tnl_create(struct net *net, struct __ip6_tnl_parm *p)
 	if (p->name[0])
 		strlcpy(name, p->name, IFNAMSIZ);
 	else
-		sprintf(name, "ip6tnl%%d");
+		strlcpy(name, "ovs-ip6tnl%d", IFNAMSIZ);
 
 	dev = alloc_netdev(sizeof(*t), name, NET_NAME_UNKNOWN,
 			   ip6_tnl_dev_setup);
@@ -1410,7 +1410,7 @@ ip6_tnl_parm_to_user(struct ip6_tnl_parm *u, const struct __ip6_tnl_parm *p)
  *     %SIOCCHGTUNNEL: change tunnel parameters to those given
  *     %SIOCDELTUNNEL: delete tunnel
  *
- *   The fallback device "ip6tnl0", created during module
+ *   The fallback device "ovs-ip6tnl0", created during module
  *   initialization, can be used for creating other tunnel devices.
  *
  * Return:
@@ -2093,7 +2093,7 @@ static int __net_init ip6_tnl_init_net(struct net *net)
 	ip6n->tnls[1] = ip6n->tnls_r_l;
 
 	err = -ENOMEM;
-	ip6n->fb_tnl_dev = alloc_netdev(sizeof(struct ip6_tnl), "ip6tnl0",
+	ip6n->fb_tnl_dev = alloc_netdev(sizeof(struct ip6_tnl), "ovs-ip6tnl0",
 					NET_NAME_UNKNOWN, ip6_tnl_dev_setup);
 
 	if (!ip6n->fb_tnl_dev)
@@ -2158,8 +2158,11 @@ int rpl_ip6_tunnel_init(void)
 		return -EOPNOTSUPP;
 #endif
 	err = register_pernet_device(&ip6_tnl_net_ops);
-	if (err < 0)
+	if (err < 0) {
+		pr_err("%s: can't register ip6_tnl pernet device\n",
+			__func__);
 		goto out_pernet;
+	}
 
 	err = xfrm6_tunnel_register(&ip4ip6_handler, AF_INET);
 	if (err < 0) {
@@ -2172,10 +2175,13 @@ int rpl_ip6_tunnel_init(void)
 		pr_err("%s: can't register ip6ip6\n", __func__);
 		goto out_ip6ip6;
 	}
-	err = rtnl_link_register(&ip6_link_ops);
-	if (err < 0)
-		goto rtnl_link_failed;
 
+	err = rtnl_link_register(&ip6_link_ops);
+	if (err < 0) {
+		pr_err("%s: can't register ip6_lin_ops\n",
+			__func__);
+		goto rtnl_link_failed;
+	}
 	return 0;
 
 rtnl_link_failed:

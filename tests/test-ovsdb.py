@@ -27,11 +27,16 @@ import ovs.ovsuuid
 import ovs.poller
 import ovs.stream
 import ovs.util
+import ovs.vlog
 from ovs.db import data
 from ovs.db import error
 from ovs.fatal_signal import signal_alarm
 
 import six
+
+vlog = ovs.vlog.Vlog("test-ovsdb")
+vlog.set_levels_from_string("console:dbg")
+vlog.init(None)
 
 
 def unbox_json(json):
@@ -162,7 +167,7 @@ def get_simple_printable_row_string(row, columns):
             s += "%s=%s " % (column, value)
     s = s.strip()
     s = re.sub('""|,|u?\'', "", s)
-    s = re.sub('UUID\(([^)]+)\)', r'\1', s)
+    s = re.sub(r'UUID\(([^)]+)\)', r'\1', s)
     s = re.sub('False', 'false', s)
     s = re.sub('True', 'true', s)
     s = re.sub(r'(ba)=([^[][^ ]*) ', r'\1=[\2] ', s)
@@ -595,9 +600,16 @@ def do_idl(schema_file, remote, *commands):
         idl.index_create("simple3", "simple3_by_name")
 
     if commands:
-        error, stream = ovs.stream.Stream.open_block(
-            ovs.stream.Stream.open(remote))
-        if error:
+        remotes = remote.split(',')
+        stream = None
+        for r in remotes:
+            error, stream = ovs.stream.Stream.open_block(
+                ovs.stream.Stream.open(r), 2000)
+            if not error and stream:
+                break
+            stream = None
+
+        if not stream:
             sys.stderr.write("failed to connect to \"%s\"" % remote)
             sys.exit(1)
         rpc = ovs.jsonrpc.Connection(stream)
@@ -672,11 +684,11 @@ def do_idl(schema_file, remote, *commands):
             request = ovs.jsonrpc.Message.create_request("transact", json)
             error, reply = rpc.transact_block(request)
             if error:
-                sys.stderr.write("jsonrpc transaction failed: %s"
+                sys.stderr.write("jsonrpc transaction failed: %s\n"
                                  % os.strerror(error))
                 sys.exit(1)
             elif reply.error is not None:
-                sys.stderr.write("jsonrpc transaction failed: %s"
+                sys.stderr.write("jsonrpc transaction failed: %s\n"
                                  % reply.error)
                 sys.exit(1)
 
@@ -725,11 +737,11 @@ def do_idl_passive(schema_file, remote, *commands):
         request = ovs.jsonrpc.Message.create_request("transact", json)
         error, reply = rpc.transact_block(request)
         if error:
-            sys.stderr.write("jsonrpc transaction failed: %s"
+            sys.stderr.write("jsonrpc transaction failed: %s\n"
                              % os.strerror(error))
             sys.exit(1)
         elif reply.error is not None:
-            sys.stderr.write("jsonrpc transaction failed: %s"
+            sys.stderr.write("jsonrpc transaction failed: %s\n"
                              % reply.error)
             sys.exit(1)
 
@@ -741,6 +753,70 @@ def do_idl_passive(schema_file, remote, *commands):
         reply.id = None
         sys.stdout.write("%s\n" % ovs.json.to_string(reply.to_json()))
         sys.stdout.flush()
+
+    idl.close()
+    print("%03d: done" % step)
+
+
+def do_idl_cluster(schema_file, remote, pid, *commands):
+    schema_helper = ovs.db.idl.SchemaHelper(schema_file)
+
+    if remote.startswith("ssl:"):
+        if len(commands) < 3:
+            sys.stderr.write("SSL connection requires private key, "
+                             "certificate for private key, and peer CA "
+                             "certificate as arguments\n")
+            sys.exit(1)
+        ovs.stream.Stream.ssl_set_private_key_file(commands[0])
+        ovs.stream.Stream.ssl_set_certificate_file(commands[1])
+        ovs.stream.Stream.ssl_set_ca_cert_file(commands[2])
+        commands = commands[3:]
+
+    schema_helper.register_all()
+    idl = ovs.db.idl.Idl(remote, schema_helper)
+
+    step = 0
+    seqno = 0
+    commands = list(commands)
+    for command in commands:
+        if command.startswith("+"):
+            # The previous transaction didn't change anything.
+            command = command[1:]
+        else:
+            # Wait for update.
+            while idl.change_seqno == seqno and not idl.run():
+                poller = ovs.poller.Poller()
+                idl.wait(poller)
+                poller.block()
+            step += 1
+
+        seqno = idl.change_seqno
+
+        if command == "reconnect":
+            print("%03d: reconnect" % step)
+            sys.stdout.flush()
+            step += 1
+            idl.force_reconnect()
+        elif command == "remote":
+            print("%03d: %s" % (step, idl.session_name()))
+            sys.stdout.flush()
+            step += 1
+        elif command == "remotestop":
+            r = idl.session_name()
+            remotes = remote.split(',')
+            i = remotes.index(r)
+            pids = pid.split(',')
+            command = None
+            try:
+                command = "kill %s" % pids[i]
+            except ValueError as error:
+                sys.stderr.write("Cannot find pid of remote: %s\n"
+                                 % os.strerror(error))
+                sys.exit(1)
+            os.popen(command)
+            print("%03d: stop %s" % (step, pids[i]))
+            sys.stdout.flush()
+            step += 1
 
     idl.close()
     print("%03d: done" % step)
@@ -815,6 +891,7 @@ def main(argv):
         sys.stderr.write("%s: %s\n" % (ovs.util.PROGRAM_NAME, geo.msg))
         sys.exit(1)
 
+    timeout = None
     for key, value in options:
         if key in ['-h', '--help']:
             usage()
@@ -826,9 +903,10 @@ def main(argv):
             except TypeError:
                 raise error.Error("value %s on -t or --timeout is not at "
                                   "least 1" % value)
-            signal_alarm(timeout)
         else:
             sys.exit(0)
+
+    signal_alarm(timeout)
 
     if not args:
         sys.stderr.write("%s: missing command argument "
@@ -847,7 +925,8 @@ def main(argv):
                 "parse-table": (do_parse_table, (2, 3)),
                 "parse-schema": (do_parse_schema, 1),
                 "idl": (do_idl, (2,)),
-                "idl_passive": (do_idl_passive, (2,))}
+                "idl_passive": (do_idl_passive, (2,)),
+                "idl-cluster": (do_idl_cluster, (3,))}
 
     command_name = args[0]
     args = args[1:]

@@ -62,8 +62,8 @@ def _install_tap_linux(tap_name, mtu_value=None):
     TUNSETIFF = 0x400454CA  # This is derived by printf() of TUNSETIFF
     TUNSETOWNER = TUNSETIFF + 2
 
-    tapdev_fd = open('/dev/net/tun', 'rw')
-    ifr = struct.pack('16sH', tap_name, IFF_TAP | IFF_NO_PI)
+    tapdev_fd = os.open('/dev/net/tun', os.O_RDWR)
+    ifr = struct.pack('16sH', tap_name.encode('utf8'), IFF_TAP | IFF_NO_PI)
     fcntl.ioctl(tapdev_fd, TUNSETIFF, ifr)
     fcntl.ioctl(tapdev_fd, TUNSETOWNER, os.getegid())
 
@@ -111,6 +111,7 @@ The following options are available:
    -i, --interface            Open vSwitch interface to mirror and tcpdump
    --mirror-to                The name for the mirror port to use (optional)
                               Default 'miINTERFACE'
+   --span                     If specified, mirror all ports (optional)
 """ % {'prog': sys.argv[0]})
     sys.exit(0)
 
@@ -312,13 +313,14 @@ class OVSDB(object):
         self._txn = None
         return result
 
-    def bridge_mirror(self, intf_name, mirror_intf_name, br_name):
+    def bridge_mirror(self, intf_name, mirror_intf_name, br_name,
+                      mirror_select_all=False):
 
         txn = self._start_txn()
         mirror = txn.insert(self.get_table('Mirror'))
         mirror.name = 'm_%s' % intf_name
 
-        mirror.select_all = False
+        mirror.select_all = mirror_select_all
 
         mirrored_port = self._find_row_by_name('Port', intf_name)
 
@@ -377,6 +379,7 @@ def main():
 
     skip_next = False
     mirror_interface = None
+    mirror_select_all = False
     dump_cmd = 'tcpdump'
 
     for cur, nxt in argv_tuples(sys.argv[1:]):
@@ -403,6 +406,9 @@ def main():
         elif cur in ['--mirror-to']:
             mirror_interface = nxt
             skip_next = True
+            continue
+        elif cur in ['--span']:
+            mirror_select_all = True
             continue
         tcpdargs.append(cur)
 
@@ -445,7 +451,8 @@ def main():
     try:
         ovsdb.make_port(mirror_interface, ovsdb.port_bridge(interface))
         ovsdb.bridge_mirror(interface, mirror_interface,
-                            ovsdb.port_bridge(interface))
+                            ovsdb.port_bridge(interface),
+                            mirror_select_all)
     except OVSDBException as oe:
         print("ERROR: Unable to properly setup the mirror: %s." % str(oe))
         try:
@@ -457,10 +464,10 @@ def main():
     pipes = _doexec(*([dump_cmd, '-i', mirror_interface] + tcpdargs))
     try:
         while pipes.poll() is None:
-            data = pipes.stdout.readline().strip('\n')
+            data = pipes.stdout.readline().strip(b'\n')
             if len(data) == 0:
                 raise KeyboardInterrupt
-            print(data)
+            print(data.decode('utf-8'))
         raise KeyboardInterrupt
     except KeyboardInterrupt:
         if pipes.poll() is None:

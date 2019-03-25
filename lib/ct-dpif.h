@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015 Nicira, Inc.
+ * Copyright (c) 2015, 2018 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -186,9 +186,18 @@ enum {
 };
 
 struct dpif;
+struct dpif_ipf_status;
+struct ipf_dump_ctx;
 
 struct ct_dpif_dump_state {
     struct dpif *dpif;
+};
+
+struct ct_dpif_zone_limit {
+    uint16_t zone;
+    uint32_t limit;       /* Limit on number of entries. */
+    uint32_t count;       /* Current number of entries. */
+    struct ovs_list node;
 };
 
 int ct_dpif_dump_start(struct dpif *, struct ct_dpif_dump_state **,
@@ -200,6 +209,19 @@ int ct_dpif_flush(struct dpif *, const uint16_t *zone,
 int ct_dpif_set_maxconns(struct dpif *dpif, uint32_t maxconns);
 int ct_dpif_get_maxconns(struct dpif *dpif, uint32_t *maxconns);
 int ct_dpif_get_nconns(struct dpif *dpif, uint32_t *nconns);
+int ct_dpif_set_limits(struct dpif *dpif, const uint32_t *default_limit,
+                       const struct ovs_list *);
+int ct_dpif_get_limits(struct dpif *dpif, uint32_t *default_limit,
+                       const struct ovs_list *, struct ovs_list *);
+int ct_dpif_del_limits(struct dpif *dpif, const struct ovs_list *);
+int ct_dpif_ipf_set_enabled(struct dpif *, bool v6, bool enable);
+int ct_dpif_ipf_set_min_frag(struct dpif *, bool v6, uint32_t min_frag);
+int ct_dpif_ipf_set_max_nfrags(struct dpif *, uint32_t max_frags);
+int ct_dpif_ipf_get_status(struct dpif *dpif,
+                           struct dpif_ipf_status *dpif_ipf_status);
+int ct_dpif_ipf_dump_start(struct dpif *dpif, struct ipf_dump_ctx **);
+int ct_dpif_ipf_dump_next(struct dpif *dpif, void *, char **);
+int ct_dpif_ipf_dump_done(struct dpif *dpif, void *);
 void ct_dpif_entry_uninit(struct ct_dpif_entry *);
 void ct_dpif_format_entry(const struct ct_dpif_entry *, struct ds *,
                           bool verbose, bool print_stats);
@@ -207,5 +229,12 @@ void ct_dpif_format_tuple(struct ds *, const struct ct_dpif_tuple *);
 uint8_t ct_dpif_coalesce_tcp_state(uint8_t state);
 void ct_dpif_format_tcp_stat(struct ds *, int, int);
 bool ct_dpif_parse_tuple(struct ct_dpif_tuple *, const char *s, struct ds *);
+void ct_dpif_push_zone_limit(struct ovs_list *, uint16_t zone, uint32_t limit,
+                             uint32_t count);
+void ct_dpif_free_zone_limits(struct ovs_list *);
+bool ct_dpif_parse_zone_limit_tuple(const char *s, uint16_t *pzone,
+                                    uint32_t *plimit, struct ds *);
+void ct_dpif_format_zone_limits(uint32_t default_limit,
+                                const struct ovs_list *, struct ds *);
 
 #endif /* CT_DPIF_H */

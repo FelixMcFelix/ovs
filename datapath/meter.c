@@ -221,6 +221,7 @@ static struct dp_meter *dp_meter_create(struct nlattr **a)
 	if (!meter)
 		return ERR_PTR(-ENOMEM);
 
+	meter->id = nla_get_u32(a[OVS_METER_ATTR_ID]);
 	meter->used = div_u64(ktime_get_ns(), 1000 * 1000);
 	meter->kbps = a[OVS_METER_ATTR_KBPS] ? 1 : 0;
 	meter->keep_stats = !a[OVS_METER_ATTR_CLEAR];
@@ -252,14 +253,20 @@ static struct dp_meter *dp_meter_create(struct nlattr **a)
 
 		band->type = nla_get_u32(attr[OVS_BAND_ATTR_TYPE]);
 		band->rate = nla_get_u32(attr[OVS_BAND_ATTR_RATE]);
+		if (band->rate == 0) {
+			err = -EINVAL;
+			goto exit_free_meter;
+		}
+
 		band->burst_size = nla_get_u32(attr[OVS_BAND_ATTR_BURST]);
 		/* Figure out max delta_t that is enough to fill any bucket.
 		 * Keep max_delta_t size to the bucket units:
 		 * pkts => 1/1000 packets, kilobits => bits.
+		 *
+		 * Start with a full bucket.
 		 */
-		band_max_delta_t = (band->burst_size + band->rate) * 1000;
-		/* Start with a full bucket. */
-		band->bucket = band_max_delta_t;
+		band->bucket = (band->burst_size + band->rate) * 1000;
+		band_max_delta_t = band->bucket / band->rate;
 		if (band_max_delta_t > meter->max_delta_t)
 			meter->max_delta_t = band_max_delta_t;
 		band++;
@@ -284,6 +291,10 @@ static int ovs_meter_cmd_set(struct sk_buff *skb, struct genl_info *info)
 	u32 meter_id;
 	bool failed;
 
+	if (!a[OVS_METER_ATTR_ID]) {
+		return -ENODEV;
+	}
+
 	meter = dp_meter_create(a);
 	if (IS_ERR_OR_NULL(meter))
 		return PTR_ERR(meter);
@@ -298,11 +309,6 @@ static int ovs_meter_cmd_set(struct sk_buff *skb, struct genl_info *info)
 	ovs_lock();
 	dp = get_dp(sock_net(skb->sk), ovs_header->dp_ifindex);
 	if (!dp) {
-		err = -ENODEV;
-		goto exit_unlock;
-	}
-
-	if (!a[OVS_METER_ATTR_ID]) {
 		err = -ENODEV;
 		goto exit_unlock;
 	}

@@ -39,7 +39,6 @@
 #include "fatal-signal.h"
 #include "hash.h"
 #include "openvswitch/list.h"
-#include "netdev-dpdk.h"
 #include "netdev-provider.h"
 #include "netdev-vport.h"
 #include "odp-netlink.h"
@@ -415,6 +414,7 @@ netdev_open(const char *name, const char *type, struct netdev **netdevp)
                 netdev->reconfigure_seq = seq_create();
                 netdev->last_reconfigure_seq =
                     seq_read(netdev->reconfigure_seq);
+                netdev->hw_info.oor = false;
                 netdev->node = shash_add(&netdev_shash, name, netdev);
 
                 /* By default enable one tx and rx queue per netdev. */
@@ -813,10 +813,10 @@ netdev_pop_header(struct netdev *netdev, struct dp_packet_batch *batch)
     DP_PACKET_BATCH_REFILL_FOR_EACH (i, size, packet, batch) {
         packet = netdev->netdev_class->pop_header(packet);
         if (packet) {
-            /* Reset the checksum offload flags if present, to avoid wrong
+            /* Reset the offload flags if present, to avoid wrong
              * interpretation in the further packet processing when
              * recirculated.*/
-            reset_dp_packet_checksum_ol_flags(packet);
+            dp_packet_reset_offload(packet);
             dp_packet_batch_refill(batch, packet, i);
         }
     }
@@ -1801,8 +1801,9 @@ bool
 netdev_queue_dump_next(struct netdev_queue_dump *dump,
                        unsigned int *queue_id, struct smap *details)
 {
-    const struct netdev *netdev = dump->netdev;
+    smap_clear(details);
 
+    const struct netdev *netdev = dump->netdev;
     if (dump->error) {
         return false;
     }
@@ -2039,19 +2040,37 @@ netdev_get_addrs(const char dev[], struct in6_addr **paddr,
     struct in6_addr *addr_array, *mask_array;
     const struct ifaddrs *ifa;
     int cnt = 0, i = 0;
+    int retries = 3;
 
     ovs_mutex_lock(&if_addr_list_lock);
     if (!if_addr_list) {
         int err;
 
+retry:
         err = getifaddrs(&if_addr_list);
         if (err) {
             ovs_mutex_unlock(&if_addr_list_lock);
             return -err;
         }
+        retries--;
     }
 
     for (ifa = if_addr_list; ifa; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_name) {
+            if (retries) {
+                /* Older versions of glibc have a bug on race condition with
+                 * address addition which may cause one of the returned
+                 * ifa_name values to be NULL. In such case, we know that we've
+                 * got an inconsistent dump. Retry but beware of an endless
+                 * loop. From glibc 2.28 and beyond, this workaround is not
+                 * needed and should be eventually removed. */
+                freeifaddrs(if_addr_list);
+                goto retry;
+            } else {
+                VLOG_WARN("Proceeding with an inconsistent dump of "
+                          "interfaces from the kernel. Some may be missing");
+            }
+        }
         if (ifa->ifa_addr && ifa->ifa_name && ifa->ifa_netmask) {
             int family;
 
@@ -2233,6 +2252,81 @@ netdev_get_block_id(struct netdev *netdev)
     return (class->get_block_id
             ? class->get_block_id(netdev)
             : 0);
+}
+
+/*
+ * Get the value of the hw info parameter specified by type.
+ * Returns the value on success (>= 0). Returns -1 on failure.
+ */
+int
+netdev_get_hw_info(struct netdev *netdev, int type)
+{
+    int val = -1;
+
+    switch (type) {
+    case HW_INFO_TYPE_OOR:
+        val = netdev->hw_info.oor;
+        break;
+    case HW_INFO_TYPE_PEND_COUNT:
+        val = netdev->hw_info.pending_count;
+        break;
+    case HW_INFO_TYPE_OFFL_COUNT:
+        val = netdev->hw_info.offload_count;
+        break;
+    default:
+        break;
+    }
+
+    return val;
+}
+
+/*
+ * Set the value of the hw info parameter specified by type.
+ */
+void
+netdev_set_hw_info(struct netdev *netdev, int type, int val)
+{
+    switch (type) {
+    case HW_INFO_TYPE_OOR:
+        if (val == 0) {
+            VLOG_DBG("Offload rebalance: netdev: %s is not OOR", netdev->name);
+        }
+        netdev->hw_info.oor = val;
+        break;
+    case HW_INFO_TYPE_PEND_COUNT:
+        netdev->hw_info.pending_count = val;
+        break;
+    case HW_INFO_TYPE_OFFL_COUNT:
+        netdev->hw_info.offload_count = val;
+        break;
+    default:
+        break;
+    }
+}
+
+/*
+ * Find if any netdev is in OOR state. Return true if there's at least
+ * one netdev that's in OOR state; otherwise return false.
+ */
+bool
+netdev_any_oor(void)
+    OVS_EXCLUDED(netdev_mutex)
+{
+    struct shash_node *node;
+    bool oor = false;
+
+    ovs_mutex_lock(&netdev_mutex);
+    SHASH_FOR_EACH (node, &netdev_shash) {
+        struct netdev *dev = node->data;
+
+        if (dev->hw_info.oor) {
+            oor = true;
+            break;
+        }
+    }
+    ovs_mutex_unlock(&netdev_mutex);
+
+    return oor;
 }
 
 bool
@@ -2471,6 +2565,14 @@ netdev_free_custom_stats_counters(struct netdev_custom_stats *custom_stats)
     }
 }
 
+static bool netdev_offload_rebalance_policy = false;
+
+bool
+netdev_is_offload_rebalance_policy_enabled(void)
+{
+    return netdev_offload_rebalance_policy;
+}
+
 #ifdef __linux__
 static void
 netdev_ports_flow_init(void)
@@ -2497,6 +2599,10 @@ netdev_set_flow_api_enabled(const struct smap *ovs_other_config)
 
             tc_set_policy(smap_get_def(ovs_other_config, "tc-policy",
                                        TC_POLICY_DEFAULT));
+
+            if (smap_get_bool(ovs_other_config, "offload-rebalance", false)) {
+                netdev_offload_rebalance_policy = true;
+            }
 
             netdev_ports_flow_init();
 

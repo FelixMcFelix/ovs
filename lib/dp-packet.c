@@ -30,9 +30,10 @@ dp_packet_init__(struct dp_packet *b, size_t allocated, enum dp_packet_source so
     b->source = source;
     dp_packet_reset_offsets(b);
     pkt_metadata_init(&b->md, 0);
-    dp_packet_rss_invalidate(b);
-    dp_packet_mbuf_init(b);
     dp_packet_reset_cutlen(b);
+    dp_packet_reset_offload(b);
+    /* Initialize implementation-specific fields of dp_packet. */
+    dp_packet_init_specific(b);
     /* By default assume the packet type to be Ethernet. */
     b->packet_type = htonl(PT_ETH);
 }
@@ -92,16 +93,11 @@ dp_packet_use_const(struct dp_packet *b, const void *data, size_t size)
     dp_packet_set_size(b, size);
 }
 
-/* Initializes 'b' as an empty dp_packet that contains the 'allocated' bytes.
- * DPDK allocated dp_packet and *data is allocated from one continous memory
- * region as part of memory pool, so in memory data start right after
- * dp_packet.  Therefore, there is a special method to free this type of
- * buffer.  Here, non-transient ovs dp-packet fields are initialized for
- * packets that are part of a DPDK memory pool. */
+/* Initializes 'b' as a DPDK dp-packet, which must have been allocated from a
+ * DPDK memory pool. */
 void
-dp_packet_init_dpdk(struct dp_packet *b, size_t allocated)
+dp_packet_init_dpdk(struct dp_packet *b)
 {
-    dp_packet_set_allocated(b, allocated);
     b->source = DPBUF_DPDK;
 }
 
@@ -166,6 +162,7 @@ struct dp_packet *
 dp_packet_clone_with_headroom(const struct dp_packet *buffer, size_t headroom)
 {
     struct dp_packet *new_buffer;
+    uint32_t mark;
 
     new_buffer = dp_packet_clone_data_with_headroom(dp_packet_data(buffer),
                                                  dp_packet_size(buffer),
@@ -178,16 +175,13 @@ dp_packet_clone_with_headroom(const struct dp_packet *buffer, size_t headroom)
 
 #ifdef DPDK_NETDEV
     new_buffer->mbuf.ol_flags = buffer->mbuf.ol_flags;
-#else
-    new_buffer->rss_hash_valid = buffer->rss_hash_valid;
 #endif
 
-    if (dp_packet_rss_valid(new_buffer)) {
-#ifdef DPDK_NETDEV
-        new_buffer->mbuf.hash.rss = buffer->mbuf.hash.rss;
-#else
-        new_buffer->rss_hash = buffer->rss_hash;
-#endif
+    if (dp_packet_rss_valid(buffer)) {
+        dp_packet_set_rss_hash(new_buffer, dp_packet_get_rss_hash(buffer));
+    }
+    if (dp_packet_has_flow_mark(buffer, &mark)) {
+        dp_packet_set_flow_mark(new_buffer, mark);
     }
 
     return new_buffer;

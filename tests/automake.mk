@@ -24,6 +24,7 @@ COMMON_MACROS_AT = \
 TESTSUITE_AT = \
 	tests/testsuite.at \
 	tests/completion.at \
+	tests/checkpatch.at \
 	tests/library.at \
 	tests/heap.at \
 	tests/bundle.at \
@@ -36,6 +37,8 @@ TESTSUITE_AT = \
 	tests/ofp-util.at \
 	tests/ofp-errors.at \
 	tests/ovs-ofctl.at \
+	tests/fuzz-regression.at \
+	tests/fuzz-regression-list.at \
 	tests/odp.at \
 	tests/mpls-xlate.at \
 	tests/multipath.at \
@@ -107,6 +110,37 @@ TESTSUITE_AT = \
 	tests/packet-type-aware.at \
 	tests/nsh.at
 
+EXTRA_DIST += $(FUZZ_REGRESSION_TESTS)
+FUZZ_REGRESSION_TESTS = \
+	tests/fuzz-regression/flow_extract_fuzzer-5112775280951296 \
+	tests/fuzz-regression/flow_extract_fuzzer-5457710546944000 \
+	tests/fuzz-regression/json_parser_fuzzer-4790908707930112 \
+	tests/fuzz-regression/ofp_print_fuzzer-4584019764183040 \
+	tests/fuzz-regression/ofp_print_fuzzer-4730143510626304 \
+	tests/fuzz-regression/ofp_print_fuzzer-4854119633256448 \
+	tests/fuzz-regression/ofp_print_fuzzer-5070973479944192 \
+	tests/fuzz-regression/ofp_print_fuzzer-5072291707748352 \
+	tests/fuzz-regression/ofp_print_fuzzer-5147430386401280 \
+	tests/fuzz-regression/ofp_print_fuzzer-5168455220199424 \
+	tests/fuzz-regression/ofp_print_fuzzer-5190507327127552 \
+	tests/fuzz-regression/ofp_print_fuzzer-5204186701496320 \
+	tests/fuzz-regression/ofp_print_fuzzer-5394482341085184 \
+	tests/fuzz-regression/ofp_print_fuzzer-5395207246839808 \
+	tests/fuzz-regression/ofp_print_fuzzer-5647458888581120 \
+	tests/fuzz-regression/ofp_print_fuzzer-5674119268925440 \
+	tests/fuzz-regression/ofp_print_fuzzer-5674419757252608 \
+	tests/fuzz-regression/ofp_print_fuzzer-5677588436484096 \
+	tests/fuzz-regression/ofp_print_fuzzer-5706562554298368 \
+	tests/fuzz-regression/ofp_print_fuzzer-5722747668791296 \
+	tests/fuzz-regression/ofp_print_fuzzer-6285128790704128 \
+	tests/fuzz-regression/ofp_print_fuzzer-6470117922701312 \
+	tests/fuzz-regression/ofp_print_fuzzer-6502620041576448
+$(srcdir)/tests/fuzz-regression-list.at: tests/automake.mk
+	$(AM_V_GEN)for name in $(FUZZ_REGRESSION_TESTS); do \
+            basename=`echo $$name | sed 's,^.*/,,'`; \
+	    echo "TEST_FUZZ_REGRESSION([$$basename])"; \
+	done > $@.tmp && mv $@.tmp $@
+
 SYSTEM_KMOD_TESTSUITE_AT = \
 	tests/system-common-macros.at \
 	tests/system-kmod-testsuite.at \
@@ -149,8 +183,8 @@ DISTCLEANFILES += tests/atconfig tests/atlocal
 AUTOTEST_PATH = utilities:vswitchd:ovsdb:vtep:tests:$(PTHREAD_WIN32_DIR_DLL):$(SSL_DIR):ovn/controller-vtep:ovn/northd:ovn/utilities:ovn/controller
 
 check-local:
-	set $(SHELL) '$(TESTSUITE)' -C tests AUTOTEST_PATH=$(AUTOTEST_PATH) $(TESTSUITEFLAGS); \
-	"$$@" || (test X'$(RECHECK)' = Xyes && "$$@" -j1 --recheck)
+	set $(SHELL) '$(TESTSUITE)' -C tests AUTOTEST_PATH=$(AUTOTEST_PATH); \
+	"$$@" $(TESTSUITEFLAGS) || (test X'$(RECHECK)' = Xyes && "$$@" --recheck)
 
 # Python Coverage support.
 # Requires coverage.py http://nedbatchelder.com/code/coverage/.
@@ -177,8 +211,8 @@ LCOV_OPTS = -b $(abs_top_builddir) -d $(abs_top_builddir) -q -c --rc lcov_branch
 GENHTML_OPTS = -q --branch-coverage --num-spaces 4
 check-lcov: all $(check_DATA) clean-lcov
 	find . -name '*.gcda' | xargs -n1 rm -f
-	-set $(SHELL) '$(TESTSUITE)' -C tests AUTOTEST_PATH=$(AUTOTEST_PATH) $(TESTSUITEFLAGS); \
-	"$$@" || (test X'$(RECHECK)' = Xyes && "$$@" -j1 --recheck)
+	-set $(SHELL) '$(TESTSUITE)' -C tests AUTOTEST_PATH=$(AUTOTEST_PATH); \
+	"$$@" $(TESTSUITEFLAGS) || (test X'$(RECHECK)' = Xyes && "$$@" --recheck)
 	$(MKDIR_P) tests/lcov
 	lcov $(LCOV_OPTS) -o tests/lcov/coverage.info
 	genhtml $(GENHTML_OPTS) -o tests/lcov tests/lcov/coverage.info
@@ -227,15 +261,13 @@ check-valgrind: all $(valgrind_wrappers) $(check_DATA)
 	@echo 'Valgrind output can be found in tests/testsuite.dir/*/valgrind.*'
 	@echo '----------------------------------------------------------------------'
 check-kernel-valgrind: all $(valgrind_wrappers) $(check_DATA)
-	set $(SHELL) '$(SYSTEM_KMOD_TESTSUITE)' -C tests VALGRIND='$(VALGRIND)' AUTOTEST_PATH='tests/valgrind:$(AUTOTEST_PATH)' -d $(TESTSUITEFLAGS) -j1; \
-	"$$@" || (test X'$(RECHECK)' = Xyes && "$$@" --recheck)
+	$(SHELL) '$(SYSTEM_KMOD_TESTSUITE)' -C tests VALGRIND='$(VALGRIND)' AUTOTEST_PATH='tests/valgrind:$(AUTOTEST_PATH)' -d $(TESTSUITEFLAGS) -j1
 	@echo
 	@echo '----------------------------------------------------------------------'
 	@echo 'Valgrind output can be found in tests/system-kmod-testsuite.dir/*/valgrind.*'
 	@echo '----------------------------------------------------------------------'
 check-userspace-valgrind: all $(valgrind_wrappers) $(check_DATA)
-	set $(SHELL) '$(SYSTEM_USERSPACE_TESTSUITE)' -C tests VALGRIND='$(VALGRIND)' AUTOTEST_PATH='tests/valgrind:$(AUTOTEST_PATH)' -d $(TESTSUITEFLAGS) -j1; \
-	"$$@" || (test X'$(RECHECK)' = Xyes && "$$@" --recheck)
+	$(SHELL) '$(SYSTEM_USERSPACE_TESTSUITE)' -C tests VALGRIND='$(VALGRIND)' AUTOTEST_PATH='tests/valgrind:$(AUTOTEST_PATH)' -d $(TESTSUITEFLAGS) -j1
 	@echo
 	@echo '----------------------------------------------------------------------'
 	@echo 'Valgrind output can be found in tests/system-userspace-testsuite.dir/*/valgrind.*'
@@ -257,8 +289,8 @@ EXTRA_DIST += tests/run-ryu
 
 # Run kmod tests. Assume kernel modules has been installed or linked into the kernel
 check-kernel: all
-	set $(SHELL) '$(SYSTEM_KMOD_TESTSUITE)' -C tests  AUTOTEST_PATH='$(AUTOTEST_PATH)' $(TESTSUITEFLAGS) -j1; \
-	"$$@" || (test X'$(RECHECK)' = Xyes && "$$@" --recheck)
+	set $(SHELL) '$(SYSTEM_KMOD_TESTSUITE)' -C tests  AUTOTEST_PATH='$(AUTOTEST_PATH)'; \
+	"$$@" $(TESTSUITEFLAGS) -j1 || (test X'$(RECHECK)' = Xyes && "$$@" --recheck)
 
 # Testing the out of tree Kernel module
 check-kmod: all
@@ -267,16 +299,16 @@ check-kmod: all
 	$(MAKE) check-kernel
 
 check-system-userspace: all
-	set $(SHELL) '$(SYSTEM_USERSPACE_TESTSUITE)' -C tests  AUTOTEST_PATH='$(AUTOTEST_PATH)' $(TESTSUITEFLAGS) -j1; \
-	"$$@" || (test X'$(RECHECK)' = Xyes && "$$@" --recheck)
+	set $(SHELL) '$(SYSTEM_USERSPACE_TESTSUITE)' -C tests  AUTOTEST_PATH='$(AUTOTEST_PATH)'; \
+	"$$@" $(TESTSUITEFLAGS) -j1 || (test X'$(RECHECK)' = Xyes && "$$@" --recheck)
 
 check-offloads: all
-	set $(SHELL) '$(SYSTEM_OFFLOADS_TESTSUITE)' -C tests  AUTOTEST_PATH='$(AUTOTEST_PATH)' $(TESTSUITEFLAGS) -j1; \
-	"$$@" || (test X'$(RECHECK)' = Xyes && "$$@" --recheck)
+	set $(SHELL) '$(SYSTEM_OFFLOADS_TESTSUITE)' -C tests  AUTOTEST_PATH='$(AUTOTEST_PATH)'; \
+	"$$@" $(TESTSUITEFLAGS) -j1 || (test X'$(RECHECK)' = Xyes && "$$@" --recheck)
 
 check-dpdk: all
-	set $(SHELL) '$(SYSTEM_DPDK_TESTSUITE)' -C tests  AUTOTEST_PATH='$(AUTOTEST_PATH)' $(TESTSUITEFLAGS) -j1; \
-	"$$@" || (test X'$(RECHECK)' = Xyes && "$$@" --recheck)
+	set $(SHELL) '$(SYSTEM_DPDK_TESTSUITE)' -C tests  AUTOTEST_PATH='$(AUTOTEST_PATH)'; \
+	"$$@" $(TESTSUITEFLAGS) -j1 || (test X'$(RECHECK)' = Xyes && "$$@" --recheck)
 
 clean-local:
 	test ! -f '$(TESTSUITE)' || $(SHELL) '$(TESTSUITE)' -C tests --clean
@@ -404,6 +436,10 @@ endif
 
 tests_ovstest_LDADD = lib/libopenvswitch.la ovn/lib/libovn.la
 
+noinst_PROGRAMS += tests/test-stream
+tests_test_stream_SOURCES = tests/test-stream.c
+tests_test_stream_LDADD = lib/libopenvswitch.la
+
 noinst_PROGRAMS += tests/test-strtok_r
 tests_test_strtok_r_SOURCES = tests/test-strtok_r.c
 
@@ -421,6 +457,7 @@ CHECK_PYFILES = \
 	tests/test-l7.py \
 	tests/test-ovsdb.py \
 	tests/test-reconnect.py \
+	tests/test-stream.py \
 	tests/MockXenAPI.py \
 	tests/test-unix-socket.py \
 	tests/test-unixctl.py \
@@ -475,3 +512,5 @@ clean-pki:
 	rm -f tests/pki/stamp
 	rm -rf tests/pki
 endif
+
+include tests/oss-fuzz/automake.mk

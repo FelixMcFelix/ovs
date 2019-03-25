@@ -1282,6 +1282,39 @@ packet_set_icmp(struct dp_packet *packet, uint8_t type, uint8_t code)
 }
 
 void
+packet_set_nd_ext(struct dp_packet *packet, const ovs_16aligned_be32 rso_flags,
+                  const uint8_t opt_type)
+{
+    struct ovs_nd_msg *ns;
+    struct ovs_nd_lla_opt *opt;
+    int bytes_remain = dp_packet_l4_size(packet);
+    struct ovs_16aligned_ip6_hdr * nh = dp_packet_l3(packet);
+    uint32_t pseudo_hdr_csum = 0;
+
+    if (OVS_UNLIKELY(bytes_remain < sizeof(*ns))) {
+        return;
+    }
+
+    if (nh) {
+        pseudo_hdr_csum = packet_csum_pseudoheader6(nh);
+    }
+
+    ns = dp_packet_l4(packet);
+    opt = &ns->options[0];
+
+    /* set RSO flags and option type */
+    ns->rso_flags = rso_flags;
+    opt->type = opt_type;
+
+    /* recalculate checksum */
+    ovs_be16 *csum_value = &(ns->icmph.icmp6_cksum);
+    *csum_value = 0;
+    *csum_value = csum_finish(csum_continue(pseudo_hdr_csum,
+                              &(ns->icmph), bytes_remain));
+
+}
+
+void
 packet_set_nd(struct dp_packet *packet, const struct in6_addr *target,
               const struct eth_addr sll, const struct eth_addr tll)
 {
@@ -1613,7 +1646,6 @@ packet_put_ra_prefix_opt(struct dp_packet *b,
     struct ip6_hdr *nh = dp_packet_l3(b);
     nh->ip6_plen = htons(prev_l4_size + ND_PREFIX_OPT_LEN);
 
-    struct ovs_ra_msg *ra = dp_packet_l4(b);
     struct ovs_nd_prefix_opt *prefix_opt =
         dp_packet_put_uninit(b, sizeof *prefix_opt);
     prefix_opt->type = ND_OPT_PREFIX_INFORMATION;
@@ -1625,6 +1657,7 @@ packet_put_ra_prefix_opt(struct dp_packet *b,
     put_16aligned_be32(&prefix_opt->reserved, 0);
     memcpy(prefix_opt->prefix.be32, prefix.be32, sizeof(ovs_be32[4]));
 
+    struct ovs_ra_msg *ra = dp_packet_l4(b);
     ra->icmph.icmp6_cksum = 0;
     uint32_t icmp_csum = packet_csum_pseudoheader6(dp_packet_l3(b));
     ra->icmph.icmp6_cksum = csum_finish(csum_continue(
@@ -1662,7 +1695,7 @@ packet_csum_pseudoheader6(const struct ovs_16aligned_ip6_hdr *ip6)
 /* Calculate the IPv6 upper layer checksum according to RFC2460. We pass the
    ip6_nxt and ip6_plen values, so it will also work if extension headers
    are present. */
-uint16_t
+ovs_be16
 packet_csum_upperlayer6(const struct ovs_16aligned_ip6_hdr *ip6,
                         const void *data, uint8_t l4_protocol,
                         uint16_t l4_size)

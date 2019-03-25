@@ -151,10 +151,10 @@ AC_DEFUN([OVS_CHECK_LINUX], [
     AC_MSG_RESULT([$kversion])
 
     if test "$version" -ge 4; then
-       if test "$version" = 4 && test "$patchlevel" -le 14; then
+       if test "$version" = 4 && test "$patchlevel" -le 18; then
           : # Linux 4.x
        else
-          AC_ERROR([Linux kernel in $KBUILD is version $kversion, but version newer than 4.14.x is not supported (please refer to the FAQ for advice)])
+          AC_ERROR([Linux kernel in $KBUILD is version $kversion, but version newer than 4.18.x is not supported (please refer to the FAQ for advice)])
        fi
     elif test "$version" = 3 && test "$patchlevel" -ge 10; then
        : # Linux 3.x
@@ -178,31 +178,31 @@ dnl Configure Linux tc compat.
 AC_DEFUN([OVS_CHECK_LINUX_TC], [
   AC_COMPILE_IFELSE([
     AC_LANG_PROGRAM([#include <linux/pkt_cls.h>], [
-        int x = TCA_FLOWER_KEY_FLAGS_FRAG_IS_FIRST;
+        int x = TCA_FLOWER_KEY_ENC_IP_TTL_MASK;
     ])],
-    [AC_DEFINE([HAVE_TCA_FLOWER_KEY_FLAGS_FRAG_IS_FIRST], [1],
-               [Define to 1 if TCA_FLOWER_KEY_FLAGS_FRAG_IS_FIRST is avaiable.])])
+    [AC_DEFINE([HAVE_TCA_FLOWER_KEY_ENC_IP_TTL_MASK], [1],
+               [Define to 1 if TCA_FLOWER_KEY_ENC_IP_TTL_MASK is available.])])
 
   AC_COMPILE_IFELSE([
     AC_LANG_PROGRAM([#include <linux/tc_act/tc_vlan.h>], [
         int x = TCA_VLAN_PUSH_VLAN_PRIORITY;
     ])],
     [AC_DEFINE([HAVE_TCA_VLAN_PUSH_VLAN_PRIORITY], [1],
-               [Define to 1 if TCA_VLAN_PUSH_VLAN_PRIORITY is avaiable.])])
+               [Define to 1 if TCA_VLAN_PUSH_VLAN_PRIORITY is available.])])
 
   AC_COMPILE_IFELSE([
     AC_LANG_PROGRAM([#include <linux/tc_act/tc_tunnel_key.h>], [
-        int x = TCA_TUNNEL_KEY_ENC_DST_PORT;
+        int x = TCA_TUNNEL_KEY_ENC_TTL;
     ])],
-    [AC_DEFINE([HAVE_TCA_TUNNEL_KEY_ENC_DST_PORT], [1],
-               [Define to 1 if TCA_TUNNEL_KEY_ENC_DST_PORT is avaiable.])])
+    [AC_DEFINE([HAVE_TCA_TUNNEL_KEY_ENC_TTL], [1],
+               [Define to 1 if TCA_TUNNEL_KEY_ENC_TTL is available.])])
 
   AC_COMPILE_IFELSE([
     AC_LANG_PROGRAM([#include <linux/tc_act/tc_pedit.h>], [
         int x = TCA_PEDIT_KEY_EX_HDR_TYPE_UDP;
     ])],
     [AC_DEFINE([HAVE_TCA_PEDIT_KEY_EX_HDR_TYPE_UDP], [1],
-               [Define to 1 if TCA_PEDIT_KEY_EX_HDR_TYPE_UDP is avaiable.])])
+               [Define to 1 if TCA_PEDIT_KEY_EX_HDR_TYPE_UDP is available.])])
 ])
 
 dnl OVS_CHECK_DPDK
@@ -223,9 +223,11 @@ AC_DEFUN([OVS_CHECK_DPDK], [
     case "$with_dpdk" in
       yes)
         DPDK_AUTO_DISCOVER="true"
-        PKG_CHECK_MODULES([DPDK], [libdpdk],
-                          [DPDK_INCLUDE="$DPDK_CFLAGS"],
-                          [DPDK_INCLUDE="-I/usr/local/include/dpdk -I/usr/include/dpdk"])
+        PKG_CHECK_MODULES_STATIC([DPDK], [libdpdk], [
+            DPDK_INCLUDE="$DPDK_CFLAGS"
+            DPDK_LIB="$DPDK_LIBS"], [
+            DPDK_INCLUDE="-I/usr/local/include/dpdk -I/usr/include/dpdk"
+            DPDK_LIB="-ldpdk"])
         ;;
       *)
         DPDK_AUTO_DISCOVER="false"
@@ -238,11 +240,9 @@ AC_DEFUN([OVS_CHECK_DPDK], [
            DPDK_INCLUDE="-I$DPDK_INCLUDE_PATH/dpdk"
         fi
         DPDK_LIB_DIR="$with_dpdk/lib"
+        DPDK_LIB="-ldpdk"
         ;;
     esac
-
-    DPDK_LIB="-ldpdk"
-    DPDK_EXTRA_LIB=""
 
     ovs_save_CFLAGS="$CFLAGS"
     ovs_save_LDFLAGS="$LDFLAGS"
@@ -251,17 +251,20 @@ AC_DEFUN([OVS_CHECK_DPDK], [
       LDFLAGS="$LDFLAGS -L${DPDK_LIB_DIR}"
     fi
 
+    AC_CHECK_HEADERS([rte_config.h], [], [
+      AC_MSG_ERROR([unable to find rte_config.h in $with_dpdk])
+    ], [AC_INCLUDES_DEFAULT])
+
     AC_COMPILE_IFELSE([
       AC_LANG_PROGRAM(
         [
           #include <rte_config.h>
-#if RTE_LIBRTE_VHOST_NUMA
+#if defined(RTE_LIBRTE_VHOST_NUMA) || defined(RTE_EAL_NUMA_AWARE_HUGEPAGES)
 #error
 #endif
         ], [])
       ], [],
       [AC_SEARCH_LIBS([get_mempolicy],[numa],[],[AC_MSG_ERROR([unable to find libnuma, install the dependency package])])
-       DPDK_EXTRA_LIB="-lnuma"
        AC_DEFINE([VHOST_NUMA], [1], [NUMA Aware vHost support detected in DPDK.])])
 
     AC_COMPILE_IFELSE([
@@ -274,7 +277,6 @@ AC_DEFUN([OVS_CHECK_DPDK], [
         ], [])
       ], [],
       [AC_SEARCH_LIBS([pcap_dump],[pcap],[],[AC_MSG_ERROR([unable to find libpcap, install the dependency package])])
-       DPDK_EXTRA_LIB="-lpcap"
        AC_COMPILE_IFELSE([
          AC_LANG_PROGRAM(
            [
@@ -287,6 +289,53 @@ AC_DEFUN([OVS_CHECK_DPDK], [
        [AC_DEFINE([DPDK_PDUMP], [1], [DPDK pdump enabled in OVS.])])
      ])
 
+    AC_COMPILE_IFELSE([
+      AC_LANG_PROGRAM(
+        [
+          #include <rte_config.h>
+#if RTE_LIBRTE_MLX5_PMD
+#error
+#endif
+        ], [])
+      ], [],
+      [AC_SEARCH_LIBS([mnl_attr_put],[mnl],[],[AC_MSG_ERROR([unable to find libmnl, install the dependency package])])])
+
+    AC_COMPILE_IFELSE([
+      AC_LANG_PROGRAM(
+        [
+          #include <rte_config.h>
+#if defined(RTE_LIBRTE_MLX5_PMD) && !defined(RTE_LIBRTE_MLX5_DLOPEN_DEPS)
+#error
+#endif
+        ], [])
+      ], [],
+      [AC_SEARCH_LIBS([mlx5dv_create_wq],[mlx5],[],[AC_MSG_ERROR([unable to find libmlx5, install the dependency package])])])
+
+    AC_COMPILE_IFELSE([
+      AC_LANG_PROGRAM(
+        [
+          #include <rte_config.h>
+#if defined(RTE_LIBRTE_MLX4_PMD) && !defined(RTE_LIBRTE_MLX4_DLOPEN_DEPS)
+#error
+#endif
+        ], [])
+      ], [],
+      [AC_SEARCH_LIBS([mlx4dv_init_obj],[mlx4],[],[AC_MSG_ERROR([unable to find libmlx4, install the dependency package])])])
+
+    AC_COMPILE_IFELSE([
+      AC_LANG_PROGRAM(
+        [
+          #include <rte_config.h>
+#if defined(RTE_LIBRTE_MLX5_PMD) && !defined(RTE_LIBRTE_MLX5_DLOPEN_DEPS)
+#error
+#endif
+#if defined(RTE_LIBRTE_MLX4_PMD) && !defined(RTE_LIBRTE_MLX4_DLOPEN_DEPS)
+#error
+#endif
+        ], [])
+      ], [],
+      [AC_SEARCH_LIBS([verbs_init_cq],[ibverbs],[],[AC_MSG_ERROR([unable to find libibverbs, install the dependency package])])])
+
     # On some systems we have to add -ldl to link with dpdk
     #
     # This code, at first, tries to link without -ldl (""),
@@ -297,7 +346,7 @@ AC_DEFUN([OVS_CHECK_DPDK], [
     DPDKLIB_FOUND=false
     save_LIBS=$LIBS
     for extras in "" "-ldl"; do
-        LIBS="$DPDK_LIB $extras $save_LIBS $DPDK_EXTRA_LIB"
+        LIBS="$DPDK_LIB $extras $save_LIBS"
         AC_LINK_IFELSE(
            [AC_LANG_PROGRAM([#include <rte_config.h>
                              #include <rte_eal.h>],
@@ -333,7 +382,14 @@ AC_DEFUN([OVS_CHECK_DPDK], [
     #
     # These options are specified inside a single -Wl directive to prevent
     # autotools from reordering them.
-    DPDK_vswitchd_LDFLAGS=-Wl,--whole-archive,$DPDK_LIB,--no-whole-archive
+    #
+    # OTOH newer versions of dpdk pkg-config (generated with Meson)
+    # will already have flagged just the right set of libs with
+    # --whole-archive - in those cases do not wrap it once more.
+    case "$DPDK_LIB" in
+      *whole-archive*) DPDK_vswitchd_LDFLAGS=$DPDK_LIB;;
+      *) DPDK_vswitchd_LDFLAGS=-Wl,--whole-archive,$DPDK_LIB,--no-whole-archive
+    esac
     AC_SUBST([DPDK_vswitchd_LDFLAGS])
     AC_DEFINE([DPDK_NETDEV], [1], [System uses the DPDK module.])
   fi
@@ -459,6 +515,9 @@ AC_DEFUN([OVS_CHECK_LINUX_COMPAT], [
   OVS_GREP_IFELSE([$KSRC/arch/x86/include/asm/checksum_32.h], [src_err,],
                   [OVS_DEFINE([HAVE_CSUM_COPY_DBG])])
 
+  OVS_GREP_IFELSE([$KSRC/include/net/ip6_fib.h], [rt6_get_cookie],
+                  [OVS_DEFINE([HAVE_RT6_GET_COOKIE])])
+
   OVS_GREP_IFELSE([$KSRC/include/net/addrconf.h], [ipv6_dst_lookup.*net],
                   [OVS_DEFINE([HAVE_IPV6_DST_LOOKUP_NET])])
   OVS_GREP_IFELSE([$KSRC/include/net/addrconf.h], [ipv6_stub])
@@ -466,6 +525,11 @@ AC_DEFUN([OVS_CHECK_LINUX_COMPAT], [
   OVS_GREP_IFELSE([$KSRC/include/linux/err.h], [ERR_CAST])
   OVS_GREP_IFELSE([$KSRC/include/linux/err.h], [IS_ERR_OR_NULL])
   OVS_GREP_IFELSE([$KSRC/include/linux/err.h], [PTR_ERR_OR_ZERO])
+
+  OVS_GREP_IFELSE([$KSRC/include/linux/jump_label.h], [static_branch_unlikely(],
+                  [OVS_DEFINE([HAVE_UPSTREAM_STATIC_KEY])])
+  OVS_GREP_IFELSE([$KSRC/include/linux/jump_label.h], [DEFINE_STATIC_KEY_FALSE],
+                  [OVS_DEFINE([HAVE_DEFINE_STATIC_KEY])])
 
   OVS_GREP_IFELSE([$KSRC/include/linux/etherdevice.h], [eth_hw_addr_random])
   OVS_GREP_IFELSE([$KSRC/include/linux/etherdevice.h], [ether_addr_copy])
@@ -553,6 +617,7 @@ AC_DEFUN([OVS_CHECK_LINUX_COMPAT], [
                   [OVS_DEFINE([USE_UPSTREAM_TUNNEL_GSO])])
   OVS_GREP_IFELSE([$KSRC/include/linux/netdevice.h], [ndo_add_vxlan_port])
   OVS_GREP_IFELSE([$KSRC/include/linux/netdevice.h], [ndo_add_geneve_port])
+  OVS_GREP_IFELSE([$KSRC/include/linux/netdevice.h], [ndo_udp_tunnel_add])
   OVS_GREP_IFELSE([$KSRC/include/linux/netdevice.h], [netdev_features_t])
   dnl Ubuntu kernel 3.13 has defined this struct but not used for netdev->tstats.
   dnl So check type of tstats.
@@ -588,6 +653,8 @@ AC_DEFUN([OVS_CHECK_LINUX_COMPAT], [
                   [OVS_DEFINE([HAVE_NF_HOOKFN_ARG_PRIV])])
   OVS_FIND_FIELD_IFELSE([$KSRC/include/linux/netfilter.h], [nf_hook_ops],
                         [owner], [OVS_DEFINE([HAVE_NF_HOOKS_OPS_OWNER])])
+  OVS_GREP_IFELSE([$KSRC/include/linux/netfilter.h], [NFPROTO_INET])
+
 
   OVS_FIND_FIELD_IFELSE([$KSRC/include/linux/netfilter_ipv6.h], [nf_ipv6_ops],
                         [fragment.*sock], [OVS_DEFINE([HAVE_NF_IPV6_OPS_FRAGMENT])])
@@ -610,6 +677,8 @@ AC_DEFUN([OVS_CHECK_LINUX_COMPAT], [
                   [nf_ct_is_untracked])
   OVS_GREP_IFELSE([$KSRC/include/net/netfilter/nf_conntrack_zones.h],
                   [nf_ct_zone_init])
+  OVS_GREP_IFELSE([$KSRC/include/net/netfilter/nf_conntrack_l3proto.h],
+                  [net_ns_get])
   OVS_GREP_IFELSE([$KSRC/include/net/netfilter/nf_conntrack_labels.h],
                   [nf_connlabels_get])
   OVS_FIND_PARAM_IFELSE([$KSRC/include/net/netfilter/nf_conntrack_labels.h],
@@ -619,7 +688,10 @@ AC_DEFUN([OVS_CHECK_LINUX_COMPAT], [
                         [nf_conn_labels], [words])
   OVS_GREP_IFELSE([$KSRC/include/net/netfilter/nf_nat.h], [nf_ct_nat_ext_add])
   OVS_GREP_IFELSE([$KSRC/include/net/netfilter/nf_nat.h], [nf_nat_alloc_null_binding])
+  OVS_GREP_IFELSE([$KSRC/include/net/netfilter/nf_nat.h], [nf_nat_range2])
   OVS_GREP_IFELSE([$KSRC/include/net/netfilter/nf_conntrack_seqadj.h], [nf_ct_seq_adjust])
+  OVS_GREP_IFELSE([$KSRC/include/net/netfilter/nf_conntrack_count.h], [nf_conncount_gc_list],
+                  [OVS_DEFINE([HAVE_UPSTREAM_NF_CONNCOUNT])])
 
   OVS_GREP_IFELSE([$KSRC/include/linux/random.h], [prandom_u32])
   OVS_GREP_IFELSE([$KSRC/include/linux/random.h], [prandom_u32_max])
@@ -634,6 +706,7 @@ AC_DEFUN([OVS_CHECK_LINUX_COMPAT], [
                   [OVS_GREP_IFELSE([$KSRC/include/linux/rtnetlink.h],
                                    [rcu_read_lock_held])])
   OVS_GREP_IFELSE([$KSRC/include/linux/rtnetlink.h], [lockdep_rtnl_is_held])
+  OVS_GREP_IFELSE([$KSRC/include/linux/rtnetlink.h], [net_rwsem])
 
   # Check for the proto_data_valid member in struct sk_buff.  The [^@]
   # is necessary because some versions of this header remove the
@@ -877,6 +950,17 @@ AC_DEFUN([OVS_CHECK_LINUX_COMPAT], [
                         [OVS_DEFINE([HAVE_SKBUFF_CSUM_VALID])])
   OVS_GREP_IFELSE([$KSRC/include/linux/skbuff.h],
                   [skb_checksum_simple_validate])
+  OVS_GREP_IFELSE([$KSRC/include/linux/netdevice.h],
+                  [void.*ndo_get_stats64],
+                  [OVS_DEFINE([HAVE_VOID_NDO_GET_STATS64])])
+  OVS_GREP_IFELSE([$KSRC/include/linux/timer.h], [init_timer_deferrable],
+                  [OVS_DEFINE([HAVE_INIT_TIMER_DEFERRABLE])])
+  OVS_FIND_PARAM_IFELSE([$KSRC/include/net/ip_tunnels.h],
+                        [ip_tunnel_info_opts_set], [flags],
+                        [OVS_DEFINE([HAVE_IP_TUNNEL_INFO_OPTS_SET_FLAGS])])
+  OVS_FIND_FIELD_IFELSE([$KSRC/include/net/inet_frag.h], [inet_frags],
+                        [rnd],
+                        [OVS_DEFINE([HAVE_INET_FRAGS_RND])])
 
   if cmp -s datapath/linux/kcompat.h.new \
             datapath/linux/kcompat.h >/dev/null 2>&1; then
@@ -885,17 +969,6 @@ AC_DEFUN([OVS_CHECK_LINUX_COMPAT], [
     mv datapath/linux/kcompat.h.new datapath/linux/kcompat.h
   fi
 ])
-
-dnl Checks for net/if_packet.h.
-AC_DEFUN([OVS_CHECK_IF_PACKET],
-  [AC_CHECK_HEADER([net/if_packet.h],
-                   [HAVE_IF_PACKET=yes],
-                   [HAVE_IF_PACKET=no])
-   AM_CONDITIONAL([HAVE_IF_PACKET], [test "$HAVE_IF_PACKET" = yes])
-   if test "$HAVE_IF_PACKET" = yes; then
-      AC_DEFINE([HAVE_IF_PACKET], [1],
-                [Define to 1 if net/if_packet.h is available.])
-   fi])
 
 dnl Checks for net/if_dl.h.
 dnl
@@ -976,7 +1049,11 @@ AC_DEFUN([_OVS_CHECK_CC_OPTION], [dnl
      dnl    gcc: unrecognized option '-Qunused-arguments'
      dnl    0
      dnl    %
-     CFLAGS="$CFLAGS $WERROR $1"
+     dnl
+     dnl In addition, GCC does not complain about a -Wno-<foo> option that
+     dnl it does not understand, unless it has another error to report, so
+     dnl instead of testing for -Wno-<foo>, test for the positive version.
+     CFLAGS="$CFLAGS $WERROR m4_bpatsubst([$1], [-Wno-], [-W])"
      AC_COMPILE_IFELSE(
        [AC_LANG_SOURCE([int x;])],
        [if test -s conftest.err && grep "unrecognized option" conftest.err

@@ -136,7 +136,7 @@ multipath_algorithm(uint32_t hash, enum nx_mp_algorithm algorithm,
 }
 
 /* Parses 's_' as a set of arguments to the "multipath" action and initializes
- * 'mp' accordingly.  ovs-ofctl(8) describes the format parsed.
+ * 'mp' accordingly.  ovs-actions(7) describes the format parsed.
  *
  * Returns NULL if successful, otherwise a malloc()'d string describing the
  * error.  The caller is responsible for freeing the returned string.*/
@@ -171,6 +171,8 @@ multipath_parse__(struct ofpact_multipath *mp, const char *s_, char *s)
         mp->fields = NX_HASH_FIELDS_NW_SRC;
     } else if (!strcasecmp(fields, "nw_dst")) {
         mp->fields = NX_HASH_FIELDS_NW_DST;
+    } else if (!strcasecmp(fields, "symmetric_l3")) {
+        mp->fields = NX_HASH_FIELDS_SYMMETRIC_L3;
     } else {
         return xasprintf("%s: unknown fields `%s'", s_, fields);
     }
@@ -212,7 +214,7 @@ multipath_parse__(struct ofpact_multipath *mp, const char *s_, char *s)
 }
 
 /* Parses 's_' as a set of arguments to the "multipath" action and initializes
- * 'mp' accordingly.  ovs-ofctl(8) describes the format parsed.
+ * 'mp' accordingly.  ovs-actions(7) describes the format parsed.
  *
  * Returns NULL if successful, otherwise a malloc()'d string describing the
  * error.  The caller is responsible for freeing the returned string. */
@@ -225,7 +227,7 @@ multipath_parse(struct ofpact_multipath *mp, const char *s_)
     return error;
 }
 
-/* Appends a description of 'mp' to 's', in the format that ovs-ofctl(8)
+/* Appends a description of 'mp' to 's', in the format that ovs-actions(7)
  * describes. */
 void
 multipath_format(const struct ofpact_multipath *mp, struct ds *s)

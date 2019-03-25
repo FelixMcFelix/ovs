@@ -52,7 +52,7 @@ struct netlink_field {
     int size;
 };
 
-static struct netlink_field set_flower_map[][3] = {
+static struct netlink_field set_flower_map[][4] = {
     [OVS_KEY_ATTR_IPV4] = {
         { offsetof(struct ovs_key_ipv4, ipv4_src),
           offsetof(struct tc_flower_key, ipv4.ipv4_src),
@@ -66,6 +66,10 @@ static struct netlink_field set_flower_map[][3] = {
           offsetof(struct tc_flower_key, ipv4.rewrite_ttl),
           MEMBER_SIZEOF(struct tc_flower_key, ipv4.rewrite_ttl)
         },
+        { offsetof(struct ovs_key_ipv4, ipv4_tos),
+          offsetof(struct tc_flower_key, ipv4.rewrite_tos),
+          MEMBER_SIZEOF(struct tc_flower_key, ipv4.rewrite_tos)
+        },
     },
     [OVS_KEY_ATTR_IPV6] = {
         { offsetof(struct ovs_key_ipv6, ipv6_src),
@@ -75,6 +79,14 @@ static struct netlink_field set_flower_map[][3] = {
         { offsetof(struct ovs_key_ipv6, ipv6_dst),
           offsetof(struct tc_flower_key, ipv6.ipv6_dst),
           MEMBER_SIZEOF(struct tc_flower_key, ipv6.ipv6_dst)
+        },
+        { offsetof(struct ovs_key_ipv6, ipv6_hlimit),
+          offsetof(struct tc_flower_key, ipv6.rewrite_hlimit),
+          MEMBER_SIZEOF(struct tc_flower_key, ipv6.rewrite_hlimit)
+        },
+        { offsetof(struct ovs_key_ipv6, ipv6_tclass),
+          offsetof(struct tc_flower_key, ipv6.rewrite_tclass),
+          MEMBER_SIZEOF(struct tc_flower_key, ipv6.rewrite_tclass)
         },
     },
     [OVS_KEY_ATTR_ETHERNET] = {
@@ -163,8 +175,20 @@ del_ufid_tc_mapping(const ovs_u128 *ufid)
     ovs_mutex_unlock(&ufid_lock);
 }
 
-/* Add ufid entry to ufid_tc hashmap.
- * If entry exists already it will be replaced. */
+/* Wrapper function to delete filter and ufid tc mapping */
+static int
+del_filter_and_ufid_mapping(int ifindex, int prio, int handle,
+                            uint32_t block_id, const ovs_u128 *ufid)
+{
+    int err;
+
+    err = tc_del_filter(ifindex, prio, handle, block_id);
+    del_ufid_tc_mapping(ufid);
+
+    return err;
+}
+
+/* Add ufid entry to ufid_tc hashmap. */
 static void
 add_ufid_tc_mapping(const ovs_u128 *ufid, int prio, int handle,
                     struct netdev *netdev, int ifindex)
@@ -172,8 +196,6 @@ add_ufid_tc_mapping(const ovs_u128 *ufid, int prio, int handle,
     size_t ufid_hash = hash_bytes(ufid, sizeof *ufid, 0);
     size_t tc_hash = hash_int(hash_int(prio, handle), ifindex);
     struct ufid_tc_data *new_data = xzalloc(sizeof *new_data);
-
-    del_ufid_tc_mapping(ufid);
 
     new_data->ufid = *ufid;
     new_data->prio = prio;
@@ -264,7 +286,7 @@ get_prio_for_tc_flower(struct tc_flower *flower)
 {
     static struct hmap prios = HMAP_INITIALIZER(&prios);
     static struct ovs_mutex prios_lock = OVS_MUTEX_INITIALIZER;
-    static uint16_t last_prio = 0;
+    static uint16_t last_prio = TC_RESERVED_PRIORITY_MAX;
     size_t key_len = sizeof(struct tc_flower_key);
     size_t hash = hash_int((OVS_FORCE uint32_t) flower->key.eth_type, 0);
     struct prio_map_data *data;
@@ -409,6 +431,61 @@ parse_flower_rewrite_to_netlink_action(struct ofpbuf *buf,
     }
 }
 
+static void parse_tc_flower_geneve_opts(struct tc_action *action,
+                                        struct ofpbuf *buf)
+{
+    int tun_opt_len = action->encap.data.present.len;
+    size_t geneve_off;
+    int idx = 0;
+
+    if (!tun_opt_len) {
+        return;
+    }
+
+    geneve_off = nl_msg_start_nested(buf, OVS_TUNNEL_KEY_ATTR_GENEVE_OPTS);
+    while (tun_opt_len) {
+        struct geneve_opt *opt;
+
+        opt = &action->encap.data.opts.gnv[idx];
+        nl_msg_put(buf, opt, sizeof(struct geneve_opt) + opt->length * 4);
+        idx += sizeof(struct geneve_opt) / 4 + opt->length;
+        tun_opt_len -= sizeof(struct geneve_opt) + opt->length * 4;
+    }
+    nl_msg_end_nested(buf, geneve_off);
+}
+
+static void
+flower_tun_opt_to_match(struct match *match, struct tc_flower *flower)
+{
+    struct geneve_opt *opt, *opt_mask;
+    int len, cnt = 0;
+
+    memcpy(match->flow.tunnel.metadata.opts.gnv,
+           flower->key.tunnel.metadata.opts.gnv,
+           flower->key.tunnel.metadata.present.len);
+    match->flow.tunnel.metadata.present.len =
+           flower->key.tunnel.metadata.present.len;
+    match->flow.tunnel.flags |= FLOW_TNL_F_UDPIF;
+    memcpy(match->wc.masks.tunnel.metadata.opts.gnv,
+           flower->mask.tunnel.metadata.opts.gnv,
+           flower->mask.tunnel.metadata.present.len);
+
+    len = flower->key.tunnel.metadata.present.len;
+    while (len) {
+        opt = &match->flow.tunnel.metadata.opts.gnv[cnt];
+        opt_mask = &match->wc.masks.tunnel.metadata.opts.gnv[cnt];
+
+        opt_mask->length = 0x1f;
+
+        cnt += sizeof(struct geneve_opt) / 4 + opt->length;
+        len -= sizeof(struct geneve_opt) + opt->length * 4;
+    }
+
+    match->wc.masks.tunnel.metadata.present.len =
+           flower->mask.tunnel.metadata.present.len;
+    match->wc.masks.tunnel.flags |= FLOW_TNL_F_UDPIF;
+}
+
 static int
 parse_tc_flower_to_match(struct tc_flower *flower,
                          struct match *match,
@@ -430,11 +507,26 @@ parse_tc_flower_to_match(struct tc_flower *flower,
     match_set_dl_src_masked(match, key->src_mac, mask->src_mac);
     match_set_dl_dst_masked(match, key->dst_mac, mask->dst_mac);
 
-    if (key->eth_type == htons(ETH_TYPE_VLAN)) {
-        match_set_dl_vlan(match, htons(key->vlan_id));
-        match_set_dl_vlan_pcp(match, key->vlan_prio);
-        match_set_dl_type(match, key->encap_eth_type);
+    if (eth_type_vlan(key->eth_type)) {
+        match->flow.vlans[0].tpid = key->eth_type;
+        match->wc.masks.vlans[0].tpid = OVS_BE16_MAX;
+        match_set_dl_vlan(match, htons(key->vlan_id[0]), 0);
+        match_set_dl_vlan_pcp(match, key->vlan_prio[0], 0);
+
+        if (eth_type_vlan(key->encap_eth_type[0])) {
+            match_set_dl_vlan(match, htons(key->vlan_id[1]), 1);
+            match_set_dl_vlan_pcp(match, key->vlan_prio[1], 1);
+            match_set_dl_type(match, key->encap_eth_type[1]);
+            match->flow.vlans[1].tpid = key->encap_eth_type[0];
+            match->wc.masks.vlans[1].tpid = OVS_BE16_MAX;
+        } else {
+            match_set_dl_type(match, key->encap_eth_type[0]);
+        }
         flow_fix_vlan_tpid(&match->flow);
+    } else if (eth_type_mpls(key->eth_type)) {
+        match->flow.mpls_lse[0] = key->mpls_lse & mask->mpls_lse;
+        match->wc.masks.mpls_lse[0] = mask->mpls_lse;
+        match_set_dl_type(match, key->encap_eth_type[0]);
     } else {
         match_set_dl_type(match, key->eth_type);
     }
@@ -444,6 +536,7 @@ parse_tc_flower_to_match(struct tc_flower *flower,
             match_set_nw_proto(match, key->ip_proto);
         }
 
+        match_set_nw_tos_masked(match, key->ip_tos, mask->ip_tos);
         match_set_nw_ttl_masked(match, key->ip_ttl, mask->ip_ttl);
 
         if (mask->flags) {
@@ -488,18 +581,31 @@ parse_tc_flower_to_match(struct tc_flower *flower,
         }
     }
 
-    if (flower->tunnel.tunnel) {
-        match_set_tun_id(match, flower->tunnel.id);
-        if (flower->tunnel.ipv4.ipv4_dst) {
-            match_set_tun_src(match, flower->tunnel.ipv4.ipv4_src);
-            match_set_tun_dst(match, flower->tunnel.ipv4.ipv4_dst);
-        } else if (!is_all_zeros(&flower->tunnel.ipv6.ipv6_dst,
-                   sizeof flower->tunnel.ipv6.ipv6_dst)) {
-            match_set_tun_ipv6_src(match, &flower->tunnel.ipv6.ipv6_src);
-            match_set_tun_ipv6_dst(match, &flower->tunnel.ipv6.ipv6_dst);
+    if (flower->tunnel) {
+        if (flower->mask.tunnel.id) {
+            match_set_tun_id(match, flower->key.tunnel.id);
         }
-        if (flower->tunnel.tp_dst) {
-            match_set_tun_tp_dst(match, flower->tunnel.tp_dst);
+        if (flower->key.tunnel.ipv4.ipv4_dst) {
+            match_set_tun_src(match, flower->key.tunnel.ipv4.ipv4_src);
+            match_set_tun_dst(match, flower->key.tunnel.ipv4.ipv4_dst);
+        } else if (!is_all_zeros(&flower->key.tunnel.ipv6.ipv6_dst,
+                   sizeof flower->key.tunnel.ipv6.ipv6_dst)) {
+            match_set_tun_ipv6_src(match, &flower->key.tunnel.ipv6.ipv6_src);
+            match_set_tun_ipv6_dst(match, &flower->key.tunnel.ipv6.ipv6_dst);
+        }
+        if (flower->key.tunnel.tos) {
+            match_set_tun_tos_masked(match, flower->key.tunnel.tos,
+                                     flower->mask.tunnel.tos);
+        }
+        if (flower->key.tunnel.ttl) {
+            match_set_tun_ttl_masked(match, flower->key.tunnel.ttl,
+                                     flower->mask.tunnel.ttl);
+        }
+        if (flower->key.tunnel.tp_dst) {
+            match_set_tun_tp_dst(match, flower->key.tunnel.tp_dst);
+        }
+        if (flower->key.tunnel.metadata.present.len) {
+            flower_tun_opt_to_match(match, flower);
         }
     }
 
@@ -517,7 +623,7 @@ parse_tc_flower_to_match(struct tc_flower *flower,
 
                 push = nl_msg_put_unspec_zero(buf, OVS_ACTION_ATTR_PUSH_VLAN,
                                               sizeof *push);
-                push->vlan_tpid = htons(ETH_TYPE_VLAN);
+                push->vlan_tpid = action->vlan.vlan_push_tpid;
                 push->vlan_tci = htons(action->vlan.vlan_push_id
                                        | (action->vlan.vlan_push_prio << 13)
                                        | VLAN_CFI);
@@ -532,7 +638,9 @@ parse_tc_flower_to_match(struct tc_flower *flower,
                 size_t tunnel_offset =
                     nl_msg_start_nested(buf, OVS_KEY_ATTR_TUNNEL);
 
-                nl_msg_put_be64(buf, OVS_TUNNEL_KEY_ATTR_ID, action->encap.id);
+                if (action->encap.id_present) {
+                    nl_msg_put_be64(buf, OVS_TUNNEL_KEY_ATTR_ID, action->encap.id);
+                }
                 if (action->encap.ipv4.ipv4_src) {
                     nl_msg_put_be32(buf, OVS_TUNNEL_KEY_ATTR_IPV4_SRC,
                                     action->encap.ipv4.ipv4_src);
@@ -551,9 +659,24 @@ parse_tc_flower_to_match(struct tc_flower *flower,
                     nl_msg_put_in6_addr(buf, OVS_TUNNEL_KEY_ATTR_IPV6_DST,
                                         &action->encap.ipv6.ipv6_dst);
                 }
-                nl_msg_put_be16(buf, OVS_TUNNEL_KEY_ATTR_TP_DST,
-                                action->encap.tp_dst);
+                if (action->encap.tos) {
+                    nl_msg_put_u8(buf, OVS_TUNNEL_KEY_ATTR_TOS,
+                                  action->encap.tos);
+                }
+                if (action->encap.ttl) {
+                    nl_msg_put_u8(buf, OVS_TUNNEL_KEY_ATTR_TTL,
+                                  action->encap.ttl);
+                }
+                if (action->encap.tp_dst) {
+                    nl_msg_put_be16(buf, OVS_TUNNEL_KEY_ATTR_TP_DST,
+                                    action->encap.tp_dst);
+                }
+                if (!action->encap.no_csum) {
+                    nl_msg_put_u8(buf, OVS_TUNNEL_KEY_ATTR_CSUM,
+                                  !action->encap.no_csum);
+                }
 
+                parse_tc_flower_geneve_opts(action, buf);
                 nl_msg_end_nested(buf, tunnel_offset);
                 nl_msg_end_nested(buf, set_offset);
             }
@@ -719,11 +842,13 @@ parse_put_flow_set_action(struct tc_flower *flower, struct tc_action *action,
     tunnel_len = nl_attr_get_size(set);
 
     action->type = TC_ACT_ENCAP;
+    action->encap.id_present = false;
     flower->action_count++;
     NL_ATTR_FOR_EACH_UNSAFE(tun_attr, tun_left, tunnel, tunnel_len) {
         switch (nl_attr_type(tun_attr)) {
         case OVS_TUNNEL_KEY_ATTR_ID: {
             action->encap.id = nl_attr_get_be64(tun_attr);
+            action->encap.id_present = true;
         }
         break;
         case OVS_TUNNEL_KEY_ATTR_IPV4_SRC: {
@@ -732,6 +857,14 @@ parse_put_flow_set_action(struct tc_flower *flower, struct tc_action *action,
         break;
         case OVS_TUNNEL_KEY_ATTR_IPV4_DST: {
             action->encap.ipv4.ipv4_dst = nl_attr_get_be32(tun_attr);
+        }
+        break;
+        case OVS_TUNNEL_KEY_ATTR_TOS: {
+            action->encap.tos = nl_attr_get_u8(tun_attr);
+        }
+        break;
+        case OVS_TUNNEL_KEY_ATTR_TTL: {
+            action->encap.ttl = nl_attr_get_u8(tun_attr);
         }
         break;
         case OVS_TUNNEL_KEY_ATTR_IPV6_SRC: {
@@ -750,6 +883,12 @@ parse_put_flow_set_action(struct tc_flower *flower, struct tc_action *action,
         break;
         case OVS_TUNNEL_KEY_ATTR_TP_DST: {
             action->encap.tp_dst = nl_attr_get_be16(tun_attr);
+        }
+        break;
+        case OVS_TUNNEL_KEY_ATTR_GENEVE_OPTS: {
+            memcpy(action->encap.data.opts.gnv, nl_attr_get(tun_attr),
+                   nl_attr_get_size(tun_attr));
+            action->encap.data.present.len = nl_attr_get_size(tun_attr);
         }
         break;
         }
@@ -841,9 +980,9 @@ test_key_and_mask(struct match *match)
         return EOPNOTSUPP;
     }
 
-    for (int i = 0; i < FLOW_MAX_MPLS_LABELS; i++) {
+    for (int i = 1; i < FLOW_MAX_MPLS_LABELS; i++) {
         if (mask->mpls_lse[i]) {
-            VLOG_DBG_RL(&rl, "offloading attribute mpls_lse isn't supported");
+            VLOG_DBG_RL(&rl, "offloading multiple mpls_lses isn't supported");
             return EOPNOTSUPP;
         }
     }
@@ -876,14 +1015,18 @@ test_key_and_mask(struct match *match)
                key->nw_proto == IPPROTO_ICMPV6) {
         if (mask->tp_src) {
             VLOG_DBG_RL(&rl,
-                        "offloading attribute icmp_type isn't supported");
+                        "offloading attribute icmpv6_type isn't supported");
             return EOPNOTSUPP;
         }
         if (mask->tp_dst) {
             VLOG_DBG_RL(&rl,
-                        "offloading attribute icmp_code isn't supported");
+                        "offloading attribute icmpv6_code isn't supported");
             return EOPNOTSUPP;
         }
+    } else if (key->dl_type == htons(OFP_DL_TYPE_NOT_ETH_TYPE)) {
+        VLOG_DBG_RL(&rl,
+                    "offloading of non-ethernet packets isn't supported");
+        return EOPNOTSUPP;
     }
 
     if (!is_all_zeros(mask, sizeof *mask)) {
@@ -892,6 +1035,34 @@ test_key_and_mask(struct match *match)
     }
 
     return 0;
+}
+
+static void
+flower_match_to_tun_opt(struct tc_flower *flower, const struct flow_tnl *tnl,
+                        const struct flow_tnl *tnl_mask)
+{
+    struct geneve_opt *opt, *opt_mask;
+    int len, cnt = 0;
+
+    memcpy(flower->key.tunnel.metadata.opts.gnv, tnl->metadata.opts.gnv,
+           tnl->metadata.present.len);
+    flower->key.tunnel.metadata.present.len = tnl->metadata.present.len;
+
+    memcpy(flower->mask.tunnel.metadata.opts.gnv, tnl_mask->metadata.opts.gnv,
+           tnl->metadata.present.len);
+
+    len = flower->key.tunnel.metadata.present.len;
+    while (len) {
+        opt = &flower->key.tunnel.metadata.opts.gnv[cnt];
+        opt_mask = &flower->mask.tunnel.metadata.opts.gnv[cnt];
+
+        opt_mask->length = opt->length;
+
+        cnt += sizeof(struct geneve_opt) / 4 + opt->length;
+        len -= sizeof(struct geneve_opt) + opt->length * 4;
+    }
+
+    flower->mask.tunnel.metadata.present.len = tnl->metadata.present.len;
 }
 
 int
@@ -905,6 +1076,7 @@ netdev_tc_flow_put(struct netdev *netdev, struct match *match,
     const struct flow *key = &match->flow;
     struct flow *mask = &match->wc.masks;
     const struct flow_tnl *tnl = &match->flow.tunnel;
+    const struct flow_tnl *tnl_mask = &mask->tunnel;
     struct tc_action *action;
     uint32_t block_id = 0;
     struct nlattr *nla;
@@ -930,19 +1102,31 @@ netdev_tc_flow_put(struct netdev *netdev, struct match *match,
                     ntohll(tnl->tun_id),
                     IP_ARGS(tnl->ip_src), IP_ARGS(tnl->ip_dst),
                     ntohs(tnl->tp_src), ntohs(tnl->tp_dst));
-        flower.tunnel.id = tnl->tun_id;
-        flower.tunnel.ipv4.ipv4_src = tnl->ip_src;
-        flower.tunnel.ipv4.ipv4_dst = tnl->ip_dst;
-        flower.tunnel.ipv6.ipv6_src = tnl->ipv6_src;
-        flower.tunnel.ipv6.ipv6_dst = tnl->ipv6_dst;
-        flower.tunnel.tp_src = tnl->tp_src;
-        flower.tunnel.tp_dst = tnl->tp_dst;
-        flower.tunnel.tunnel = true;
+        flower.key.tunnel.id = tnl->tun_id;
+        flower.key.tunnel.ipv4.ipv4_src = tnl->ip_src;
+        flower.key.tunnel.ipv4.ipv4_dst = tnl->ip_dst;
+        flower.key.tunnel.ipv6.ipv6_src = tnl->ipv6_src;
+        flower.key.tunnel.ipv6.ipv6_dst = tnl->ipv6_dst;
+        flower.key.tunnel.tos = tnl->ip_tos;
+        flower.key.tunnel.ttl = tnl->ip_ttl;
+        flower.key.tunnel.tp_src = tnl->tp_src;
+        flower.key.tunnel.tp_dst = tnl->tp_dst;
+        flower.mask.tunnel.tos = tnl_mask->ip_tos;
+        flower.mask.tunnel.ttl = tnl_mask->ip_ttl;
+        flower.mask.tunnel.id = (tnl->flags & FLOW_TNL_F_KEY) ? tnl_mask->tun_id : 0;
+        flower_match_to_tun_opt(&flower, tnl, tnl_mask);
+        flower.tunnel = true;
     }
     memset(&mask->tunnel, 0, sizeof mask->tunnel);
 
     flower.key.eth_type = key->dl_type;
     flower.mask.eth_type = mask->dl_type;
+    if (mask->mpls_lse[0]) {
+        flower.key.mpls_lse = key->mpls_lse[0];
+        flower.mask.mpls_lse = mask->mpls_lse[0];
+        flower.key.encap_eth_type[0] = flower.key.eth_type;
+    }
+    mask->mpls_lse[0] = 0;
 
     if (mask->vlans[0].tci) {
         ovs_be16 vid_mask = mask->vlans[0].tci & htons(VLAN_VID_MASK);
@@ -954,15 +1138,18 @@ netdev_tc_flow_put(struct netdev *netdev, struct match *match,
             && (!pcp_mask || pcp_mask == htons(VLAN_PCP_MASK))
             && (vid_mask || pcp_mask)) {
             if (vid_mask) {
-                flower.key.vlan_id = vlan_tci_to_vid(key->vlans[0].tci);
-                VLOG_DBG_RL(&rl, "vlan_id: %d\n", flower.key.vlan_id);
+                flower.key.vlan_id[0] = vlan_tci_to_vid(key->vlans[0].tci);
+                flower.mask.vlan_id[0] = vlan_tci_to_vid(mask->vlans[0].tci);
+                VLOG_DBG_RL(&rl, "vlan_id[0]: %d\n", flower.key.vlan_id[0]);
             }
             if (pcp_mask) {
-                flower.key.vlan_prio = vlan_tci_to_pcp(key->vlans[0].tci);
-                VLOG_DBG_RL(&rl, "vlan_prio: %d\n", flower.key.vlan_prio);
+                flower.key.vlan_prio[0] = vlan_tci_to_pcp(key->vlans[0].tci);
+                flower.mask.vlan_prio[0] = vlan_tci_to_pcp(mask->vlans[0].tci);
+                VLOG_DBG_RL(&rl, "vlan_prio[0]: %d\n",
+                            flower.key.vlan_prio[0]);
             }
-            flower.key.encap_eth_type = flower.key.eth_type;
-            flower.key.eth_type = htons(ETH_TYPE_VLAN);
+            flower.key.encap_eth_type[0] = flower.key.eth_type;
+            flower.key.eth_type = key->vlans[0].tpid;
         } else if (mask->vlans[0].tci == htons(0xffff) &&
                    ntohs(key->vlans[0].tci) == 0) {
             /* exact && no vlan */
@@ -970,8 +1157,36 @@ netdev_tc_flow_put(struct netdev *netdev, struct match *match,
             /* partial mask */
             return EOPNOTSUPP;
         }
-    } else if (mask->vlans[1].tci) {
-        return EOPNOTSUPP;
+    }
+
+    if (mask->vlans[1].tci) {
+        ovs_be16 vid_mask = mask->vlans[1].tci & htons(VLAN_VID_MASK);
+        ovs_be16 pcp_mask = mask->vlans[1].tci & htons(VLAN_PCP_MASK);
+        ovs_be16 cfi = mask->vlans[1].tci & htons(VLAN_CFI);
+
+        if (cfi && key->vlans[1].tci & htons(VLAN_CFI)
+            && (!vid_mask || vid_mask == htons(VLAN_VID_MASK))
+            && (!pcp_mask || pcp_mask == htons(VLAN_PCP_MASK))
+            && (vid_mask || pcp_mask)) {
+            if (vid_mask) {
+                flower.key.vlan_id[1] = vlan_tci_to_vid(key->vlans[1].tci);
+                flower.mask.vlan_id[1] = vlan_tci_to_vid(mask->vlans[1].tci);
+                VLOG_DBG_RL(&rl, "vlan_id[1]: %d", flower.key.vlan_id[1]);
+            }
+            if (pcp_mask) {
+                flower.key.vlan_prio[1] = vlan_tci_to_pcp(key->vlans[1].tci);
+                flower.mask.vlan_prio[1] = vlan_tci_to_pcp(mask->vlans[1].tci);
+                VLOG_DBG_RL(&rl, "vlan_prio[1]: %d", flower.key.vlan_prio[1]);
+            }
+            flower.key.encap_eth_type[1] = flower.key.encap_eth_type[0];
+            flower.key.encap_eth_type[0] = key->vlans[1].tpid;
+        } else if (mask->vlans[1].tci == htons(0xffff) &&
+                   ntohs(key->vlans[1].tci) == 0) {
+            /* exact && no vlan */
+        } else {
+            /* partial mask */
+            return EOPNOTSUPP;
+        }
     }
     memset(mask->vlans, 0, sizeof mask->vlans);
 
@@ -987,8 +1202,13 @@ netdev_tc_flow_put(struct netdev *netdev, struct match *match,
     if (is_ip_any(key)) {
         flower.key.ip_proto = key->nw_proto;
         flower.mask.ip_proto = mask->nw_proto;
+        mask->nw_proto = 0;
+        flower.key.ip_tos = key->nw_tos;
+        flower.mask.ip_tos = mask->nw_tos;
+        mask->nw_tos = 0;
         flower.key.ip_ttl = key->nw_ttl;
         flower.mask.ip_ttl = mask->nw_ttl;
+        mask->nw_ttl = 0;
 
         if (mask->nw_frag & FLOW_NW_FRAG_ANY) {
             flower.mask.flags |= TCA_FLOWER_KEY_FLAGS_IS_FRAGMENT;
@@ -1034,10 +1254,6 @@ netdev_tc_flow_put(struct netdev *netdev, struct match *match,
             mask->tp_dst = 0;
         }
 
-        mask->nw_tos = 0;
-        mask->nw_proto = 0;
-        mask->nw_ttl = 0;
-
         if (key->dl_type == htons(ETH_P_IP)) {
             flower.key.ipv4.ipv4_src = key->nw_src;
             flower.mask.ipv4.ipv4_src = mask->nw_src;
@@ -1077,6 +1293,7 @@ netdev_tc_flow_put(struct netdev *netdev, struct match *match,
         } else if (nl_attr_type(nla) == OVS_ACTION_ATTR_PUSH_VLAN) {
             const struct ovs_action_push_vlan *vlan_push = nl_attr_get(nla);
 
+            action->vlan.vlan_push_tpid = vlan_push->vlan_tpid;
             action->vlan.vlan_push_id = vlan_tci_to_vid(vlan_push->vlan_tci);
             action->vlan.vlan_push_prio = vlan_tci_to_pcp(vlan_push->vlan_tci);
             action->type = TC_ACT_VLAN_PUSH;
@@ -1094,6 +1311,7 @@ netdev_tc_flow_put(struct netdev *netdev, struct match *match,
             }
             if (action->type == TC_ACT_ENCAP) {
                 action->encap.tp_dst = info->tp_dst_port;
+                action->encap.no_csum = !info->tunnel_csum_on;
             }
         } else if (nl_attr_type(nla) == OVS_ACTION_ATTR_SET_MASKED) {
             const struct nlattr *set = nl_attr_get(nla);
@@ -1115,7 +1333,7 @@ netdev_tc_flow_put(struct netdev *netdev, struct match *match,
     handle = get_ufid_tc_mapping(ufid, &prio, NULL);
     if (handle && prio) {
         VLOG_DBG_RL(&rl, "updating old handle: %d prio: %d", handle, prio);
-        tc_del_filter(ifindex, prio, handle, block_id);
+        del_filter_and_ufid_mapping(ifindex, prio, handle, block_id, ufid);
     }
 
     if (!prio) {
@@ -1169,9 +1387,9 @@ netdev_tc_flow_get(struct netdev *netdev OVS_UNUSED,
         return -ifindex;
     }
 
-    VLOG_DBG_RL(&rl, "flow get (dev %s prio %d handle %d)",
-                netdev_get_name(dev), prio, handle);
-    block_id = get_block_id_from_netdev(netdev);
+    block_id = get_block_id_from_netdev(dev);
+    VLOG_DBG_RL(&rl, "flow get (dev %s prio %d handle %d block_id %d)",
+                netdev_get_name(dev), prio, handle, block_id);
     err = tc_get_flower(ifindex, prio, handle, &flower, block_id);
     netdev_close(dev);
     if (err) {
@@ -1215,7 +1433,7 @@ netdev_tc_flow_del(struct netdev *netdev OVS_UNUSED,
         return -ifindex;
     }
 
-    block_id = get_block_id_from_netdev(netdev);
+    block_id = get_block_id_from_netdev(dev);
 
     if (stats) {
         memset(stats, 0, sizeof *stats);
@@ -1226,8 +1444,7 @@ netdev_tc_flow_del(struct netdev *netdev OVS_UNUSED,
         }
     }
 
-    error = tc_del_filter(ifindex, prio, handle, block_id);
-    del_ufid_tc_mapping(ufid);
+    error = del_filter_and_ufid_mapping(ifindex, prio, handle, block_id, ufid);
 
     netdev_close(dev);
 
@@ -1309,6 +1526,9 @@ netdev_tc_init_flow_api(struct netdev *netdev)
                     netdev_get_name(netdev), ovs_strerror(-ifindex));
         return -ifindex;
     }
+
+    /* make sure there is no ingress qdisc */
+    tc_add_del_ingress_qdisc(ifindex, false, 0);
 
     if (ovsthread_once_start(&block_once)) {
         probe_tc_block_support(ifindex);

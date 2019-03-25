@@ -70,7 +70,7 @@ OpenFlow version.  One exception is that, when \fIactions\fR includes
 an action that only OpenFlow 1.1 and later supports (such as
 \fBpush_vlan\fR), \fB\-\-consistent\fR is automatically enabled.
 .
-.IP "--ct-next \fIflags\fR"
+.IP "\fB\-\-ct-next\fR \fIflags\fR"
 When the traced flow triggers conntrack actions, \fBofproto/trace\fR
 will automatically trace the forked packet processing pipeline with
 user specified ct_state.  This option sets the ct_state flags that the
@@ -107,8 +107,9 @@ changed.
 .RE
 .
 .IP
-When --ct-next is unspecified, or when there are fewer --ct-next options than
-ct actions, the \fIflags\fR default to trk,new.
+When \fB\-\-ct-next\fR is unspecified, or when there are fewer
+\fB\-\-ct-next\fR options than ct \fIactions\fR, the \fIflags\fR default to
+\fBtrk,new\fR.
 .
 .RE
 .
@@ -126,9 +127,9 @@ effects when a packet is specified.  If you want side effects to take
 place, then you must supply a packet.
 .
 .IP
-(Side effects when tracing do not have external consequences.  Even if a
-packet is specified, a trace will not output a packet or generate sFlow,
-NetFlow or controller events.)
+(Output actions are obviously side effects too, but
+the trace commands never execute them, even when one specifies a
+packet.)
 .
 .IP "Incomplete information."
 Most of the time, Open vSwitch can figure out everything about the

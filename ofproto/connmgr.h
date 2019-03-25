@@ -37,26 +37,6 @@ struct rule;
 struct simap;
 struct sset;
 
-/* ofproto supports two kinds of OpenFlow connections:
- *
- *   - "Primary" connections to ordinary OpenFlow controllers.  ofproto
- *     maintains persistent connections to these controllers and by default
- *     sends them asynchronous messages such as packet-ins.
- *
- *   - "Service" connections, e.g. from ovs-ofctl.  When these connections
- *     drop, it is the other side's responsibility to reconnect them if
- *     necessary.  ofproto does not send them asynchronous messages by default.
- *
- * Currently, active (tcp, ssl, unix) connections are always "primary"
- * connections and passive (ptcp, pssl, punix) connections are always "service"
- * connections.  There is no inherent reason for this, but it reflects the
- * common case.
- */
-enum ofconn_type {
-    OFCONN_PRIMARY,             /* An ordinary OpenFlow controller. */
-    OFCONN_SERVICE              /* A service connection, e.g. "ovs-ofctl". */
-};
-
 /* An asynchronous message that might need to be queued between threads. */
 struct ofproto_async_msg {
     struct ovs_list list_node;  /* For queuing. */
@@ -79,7 +59,7 @@ void connmgr_destroy(struct connmgr *)
 
 void connmgr_run(struct connmgr *,
                  void (*handle_openflow)(struct ofconn *,
-                                         const struct ofpbuf *ofp_msg));
+                                         const struct ovs_list *msgs));
 void connmgr_wait(struct connmgr *);
 
 void connmgr_get_memory_usage(const struct connmgr *, struct simap *usage);
@@ -94,9 +74,7 @@ void connmgr_retry(struct connmgr *);
 bool connmgr_has_controllers(const struct connmgr *);
 void connmgr_get_controller_info(struct connmgr *, struct shash *);
 void connmgr_free_controller_info(struct shash *);
-void connmgr_set_controllers(struct connmgr *,
-                             const struct ofproto_controller[], size_t n,
-                             uint32_t allowed_versions);
+void connmgr_set_controllers(struct connmgr *, struct shash *);
 void connmgr_reconnect(const struct connmgr *);
 
 int connmgr_set_snoops(struct connmgr *, const struct sset *snoops);
@@ -147,7 +125,9 @@ void ofconn_report_flow_mod(struct ofconn *, enum ofp_flow_mod_command);
 /* Sending asynchronous messages. */
 bool connmgr_wants_packet_in_on_miss(struct connmgr *mgr);
 void connmgr_send_port_status(struct connmgr *, struct ofconn *source,
-                              const struct ofputil_phy_port *, uint8_t reason);
+                              const struct ofputil_phy_port *old_pp,
+                              const struct ofputil_phy_port *new_pp,
+                              uint8_t reason);
 void connmgr_send_flow_removed(struct connmgr *,
                                const struct ofputil_flow_removed *)
     OVS_REQUIRES(ofproto_mutex);

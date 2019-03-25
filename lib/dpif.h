@@ -274,18 +274,6 @@
  *
  *    - Upcalls that specify the "special" Netlink PID are queued separately.
  *
- * Multiple threads may want to read upcalls simultaneously from a single
- * datapath.  To support multiple threads well, one extends the above preferred
- * behavior:
- *
- *    - Each port has multiple PIDs.  The datapath distributes "miss" upcalls
- *      across the PIDs, ensuring that a given flow is mapped in a stable way
- *      to a single PID.
- *
- *    - For "action" upcalls, the thread can specify its own Netlink PID or
- *      other threads' Netlink PID of the same port for offloading purpose
- *      (e.g. in a "round robin" manner).
- *
  *
  * Packet Format
  * =============
@@ -470,8 +458,7 @@ int dpif_port_query_by_name(const struct dpif *, const char *devname,
                             struct dpif_port *);
 int dpif_port_get_name(struct dpif *, odp_port_t port_no,
                        char *name, size_t name_size);
-uint32_t dpif_port_get_pid(const struct dpif *, odp_port_t port_no,
-                           uint32_t hash);
+uint32_t dpif_port_get_pid(const struct dpif *, odp_port_t port_no);
 
 struct dpif_port_dump {
     const struct dpif *dpif;
@@ -510,6 +497,11 @@ struct dpif_flow_stats {
 struct dpif_flow_attrs {
     bool offloaded;         /* True if flow is offloaded to HW. */
     const char *dp_layer;   /* DP layer the flow is handled in. */
+};
+
+struct dpif_flow_dump_types {
+    bool ovs_flows;
+    bool netdev_flows;
 };
 
 void dpif_flow_stats_extract(const struct flow *, const struct dp_packet *packet,
@@ -573,7 +565,7 @@ int dpif_flow_get(struct dpif *,
  * All error reporting is deferred to the call to dpif_flow_dump_destroy().
  */
 struct dpif_flow_dump *dpif_flow_dump_create(const struct dpif *, bool terse,
-                                             char *type);
+                                             struct dpif_flow_dump_types *);
 int dpif_flow_dump_destroy(struct dpif_flow_dump *);
 
 struct dpif_flow_dump_thread *dpif_flow_dump_thread_create(
@@ -612,6 +604,13 @@ enum dpif_op_type {
     DPIF_OP_FLOW_DEL,
     DPIF_OP_EXECUTE,
     DPIF_OP_FLOW_GET,
+};
+
+/* offload_type argument types to (*operate) interface */
+enum dpif_offload_type {
+    DPIF_OFFLOAD_AUTO,         /* Offload if possible, fallback to software. */
+    DPIF_OFFLOAD_NEVER,        /* Never offload to hardware. */
+    DPIF_OFFLOAD_ALWAYS,       /* Always offload to hardware. */
 };
 
 /* Add or modify a flow.
@@ -768,7 +767,8 @@ struct dpif_op {
     };
 };
 
-void dpif_operate(struct dpif *, struct dpif_op **ops, size_t n_ops);
+void dpif_operate(struct dpif *, struct dpif_op **ops, size_t n_ops,
+                  enum dpif_offload_type);
 
 /* Upcalls. */
 
@@ -868,7 +868,7 @@ void dpif_print_packet(struct dpif *, struct dpif_upcall *);
 /* Meters. */
 void dpif_meter_get_features(const struct dpif *,
                              struct ofputil_meter_features *);
-int dpif_meter_set(struct dpif *, ofproto_meter_id *meter_id,
+int dpif_meter_set(struct dpif *, ofproto_meter_id meter_id,
                    struct ofputil_meter_config *);
 int dpif_meter_get(const struct dpif *, ofproto_meter_id meter_id,
                    struct ofputil_meter_stats *, uint16_t n_bands);

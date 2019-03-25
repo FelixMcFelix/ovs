@@ -15,18 +15,20 @@ EXTRA_DIST += \
 	rhel/etc_sysconfig_network-scripts_ifup-ovs \
 	rhel/openvswitch-dkms.spec \
 	rhel/openvswitch-dkms.spec.in \
-	rhel/openvswitch-kmod-rhel6.spec \
-	rhel/openvswitch-kmod-rhel6.spec.in \
-	rhel/openvswitch-kmod.files \
+	rhel/kmod-openvswitch-rhel6.spec \
+	rhel/kmod-openvswitch-rhel6.spec.in \
 	rhel/openvswitch-kmod-fedora.spec \
 	rhel/openvswitch-kmod-fedora.spec.in \
 	rhel/openvswitch.spec \
 	rhel/openvswitch.spec.in \
 	rhel/openvswitch-fedora.spec \
 	rhel/openvswitch-fedora.spec.in \
+	rhel/ovn-fedora.spec \
+	rhel/ovn-fedora.spec.in \
 	rhel/usr_share_openvswitch_scripts_ovs-systemd-reload \
 	rhel/usr_share_openvswitch_scripts_sysconfig.template \
 	rhel/usr_share_openvswitch_scripts_systemd_sysconfig.template \
+	rhel/usr_share_openvswitch_scripts_ovs-kmod-manage.sh \
 	rhel/usr_lib_udev_rules.d_91-vfio.rules \
 	rhel/usr_lib_systemd_system_openvswitch.service \
 	rhel/usr_lib_systemd_system_ovsdb-server.service \
@@ -35,6 +37,7 @@ EXTRA_DIST += \
 	rhel/usr_lib_systemd_system_ovn-controller.service \
 	rhel/usr_lib_systemd_system_ovn-controller-vtep.service \
 	rhel/usr_lib_systemd_system_ovn-northd.service \
+	rhel/usr_lib_systemd_system_openvswitch-ipsec.service \
 	rhel/usr_lib_firewalld_services_ovn-central-firewall-service.xml \
 	rhel/usr_lib_firewalld_services_ovn-host-firewall-service.xml
 
@@ -48,7 +51,7 @@ update_rhel_spec = \
 $(srcdir)/rhel/openvswitch-dkms.spec: rhel/openvswitch-dkms.spec.in $(top_builddir)/config.status
 	$(update_rhel_spec)
 
-$(srcdir)/rhel/openvswitch-kmod-rhel6.spec: rhel/openvswitch-kmod-rhel6.spec.in $(top_builddir)/config.status
+$(srcdir)/rhel/kmod-openvswitch-rhel6.spec: rhel/kmod-openvswitch-rhel6.spec.in $(top_builddir)/config.status
 	$(update_rhel_spec)
 
 $(srcdir)/rhel/openvswitch-kmod-fedora.spec: rhel/openvswitch-kmod-fedora.spec.in $(top_builddir)/config.status
@@ -70,6 +73,13 @@ rpm-fedora: dist $(srcdir)/rhel/openvswitch-fedora.spec
 	rpmbuild ${RPMBUILD_OPT} \
                  -D "_topdir ${RPMBUILD_TOP}" \
                  -ba $(srcdir)/rhel/openvswitch-fedora.spec
+
+rpm-fedora-ovn: dist $(srcdir)/rhel/ovn-fedora.spec
+	${MKDIR_P} ${RPMBUILD_TOP}/SOURCES
+	cp ${DIST_ARCHIVES} ${RPMBUILD_TOP}/SOURCES
+	rpmbuild ${RPMBUILD_OPT} \
+                 -D "_topdir ${RPMBUILD_TOP}" \
+                 -ba $(srcdir)/rhel/ovn-fedora.spec
 
 # Build kernel datapath RPM
 rpm-fedora-kmod: dist $(srcdir)/rhel/openvswitch-kmod-fedora.spec

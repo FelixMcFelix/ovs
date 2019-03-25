@@ -468,15 +468,16 @@ sflow_choose_agent_address(const char *agent_device,
     const char *target;
     SSET_FOR_EACH (target, targets) {
         struct sockaddr_storage ss;
-        if (inet_parse_active(target, SFL_DEFAULT_COLLECTOR_PORT, &ss)) {
+        if (inet_parse_active(target, SFL_DEFAULT_COLLECTOR_PORT, &ss, true)) {
             /* sFlow only supports target in default routing table with
              * packet mark zero.
              */
-            ip = ss_get_address(&ss);
+            struct in6_addr target_ip = ss_get_address(&ss);
 
             struct in6_addr gw, src = in6addr_any;
             char name[IFNAMSIZ];
-            if (ovs_router_lookup(0, &ip, name, &src, &gw)) {
+            if (ovs_router_lookup(0, &target_ip, name, &src, &gw)) {
+                ip = src;
                 goto success;
             }
         }
@@ -987,7 +988,7 @@ sflow_read_set_action(const struct nlattr *attr,
             /* Do not handle multi-encap for now. */
             sflow_actions->tunnel_err = true;
         } else {
-            if (odp_tun_key_from_attr(attr, &sflow_actions->tunnel)
+            if (odp_tun_key_from_attr(attr, &sflow_actions->tunnel, NULL)
                 == ODP_FIT_ERROR) {
                 /* Tunnel parsing error. */
                 sflow_actions->tunnel_err = true;
@@ -1054,6 +1055,7 @@ sflow_read_set_action(const struct nlattr *attr,
     case OVS_KEY_ATTR_ICMPV6:
     case OVS_KEY_ATTR_ARP:
     case OVS_KEY_ATTR_ND:
+    case OVS_KEY_ATTR_ND_EXTENSIONS:
     case OVS_KEY_ATTR_CT_STATE:
     case OVS_KEY_ATTR_CT_ZONE:
     case OVS_KEY_ATTR_CT_MARK:

@@ -81,6 +81,14 @@
         default configuration suggested in <code>ovn-architecture</code>(7).
       </dd>
 
+      <dt><code>external_ids:ovn-bridge-datapath-type</code></dt>
+      <dd>
+        This configuration is optional. If set, then the datapath type of
+        the integration bridge will be set to the configured value. If this
+        option is not set, then <code>ovn-controller</code> will not modify
+        the existing <code>datapath-type</code> of the integration bridge.
+      </dd>
+
       <dt><code>external_ids:ovn-remote</code></dt>
       <dd>
         <p>
@@ -369,6 +377,16 @@
         Lists each local logical port and its connection tracking zone.
       </dd>
 
+      <dt><code>meter-table-list</code></dt>
+      <dd>
+        Lists each meter table entry and its local meter id.
+      </dd>
+
+      <dt><code>group-table-list</code></dt>
+      <dd>
+        Lists each group table entry and its local group id.
+      </dd>
+
       <dt><code>inject-pkt</code> <var>microflow</var></dt>
       <dd>
       <p>
@@ -387,6 +405,11 @@
         need to explicitly state <code>ip4</code> or <code>eth.type ==
         0x800</code>.
       </p>
+      </dd>
+
+      <dt><code>connection-status</code></dt>
+      <dd>
+        Show OVN SBDB connection status for the chassis.
       </dd>
       </dl>
     </p>

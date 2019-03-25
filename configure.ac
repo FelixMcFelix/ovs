@@ -13,7 +13,7 @@
 # limitations under the License.
 
 AC_PREREQ(2.63)
-AC_INIT(openvswitch, 2.9.90, bugs@openvswitch.org)
+AC_INIT(openvswitch, 2.11.90, bugs@openvswitch.org)
 AC_CONFIG_SRCDIR([datapath/datapath.c])
 AC_CONFIG_MACRO_DIR([m4])
 AC_CONFIG_AUX_DIR([build-aux])
@@ -77,7 +77,8 @@ AC_SUBST([LT_AGE])
 AC_SEARCH_LIBS([pow], [m])
 AC_SEARCH_LIBS([clock_gettime], [rt])
 AC_SEARCH_LIBS([timer_create], [rt])
-AC_SEARCH_LIBS([pthread_create], [pthread])
+AC_SEARCH_LIBS([pthread_rwlock_tryrdlock], [pthread])
+AC_SEARCH_LIBS([pthread_rwlockattr_destroy], [pthread])
 AC_FUNC_STRERROR_R
 
 OVS_CHECK_ESX
@@ -90,12 +91,12 @@ OVS_CHECK_NETLINK
 OVS_CHECK_OPENSSL
 OVS_CHECK_LIBCAPNG
 OVS_CHECK_LOGDIR
-OVS_CHECK_PYTHON
+OVS_CHECK_PYTHON2
 OVS_CHECK_PYTHON3
+OVS_CHECK_PYTHON
 OVS_CHECK_FLAKE8
 OVS_CHECK_SPHINX
 OVS_CHECK_DOT
-OVS_CHECK_IF_PACKET
 OVS_CHECK_IF_DL
 OVS_CHECK_STRTOK_R
 AC_CHECK_DECLS([sys_siglist], [], [], [[#include <signal.h>]])
@@ -109,7 +110,7 @@ AC_CHECK_MEMBERS([struct sockaddr_in6.sin6_scope_id], [], [],
 #include <netinet/in.h>]])
 AC_CHECK_FUNCS([mlockall strnlen getloadavg statvfs getmntent_r sendmmsg clock_gettime])
 AC_CHECK_HEADERS([mntent.h sys/statvfs.h linux/types.h linux/if_ether.h])
-AC_CHECK_HEADERS([linux/net_namespace.h stdatomic.h])
+AC_CHECK_HEADERS([linux/net_namespace.h stdatomic.h bits/floatn-common.h])
 AC_CHECK_HEADERS([net/if_mib.h], [], [], [[#include <sys/types.h>
 #include <net/if.h>]])
 
@@ -135,6 +136,7 @@ OVS_CHECK_LINUX_HOST
 OVS_LIBTOOL_VERSIONS
 OVS_CHECK_CXX
 AX_FUNC_POSIX_MEMALIGN
+OVS_CHECK_UNBOUND
 
 OVS_CHECK_INCLUDE_NEXT([stdio.h string.h])
 AC_CONFIG_FILES([
@@ -170,6 +172,10 @@ OVS_ENABLE_OPTION([-Wshift-negative-value])
 OVS_ENABLE_OPTION([-Wduplicated-cond])
 OVS_ENABLE_OPTION([-Qunused-arguments])
 OVS_ENABLE_OPTION([-Wshadow])
+OVS_ENABLE_OPTION([-Wmultistatement-macros])
+OVS_ENABLE_OPTION([-Wcast-align=strict])
+OVS_ENABLE_OPTION([-Wno-null-pointer-arithmetic])
+OVS_ENABLE_OPTION([-Warray-bounds-pointer-arithmetic])
 OVS_CONDITIONAL_CC_OPTION([-Wno-unused], [HAVE_WNO_UNUSED])
 OVS_CONDITIONAL_CC_OPTION([-Wno-unused-parameter], [HAVE_WNO_UNUSED_PARAMETER])
 OVS_ENABLE_WERROR
@@ -203,6 +209,7 @@ AC_CONFIG_COMMANDS([include/openflow/openflow.h.stamp])
 AC_CONFIG_COMMANDS([utilities/bugtool/dummy], [:])
 AC_CONFIG_COMMANDS([ovn/dummy], [:])
 AC_CONFIG_COMMANDS([ovn/utilities/dummy], [:])
+AC_CONFIG_COMMANDS([ipsec/dummy], [:])
 
 m4_ifdef([AM_SILENT_RULES], [AM_SILENT_RULES])
 

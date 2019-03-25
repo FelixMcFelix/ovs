@@ -15,6 +15,8 @@
  */
 
 #include <config.h>
+#include <string.h>
+
 #include "bitmap.h"
 #include "hash.h"
 #include "openvswitch/vlog.h"
@@ -31,26 +33,25 @@ ovn_extend_table_init(struct ovn_extend_table *table)
     hmap_init(&table->existing);
 }
 
+static void
+ovn_extend_table_info_destroy(struct hmap *target)
+{
+    struct ovn_extend_table_info *e, *next;
+    HMAP_FOR_EACH_SAFE (e, next, hmap_node, target) {
+        hmap_remove(target, &e->hmap_node);
+        free(e->name);
+        free(e);
+    }
+    hmap_destroy(target);
+}
+
 void
 ovn_extend_table_destroy(struct ovn_extend_table *table)
 {
     bitmap_free(table->table_ids);
 
-    struct ovn_extend_table_info *desired, *d_next;
-    HMAP_FOR_EACH_SAFE (desired, d_next, hmap_node, &table->existing) {
-        hmap_remove(&table->existing, &desired->hmap_node);
-        ds_destroy(&desired->info);
-        free(desired);
-    }
-    hmap_destroy(&table->desired);
-
-    struct ovn_extend_table_info *existing, *e_next;
-    HMAP_FOR_EACH_SAFE (existing, e_next, hmap_node, &table->existing) {
-        hmap_remove(&table->existing, &existing->hmap_node);
-        ds_destroy(&existing->info);
-        free(existing);
-    }
-    hmap_destroy(&table->existing);
+    ovn_extend_table_info_destroy(&table->desired);
+    ovn_extend_table_info_destroy(&table->existing);
 }
 
 /* Finds and returns a group_info in 'existing' whose key is identical
@@ -84,7 +85,7 @@ ovn_extend_table_clear(struct ovn_extend_table *table, bool existing)
         if (existing || g->new_table_id) {
             bitmap_set0(table->table_ids, g->table_id);
         }
-        ds_destroy(&g->info);
+        free(g->name);
         free(g);
     }
 }
@@ -95,7 +96,7 @@ ovn_extend_table_remove(struct ovn_extend_table *table,
 {
     /* Remove 'existing' from 'groups->existing' */
     hmap_remove(&table->existing, &existing->hmap_node);
-    ds_destroy(&existing->info);
+    free(existing->name);
 
     /* Dealloc group_id. */
     bitmap_set0(table->table_ids, existing->table_id);
@@ -115,7 +116,7 @@ ovn_extend_table_move(struct ovn_extend_table *table)
             hmap_insert(&table->existing, &desired->hmap_node,
                         desired->hmap_node.hash);
         } else {
-           ds_destroy(&desired->info);
+           free(desired->name);
            free(desired);
         }
     }
@@ -124,16 +125,16 @@ ovn_extend_table_move(struct ovn_extend_table *table)
 /* Assign a new table ID for the table information from the bitmap.
  * If it already exists, return the old ID. */
 uint32_t
-ovn_extend_table_assign_id(struct ovn_extend_table *table, struct ds *ds)
+ovn_extend_table_assign_id(struct ovn_extend_table *table, const char *name)
 {
     uint32_t table_id = 0, hash;
     struct ovn_extend_table_info *table_info;
 
-    hash = hash_string(ds_cstr(ds), 0);
+    hash = hash_string(name, 0);
 
     /* Check whether we have non installed but allocated group_id. */
     HMAP_FOR_EACH_WITH_HASH (table_info, hmap_node, hash, &table->desired) {
-        if (!strcmp(ds_cstr(&table_info->info), ds_cstr(ds))) {
+        if (!strcmp(table_info->name, name)) {
             return table_info->table_id;
         }
     }
@@ -141,7 +142,7 @@ ovn_extend_table_assign_id(struct ovn_extend_table *table, struct ds *ds)
     /* Check whether we already have an installed entry for this
      * combination. */
     HMAP_FOR_EACH_WITH_HASH (table_info, hmap_node, hash, &table->existing) {
-        if (!strcmp(ds_cstr(&table_info->info), ds_cstr(ds))) {
+        if (!strcmp(table_info->name, name)) {
             table_id = table_info->table_id;
         }
     }
@@ -161,7 +162,7 @@ ovn_extend_table_assign_id(struct ovn_extend_table *table, struct ds *ds)
     bitmap_set1(table->table_ids, table_id);
 
     table_info = xmalloc(sizeof *table_info);
-    ds_clone(&table_info->info, ds);
+    table_info->name = xstrdup(name);
     table_info->table_id = table_id;
     table_info->hmap_node.hash = hash;
     table_info->new_table_id = new_table_id;

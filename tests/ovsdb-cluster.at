@@ -18,7 +18,7 @@ ovsdb_check_cluster () {
         AT_CHECK([ovsdb-server -vraft -vconsole:off -vsyslog:off --detach --no-chdir --log-file=s$i.log --pidfile=s$i.pid --unixctl=s$i --remote=punix:s$i.ovsdb s$i.db])
     done
     for i in `seq $n`; do
-        AT_CHECK([ovsdb-client --timeout=30 wait unix:s$i.ovsdb $schema connected])
+        AT_CHECK([ovsdb_client_wait unix:s$i.ovsdb $schema connected])
     done
 
     for txn
@@ -100,15 +100,15 @@ ovsdb|WARN|schema: changed 2 columns in 'OVN_Southbound' database from ephemeral
     connect_server() {
         local i=$1
         printf "\ns$i: waiting to connect to storage\n"
-        AT_CHECK([ovsdb-client --timeout=30 -vfile -vsyslog:off -vvlog:off --log-file=connect$i.log wait unix:s$i.ovsdb $schema connected])
+        AT_CHECK([ovsdb_client_wait --log-file=connect$i.log unix:s$i.ovsdb $schema connected])
     }
     remove_server() {
         local i=$1
         printf "\ns$i: removing from cluster\n"
         AT_CHECK([ovs-appctl --timeout=30 -t "`pwd`"/s$i cluster/leave OVN_Southbound])
         printf "\ns$i: waiting for removal to complete\n"
-        AT_CHECK([ovsdb-client --timeout=30 -vfile -vsyslog:off -vvlog:off --log-file=remove$i.log wait unix:s$i.ovsdb $schema removed])
-        stop_server $victim
+        AT_CHECK([ovsdb_client_wait --log-file=remove$i.log unix:s$i.ovsdb $schema removed])
+        stop_server $i
     }
     add_server() {
         local i=$1
@@ -149,9 +149,10 @@ ovsdb|WARN|schema: changed 2 columns in 'OVN_Southbound' database from ephemeral
     sleep 2
 
     echo "waiting for ovn-sbctl processes to exit..."
-    phase=0
+    # Use file instead of var because code inside "while" runs in a subshell.
+    echo 0 > phase
     i=0
-    (while :; do echo; sleep 1; done) | while read; do
+    (while :; do echo; sleep 1; done) | while read REPLY; do
         printf "t=%2d s:" $i
         done=0
         for j in $(seq 0 $(expr $n1 - 1)); do
@@ -165,7 +166,7 @@ ovsdb|WARN|schema: changed 2 columns in 'OVN_Southbound' database from ephemeral
             break
         fi
 
-        case $phase in # (
+        case $(cat phase) in # (
         0)
             if test $done -ge $(expr $n1 / 4); then
                 if test $variant = kill; then
@@ -173,7 +174,7 @@ ovsdb|WARN|schema: changed 2 columns in 'OVN_Southbound' database from ephemeral
                 else
                     remove_server $victim
                 fi
-                phase=1
+                echo 1 > phase
                 next=$(expr $i + 2)
             fi
             ;; # (
@@ -185,7 +186,7 @@ ovsdb|WARN|schema: changed 2 columns in 'OVN_Southbound' database from ephemeral
                 else
                     add_server $victim
                 fi
-                phase=2
+                echo 2 > phase
             fi
             ;;
         esac
@@ -193,17 +194,17 @@ ovsdb|WARN|schema: changed 2 columns in 'OVN_Southbound' database from ephemeral
         i=$(expr $i + 1)
     done
     echo "...done"
-    AT_CHECK([if test $phase != 2; then exit 77; fi])
+    AT_CHECK([if test $(cat phase) != 2; then exit 77; fi])
 
     for i in $(seq 0 $(expr $n1 - 1) ); do
         for j in `seq $n2`; do
             echo "$i-$j=$i-$j"
         done
     done | sort > expout
-    AT_CHECK([ovn-sbctl --timeout=30 --log-file=finalize.log -vtimeval:off -vfile -vsyslog:off --bare get SB_Global . external-ids | sed 's/, /\n/g; s/[[{}""]]//g;' | sort], [0], [expout])
+    AT_CHECK([ovn-sbctl --timeout=30 --log-file=finalize.log -vtimeval:off -vfile -vsyslog:off --bare get SB_Global . external-ids | tr ',' '\n' | sed 's/[[{}"" ]]//g' | sort], [0], [expout])
 
     for i in `seq $n`; do
-        if test $i != $victim || test $phase != 1; then
+        if test $i != $victim || test $(cat phase) != 1; then
             stop_server $i
         fi
     done

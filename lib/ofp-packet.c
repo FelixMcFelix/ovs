@@ -160,6 +160,7 @@ decode_nx_packet_in2(const struct ofp_header *oh, bool loose,
             error = oxm_decode_match(payload.msg, ofpbuf_msgsize(&payload),
                                      loose, tun_table, vl_mff_map,
                                      &pin->flow_metadata);
+            pin->flow_metadata.flow.tunnel.metadata.tab = tun_table;
             break;
 
         case NXPINT_USERDATA:
@@ -244,6 +245,7 @@ ofputil_decode_packet_in(const struct ofp_header *oh, bool loose,
                                   : NULL);
         enum ofperr error = oxm_pull_match_loose(&b, false, tun_table,
                                                  &pin->flow_metadata);
+        pin->flow_metadata.flow.tunnel.metadata.tab = tun_table;
         if (error) {
             return error;
         }
@@ -665,7 +667,6 @@ ofputil_encode_packet_in_private(const struct ofputil_packet_in_private *pin,
         case OFPUTIL_P_OF13_OXM:
         case OFPUTIL_P_OF14_OXM:
         case OFPUTIL_P_OF15_OXM:
-        case OFPUTIL_P_OF16_OXM:
             msg = ofputil_encode_ofp12_packet_in(&pin->base, version);
             break;
 
@@ -1191,8 +1192,7 @@ ofputil_encode_packet_out(const struct ofputil_packet_out *po,
         break;
     }
 
-    case OFP15_VERSION:
-    case OFP16_VERSION: {
+    case OFP15_VERSION: {
         struct ofp15_packet_out *opo;
         size_t len;
 

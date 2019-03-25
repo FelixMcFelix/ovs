@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016 Nicira, Inc.
+ * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2019 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -502,7 +502,7 @@ static unsigned int
 timeout_CONNECTING(const struct rconn *rc)
     OVS_REQUIRES(rc->mutex)
 {
-    return MAX(1, rc->backoff);
+    return MAX(2, rc->backoff);
 }
 
 static void
@@ -511,7 +511,7 @@ run_CONNECTING(struct rconn *rc)
 {
     int retval = vconn_connect(rc->vconn);
     if (!retval) {
-        VLOG_INFO("%s: connected", rc->name);
+        VLOG(rc->reliable ? VLL_INFO : VLL_DBG, "%s: connected", rc->name);
         rc->n_successful_connections++;
         state_transition(rc, S_ACTIVE);
         rc->version = vconn_get_version(rc->vconn);
@@ -881,6 +881,13 @@ const char *
 rconn_get_target(const struct rconn *rc)
 {
     return rc->target;
+}
+
+/* Returns true if 'rconn' will reconnect if it disconnects. */
+bool
+rconn_is_reliable(const struct rconn *rconn)
+{
+    return rconn->reliable;
 }
 
 /* Returns true if 'rconn' is connected or in the process of reconnecting,

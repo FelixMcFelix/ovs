@@ -29,8 +29,10 @@ This document describes how to use Open vSwitch with DPDK datapath.
 
 .. important::
 
-   Using the DPDK datapath requires building OVS with DPDK support. Refer to
-   :doc:`/intro/install/dpdk` for more information.
+   Using the DPDK datapath requires building OVS with DPDK support. The
+   mapping of OVS version to DPDK can vary between releases. For version
+   mapping information refer to :doc:`releases FAQ </faq/releases>`. For
+   build instructions refer to :doc:`/intro/install/dpdk`.
 
 Ports and Bridges
 -----------------
@@ -282,7 +284,7 @@ devices to bridge ``br0``. Once complete, follow the below steps:
    We must configure with appropriate software versions to ensure this feature
    is supported.
 
-   .. list-table:: Recommended BIOS Settings
+   .. list-table:: VM Configuration
       :header-rows: 1
 
       * - Setting
@@ -357,6 +359,28 @@ devices to bridge ``br0``. Once complete, follow the below steps:
    Check traffic on multiple queues::
 
        $ cat /proc/interrupts | grep virtio
+
+.. _dpdk-flow-hardware-offload:
+
+Flow Hardware Offload (Experimental)
+------------------------------------
+
+The flow hardware offload is disabled by default and can be enabled by::
+
+    $ ovs-vsctl set Open_vSwitch . other_config:hw-offload=true
+
+So far only partial flow offload is implemented. Moreover, it only works
+with PMD drivers have the rte_flow action "MARK + RSS" support.
+
+The validated NICs are:
+
+- Mellanox (ConnectX-4, ConnectX-4 Lx, ConnectX-5)
+- Napatech (NT200B01)
+
+Supported protocols for hardware offload are:
+- L2: Ethernet, VLAN
+- L3: IPv4, IPv6
+- L4: TCP, UDP, SCTP, ICMP
 
 Further Reading
 ---------------

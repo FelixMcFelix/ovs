@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009, 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
+ * Copyright (c) 2009-2014, 2018 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -39,7 +39,11 @@ struct dpif {
     char *full_name;
     uint8_t netflow_engine_type;
     uint8_t netflow_engine_id;
+    long long int current_ms;
 };
+
+struct dpif_ipf_status;
+struct ipf_dump_ctx;
 
 void dpif_init(struct dpif *, const struct dpif_class *, const char *name,
                uint8_t netflow_engine_type, uint8_t netflow_engine_id);
@@ -76,6 +80,27 @@ dpif_flow_dump_thread_init(struct dpif_flow_dump_thread *thread,
 struct ct_dpif_dump_state;
 struct ct_dpif_entry;
 struct ct_dpif_tuple;
+
+/* 'dpif_ipf_proto_status' and 'dpif_ipf_status' are presently in
+ * sync with 'ipf_proto_status' and 'ipf_status', but more
+ * generally represent a superset of present and future support. */
+struct dpif_ipf_proto_status {
+   uint64_t nfrag_accepted;
+   uint64_t nfrag_completed_sent;
+   uint64_t nfrag_expired_sent;
+   uint64_t nfrag_too_small;
+   uint64_t nfrag_overlap;
+   uint64_t nfrag_purged;
+   unsigned int min_frag_size;
+   bool enabled;
+};
+
+struct dpif_ipf_status {
+   struct dpif_ipf_proto_status v4;
+   struct dpif_ipf_proto_status v6;
+   unsigned int nfrag;
+   unsigned int nfrag_max;
+};
 
 /* Datapath interface class structure, to be defined by each implementation of
  * a datapath interface.
@@ -191,16 +216,7 @@ struct dpif_class {
 
     /* Returns the Netlink PID value to supply in OVS_ACTION_ATTR_USERSPACE
      * actions as the OVS_USERSPACE_ATTR_PID attribute's value, for use in
-     * flows whose packets arrived on port 'port_no'.  In the case where the
-     * provider allocates multiple Netlink PIDs to a single port, it may use
-     * 'hash' to spread load among them.  The caller need not use a particular
-     * hash function; a 5-tuple hash is suitable.
-     *
-     * (The datapath implementation might use some different hash function for
-     * distributing packets received via flow misses among PIDs.  This means
-     * that packets received via flow misses might be reordered relative to
-     * packets received via userspace actions.  This is not ordinarily a
-     * problem.)
+     * flows whose packets arrived on port 'port_no'.
      *
      * A 'port_no' of UINT32_MAX should be treated as a special case.  The
      * implementation should return a reserved PID, not allocated to any port,
@@ -212,8 +228,7 @@ struct dpif_class {
      *
      * A dpif provider that doesn't have meaningful Netlink PIDs can use NULL
      * for this function.  This is equivalent to always returning 0. */
-    uint32_t (*port_get_pid)(const struct dpif *dpif, odp_port_t port_no,
-                             uint32_t hash);
+    uint32_t (*port_get_pid)(const struct dpif *dpif, odp_port_t port_no);
 
     /* Attempts to begin dumping the ports in a dpif.  On success, returns 0
      * and initializes '*statep' with any data needed for iteration.  On
@@ -284,9 +299,11 @@ struct dpif_class {
      * If 'terse' is true, then only UID and statistics will
      * be returned in the dump. Otherwise, all fields will be returned.
      *
-     * If 'type' isn't null, dumps only the flows of the given type. */
-    struct dpif_flow_dump *(*flow_dump_create)(const struct dpif *dpif,
-                                               bool terse, char *type);
+     * If 'types' isn't null, dumps only the flows of the passed types. */
+    struct dpif_flow_dump *(*flow_dump_create)(
+        const struct dpif *dpif,
+        bool terse,
+        struct dpif_flow_dump_types *types);
     int (*flow_dump_destroy)(struct dpif_flow_dump *dump);
 
     struct dpif_flow_dump_thread *(*flow_dump_thread_create)(
@@ -295,12 +312,14 @@ struct dpif_class {
 
     int (*flow_dump_next)(struct dpif_flow_dump_thread *thread,
                           struct dpif_flow *flows, int max_flows);
-
     /* Executes each of the 'n_ops' operations in 'ops' on 'dpif', in the order
      * in which they are specified, placing each operation's results in the
      * "output" members documented in comments and the 'error' member of each
-     * dpif_op. */
-    void (*operate)(struct dpif *dpif, struct dpif_op **ops, size_t n_ops);
+     * dpif_op. The offload_type argument tells the provider if 'ops' should
+     * be submitted to to a netdev (only offload) or to the kernel datapath
+     * (never offload) or to both (offload if possible; software fallback). */
+    void (*operate)(struct dpif *dpif, struct dpif_op **ops, size_t n_ops,
+                    enum dpif_offload_type offload_type);
 
     /* Enables or disables receiving packets with dpif_recv() for 'dpif'.
      * Turning packet receive off and then back on is allowed to change Netlink
@@ -444,6 +463,62 @@ struct dpif_class {
     /* Get number of connections tracked. */
     int (*ct_get_nconns)(struct dpif *, uint32_t *nconns);
 
+    /* Connection tracking per zone limit */
+
+    /* Per zone conntrack limit sets the maximum allowed connections in zones
+     * to provide resource isolation.  If a per zone limit for a particular
+     * zone is not available in the datapath, it defaults to the default
+     * per zone limit.  Initially, the default per zone limit is
+     * unlimited (0). */
+
+    /* Sets the max connections allowed per zone according to 'zone_limits',
+     * a list of 'struct ct_dpif_zone_limit' entries (the 'count' member
+     * is not used when setting limits).  If 'default_limit' is not NULL,
+     * modifies the default limit to '*default_limit'. */
+    int (*ct_set_limits)(struct dpif *, const uint32_t *default_limit,
+                         const struct ovs_list *zone_limits);
+
+    /* Looks up the default per zone limit and stores that in
+     * 'default_limit'.  Look up the per zone limits for all zones in
+     * the 'zone_limits_in' list of 'struct ct_dpif_zone_limit' entries
+     * (the 'limit' and 'count' members are not used), and stores the
+     * reply that includes the zone, the per zone limit, and the number
+     * of connections in the zone into 'zone_limits_out' list. */
+    int (*ct_get_limits)(struct dpif *, uint32_t *default_limit,
+                         const struct ovs_list *zone_limits_in,
+                         struct ovs_list *zone_limits_out);
+
+    /* Deletes per zone limit of all zones specified in 'zone_limits', a
+     * list of 'struct ct_dpif_zone_limit' entries. */
+    int (*ct_del_limits)(struct dpif *, const struct ovs_list *zone_limits);
+
+    /* IP Fragmentation. */
+
+    /* Disables or enables conntrack fragment reassembly.  The default
+     * setting is enabled. */
+    int (*ipf_set_enabled)(struct dpif *, bool v6, bool enabled);
+
+    /* Set minimum fragment allowed. */
+    int (*ipf_set_min_frag)(struct dpif *, bool v6, uint32_t min_frag);
+
+    /* Set maximum number of fragments tracked. */
+    int (*ipf_set_max_nfrags)(struct dpif *, uint32_t max_nfrags);
+
+    /* Get fragmentation configuration status and counters. */
+    int (*ipf_get_status)(struct dpif *,
+                          struct dpif_ipf_status *dpif_ipf_status);
+
+    /* The following 3 apis find and print ipf lists by creating a string
+     * representation of the state of an ipf list, to which 'dump' is pointed
+     * to.  'ipf_dump_start()' allocates memory for 'ipf_dump_ctx'.
+     * 'ipf_dump_next()' finds the next ipf list and copies it's
+     * characteristics to a string, which is freed by the caller.
+     * 'ipf_dump_done()' frees the 'ipf_dump_ctx' that was allocated in
+     * 'ipf_dump_start'. */
+    int (*ipf_dump_start)(struct dpif *, struct ipf_dump_ctx **ipf_dump_ctx);
+    int (*ipf_dump_next)(struct dpif *, void *ipf_dump_ctx, char **dump);
+    int (*ipf_dump_done)(struct dpif *, void *ipf_dump_ctx);
+
     /* Meters */
 
     /* Queries 'dpif' for supported meter features.
@@ -451,12 +526,11 @@ struct dpif_class {
     void (*meter_get_features)(const struct dpif *,
                                struct ofputil_meter_features *);
 
-    /* Adds or modifies 'meter' in 'dpif'.   If '*meter_id' is UINT32_MAX,
-     * adds a new meter, otherwise modifies an existing meter.
+    /* Adds or modifies the meter in 'dpif' with the given 'meter_id'
+     * and the configuration in 'config'.
      *
-     * If meter is successfully added, sets '*meter_id' to the new meter's
-     * meter id selected by 'dpif'. */
-    int (*meter_set)(struct dpif *, ofproto_meter_id *meter_id,
+     * The meter id specified through 'config->meter_id' is ignored. */
+    int (*meter_set)(struct dpif *, ofproto_meter_id meter_id,
                      struct ofputil_meter_config *);
 
     /* Queries 'dpif' for meter stats with the given 'meter_id'.  Stores

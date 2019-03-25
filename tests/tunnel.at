@@ -55,7 +55,7 @@ AT_CHECK([tail -1 stdout], [0],
 
 dnl nonexistent tunnel
 AT_CHECK([ovs-appctl ofproto/trace ovs-dummy 'tunnel(src=5.5.5.5,dst=6.6.6.6,ttl=64,flags()),in_port(1),eth(src=50:54:00:00:00:05,dst=50:54:00:00:00:07),eth_type(0x0800),ipv4(src=192.168.0.1,dst=192.168.0.2,proto=6,tos=0,ttl=64,frag=no),tcp(src=8,dst=9)'], [2], [ignore], [dnl
-Invalid datapath flow
+no OpenFlow tunnel port for this packet
 ovs-appctl: ovs-vswitchd: server returned an error
 ])
 
@@ -314,7 +314,7 @@ set(tunnel(tun_id=0x3,dst=1.1.1.1,ttl=64,flags(df|key))),1
 ])
 
 AT_CHECK([ovs-appctl ofproto/trace ovs-dummy 'tunnel(tun_id=0xf,src=1.1.1.1,dst=2.2.2.2,ttl=64,flags(key)),in_port(1),eth(src=50:54:00:00:00:05,dst=50:54:00:00:00:07),eth_type(0x0800),ipv4(src=192.168.0.1,dst=192.168.0.2,proto=6,tos=0,ttl=64,frag=no),tcp(src=8,dst=9)'], [2], [ignore], [dnl
-Invalid datapath flow
+no OpenFlow tunnel port for this packet
 ovs-appctl: ovs-vswitchd: server returned an error
 ])
 OVS_VSWITCHD_STOP(["/receive tunnel port not found/d"])
@@ -513,22 +513,31 @@ AT_SETUP([tunnel - ERSPAN v1/v2 metadata])
 OVS_VSWITCHD_START([add-port br0 p1 -- set Interface p1 type=dummy \
                         ofport_request=1 \
                     -- add-port br0 p2 -- set Interface p2 type=dummy \
-                        ofport_request=2 \
-                    -- add-port br0 p3 -- set Interface p3 type=erspan \
-                        options:remote_ip=1.1.1.1 ofport_request=3 \
-                        options:key=1 options:erspan_ver=1 options:erspan_idx=7 \
-                    -- add-port br0 p4 -- set Interface p4 type=erspan \
-                        options:remote_ip=1.1.1.2 ofport_request=4 \
-                        options:key=2 options:erspan_ver=2 options:erspan_dir=1 options:erspan_hwid=7 \
-                    ])
+                        ofport_request=2])
+
+# Add these ports separately to ensure that they get the datapath port
+# number expected below.
+ovs-vsctl -- add-port br0 p3 \
+          -- set Interface p3 type=erspan \
+                              ofport_request=3 \
+                              options:remote_ip=1.1.1.1 \
+                              options:key=1 options:erspan_ver=1 \
+                              options:erspan_idx=7 \
+          -- add-port br0 p4 \
+          -- set Interface p4 type=erspan \
+                              ofport_request=4 \
+                              options:remote_ip=1.1.1.2 \
+                              options:key=2 options:erspan_ver=2 \
+                              options:erspan_dir=1 \
+                              options:erspan_hwid=7
 OVS_VSWITCHD_DISABLE_TUNNEL_PUSH_POP
 
 AT_CHECK([ovs-appctl dpif/show | tail -n +3], [0], [dnl
     br0 65534/100: (dummy-internal)
-    p1 1/3: (dummy)
+    p1 1/1: (dummy)
     p2 2/2: (dummy)
-    p3 3/1: (erspan: erspan_idx=0x7, erspan_ver=1, key=1, remote_ip=1.1.1.1)
-    p4 4/1: (erspan: erspan_dir=1, erspan_hwid=0x7, erspan_ver=2, key=2, remote_ip=1.1.1.2)
+    p3 3/3: (erspan: erspan_idx=0x7, erspan_ver=1, key=1, remote_ip=1.1.1.1)
+    p4 4/3: (erspan: erspan_dir=1, erspan_hwid=0x7, erspan_ver=2, key=2, remote_ip=1.1.1.2)
 ])
 
 AT_DATA([flows.txt], [dnl
@@ -540,40 +549,40 @@ in_port=4,tun_erspan_ver=2,tun_erspan_dir=1,tun_erspan_hwid=0xf/0x1,actions=2
 AT_CHECK([ovs-ofctl add-flows br0 flows.txt])
 
 dnl test encap: in_port=1,actions=3 (erspan v1 port)
-AT_CHECK([ovs-appctl ofproto/trace ovs-dummy 'in_port(3),eth(src=50:54:00:00:00:05,dst=50:54:00:00:00:07),eth_type(0x0800),ipv4(src=192.168.0.1,dst=192.168.0.2,proto=1,tos=0,ttl=128,frag=no),icmp(type=8,code=0)'], [0], [stdout])
+AT_CHECK([ovs-appctl ofproto/trace ovs-dummy 'in_port(1),eth(src=50:54:00:00:00:05,dst=50:54:00:00:00:07),eth_type(0x0800),ipv4(src=192.168.0.1,dst=192.168.0.2,proto=1,tos=0,ttl=128,frag=no),icmp(type=8,code=0)'], [0], [stdout])
 AT_CHECK([tail -1 stdout], [0],
-  [Datapath actions: set(tunnel(tun_id=0x1,dst=1.1.1.1,ttl=64,erspan(ver=1,idx=0x7),flags(df|key))),1
+  [Datapath actions: set(tunnel(tun_id=0x1,dst=1.1.1.1,ttl=64,erspan(ver=1,idx=0x7),flags(df|key))),3
 ])
 
 dnl test encap: in_port=2,actions=4 (erspan v2 port)
 AT_CHECK([ovs-appctl ofproto/trace ovs-dummy 'in_port(2),eth(src=50:54:00:00:00:05,dst=50:54:00:00:00:07),eth_type(0x0800),ipv4(src=192.168.0.1,dst=192.168.0.2,proto=1,tos=0,ttl=128,frag=no),icmp(type=8,code=0)'], [0], [stdout])
 AT_CHECK([tail -1 stdout], [0],
-  [Datapath actions: set(tunnel(tun_id=0x2,dst=1.1.1.2,ttl=64,erspan(ver=2,dir=1,hwid=0x7),flags(df|key))),1
+  [Datapath actions: set(tunnel(tun_id=0x2,dst=1.1.1.2,ttl=64,erspan(ver=2,dir=1,hwid=0x7),flags(df|key))),3
 ])
 
 dnl receive packet from ERSPAN port with v1 metadata
-AT_CHECK([ovs-appctl ofproto/trace ovs-dummy 'recirc_id(0),tunnel(tun_id=0x1,src=1.1.1.1,dst=2.2.2.2,ttl=64,erspan(ver=1,idx=0x7),flags(df|key)),in_port(1),skb_mark(0),eth(src=50:54:00:00:00:05,dst=50:54:00:00:00:07),eth_type(0x0800),ipv4(frag=no)'], [0], [stdout])
+AT_CHECK([ovs-appctl ofproto/trace ovs-dummy 'recirc_id(0),tunnel(tun_id=0x1,src=1.1.1.1,dst=2.2.2.2,ttl=64,erspan(ver=1,idx=0x7),flags(df|key)),in_port(3),skb_mark(0),eth(src=50:54:00:00:00:05,dst=50:54:00:00:00:07),eth_type(0x0800),ipv4(frag=no)'], [0], [stdout])
 AT_CHECK([tail -2 stdout], [0],
   [Megaflow: recirc_id=0,eth,ip,tun_id=0x1,tun_src=1.1.1.1,tun_dst=2.2.2.2,tun_tos=0,tun_erspan_ver=1,tun_erspan_idx=0x7,tun_flags=+df-csum+key,in_port=3,nw_frag=no
-Datapath actions: 3
+Datapath actions: 1
 ])
 
 dnl receive packet from ERSPAN port with wrong v1 metadata
-AT_CHECK([ovs-appctl ofproto/trace ovs-dummy 'recirc_id(0),tunnel(tun_id=0x1,src=1.1.1.1,dst=2.2.2.2,ttl=64,erspan(ver=1,idx=0xabcd),flags(df|key)),in_port(1),skb_mark(0),eth(src=50:54:00:00:00:05,dst=50:54:00:00:00:07),eth_type(0x0800),ipv4(frag=no)'], [0], [stdout])
+AT_CHECK([ovs-appctl ofproto/trace ovs-dummy 'recirc_id(0),tunnel(tun_id=0x1,src=1.1.1.1,dst=2.2.2.2,ttl=64,erspan(ver=1,idx=0xabcd),flags(df|key)),in_port(3),skb_mark(0),eth(src=50:54:00:00:00:05,dst=50:54:00:00:00:07),eth_type(0x0800),ipv4(frag=no)'], [0], [stdout])
 AT_CHECK([tail -2 stdout], [0],
   [Megaflow: recirc_id=0,eth,ip,tun_id=0x1,tun_src=1.1.1.1,tun_dst=2.2.2.2,tun_tos=0,tun_erspan_ver=1,tun_erspan_idx=0xabcd,tun_flags=+df-csum+key,in_port=3,nw_frag=no
 Datapath actions: drop
 ])
 
 dnl receive packet from ERSPAN port with v2 metadata
-AT_CHECK([ovs-appctl ofproto/trace ovs-dummy 'recirc_id(0),tunnel(tun_id=0x2,src=1.1.1.2,dst=2.2.2.2,ttl=64,erspan(ver=2,dir=1,hwid=0x7),flags(df|key)),in_port(1),skb_mark(0),eth(src=50:54:00:00:00:05,dst=50:54:00:00:00:07),eth_type(0x0800),ipv4(frag=no)'], [0], [stdout])
+AT_CHECK([ovs-appctl ofproto/trace ovs-dummy 'recirc_id(0),tunnel(tun_id=0x2,src=1.1.1.2,dst=2.2.2.2,ttl=64,erspan(ver=2,dir=1,hwid=0x7),flags(df|key)),in_port(3),skb_mark(0),eth(src=50:54:00:00:00:05,dst=50:54:00:00:00:07),eth_type(0x0800),ipv4(frag=no)'], [0], [stdout])
 AT_CHECK([tail -2 stdout], [0],
   [Megaflow: recirc_id=0,eth,ip,tun_id=0x2,tun_src=1.1.1.2,tun_dst=2.2.2.2,tun_tos=0,tun_erspan_ver=2,tun_erspan_dir=1,tun_erspan_hwid=0x1,tun_flags=+df-csum+key,in_port=4,nw_frag=no
 Datapath actions: 2
 ])
 
 dnl receive packet from ERSPAN port with wrong v2 metadata
-AT_CHECK([ovs-appctl ofproto/trace ovs-dummy 'recirc_id(0),tunnel(tun_id=0x2,src=1.1.1.2,dst=2.2.2.2,ttl=64,erspan(ver=2,dir=0,hwid=0x17),flags(df|key)),in_port(1),skb_mark(0),eth(src=50:54:00:00:00:05,dst=50:54:00:00:00:07),eth_type(0x0800),ipv4(frag=no)'], [0], [stdout])
+AT_CHECK([ovs-appctl ofproto/trace ovs-dummy 'recirc_id(0),tunnel(tun_id=0x2,src=1.1.1.2,dst=2.2.2.2,ttl=64,erspan(ver=2,dir=0,hwid=0x17),flags(df|key)),in_port(3),skb_mark(0),eth(src=50:54:00:00:00:05,dst=50:54:00:00:00:07),eth_type(0x0800),ipv4(frag=no)'], [0], [stdout])
 AT_CHECK([tail -2 stdout], [0],
   [Megaflow: recirc_id=0,eth,ip,tun_id=0x2,tun_src=1.1.1.2,tun_dst=2.2.2.2,tun_tos=0,tun_erspan_ver=2,tun_erspan_dir=0,tun_erspan_hwid=0x1,tun_flags=+df-csum+key,in_port=4,nw_frag=no
 Datapath actions: drop
@@ -583,9 +592,8 @@ dnl test wildcard mask: recevie all v2 regardless of its metadata
 AT_CHECK([ovs-ofctl del-flows br0 in_port=4,tun_erspan_ver=2,tun_erspan_dir=1,tun_erspan_hwid=0xf/0x1])
 AT_CHECK([ovs-ofctl add-flow br0 in_port=4,tun_erspan_ver=2,tun_erspan_dir=0/0,tun_erspan_hwid=0x0/0x0,actions=2])
 
-AT_CHECK([ovs-ofctl dump-flows br0 | ofctl_strip],
+AT_CHECK([ovs-ofctl --sort=in_port dump-flows br0 | ofctl_strip],
 [0], [dnl
-NXST_FLOW reply:
  in_port=1 actions=output:3
  in_port=2 actions=output:4
  tun_erspan_ver=1,tun_erspan_idx=0x7,in_port=3 actions=output:1
@@ -593,7 +601,7 @@ NXST_FLOW reply:
 ])
 
 dnl this time it won't drop
-AT_CHECK([ovs-appctl ofproto/trace ovs-dummy 'recirc_id(0),tunnel(tun_id=0x2,src=1.1.1.2,dst=2.2.2.2,ttl=64,erspan(ver=2,dir=0,hwid=0x17),flags(df|key)),in_port(1),skb_mark(0),eth(src=50:54:00:00:00:05,dst=50:54:00:00:00:07),eth_type(0x0800),ipv4(frag=no)'], [0], [stdout])
+AT_CHECK([ovs-appctl ofproto/trace ovs-dummy 'recirc_id(0),tunnel(tun_id=0x2,src=1.1.1.2,dst=2.2.2.2,ttl=64,erspan(ver=2,dir=0,hwid=0x17),flags(df|key)),in_port(3),skb_mark(0),eth(src=50:54:00:00:00:05,dst=50:54:00:00:00:07),eth_type(0x0800),ipv4(frag=no)'], [0], [stdout])
 AT_CHECK([tail -2 stdout], [0],
   [Megaflow: recirc_id=0,eth,ip,tun_id=0x2,tun_src=1.1.1.2,tun_dst=2.2.2.2,tun_tos=0,tun_erspan_ver=2,tun_flags=+df-csum+key,in_port=4,nw_frag=no
 Datapath actions: 2
@@ -613,9 +621,9 @@ NXST_FLOW reply:
  in_port=1 actions=set_tunnel:0xb,set_field:0x7->tun_erspan_idx,output:5
 ])
 
-AT_CHECK([ovs-appctl ofproto/trace ovs-dummy 'in_port(3),eth(src=50:54:00:00:00:05,dst=50:54:00:00:00:07),eth_type(0x0800),ipv4(src=192.168.0.1,dst=192.168.0.2,proto=1,tos=0,ttl=128,frag=no),icmp(type=8,code=0)'], [0], [stdout])
+AT_CHECK([ovs-appctl ofproto/trace ovs-dummy 'in_port(1),eth(src=50:54:00:00:00:05,dst=50:54:00:00:00:07),eth_type(0x0800),ipv4(src=192.168.0.1,dst=192.168.0.2,proto=1,tos=0,ttl=128,frag=no),icmp(type=8,code=0)'], [0], [stdout])
 AT_CHECK([tail -1 stdout], [0],
-  [Datapath actions: set(tunnel(tun_id=0xb,dst=1.1.1.2,ttl=64,erspan(ver=1,idx=0x7),flags(df|key))),1
+  [Datapath actions: set(tunnel(tun_id=0xb,dst=1.1.1.2,ttl=64,erspan(ver=1,idx=0x7),flags(df|key))),3
 ])
 
 OVS_VSWITCHD_STOP
@@ -831,6 +839,35 @@ AT_CHECK([tail -1 stdout], [0],
   [Datapath actions: set(tunnel(dst=1.1.1.1,ttl=64,tp_dst=4789,flags(df))),4789
 ])
 
+OVS_VSWITCHD_STOP
+AT_CLEANUP
+
+AT_SETUP([tunnel - concomitant incompatible tunnels on the same port])
+OVS_VSWITCHD_START([add-port br0 p1 -- set Interface p1 type=vxlan \
+                    options:remote_ip=flow ofport_request=1])
+
+AT_CHECK([ovs-vsctl add-port br0 p2 -- set Interface p2 type=vxlan \
+                    options:remote_ip=flow options:exts=gbp options:key=1 ofport_request=2], [0],
+  [], [ignore])
+
+AT_CHECK([grep 'p2: could not set configuration (File exists)' ovs-vswitchd.log | sed "s/^.*\(p2:.*\)$/\1/"], [0],
+  [p2: could not set configuration (File exists)
+])
+
+OVS_VSWITCHD_STOP(["/p2: VXLAN-GBP, and non-VXLAN-GBP tunnels can't be configured on the same dst_port/d
+/p2: could not set configuration (File exists)/d"])
+AT_CLEANUP
+
+AT_SETUP([tunnel - concomitant incompatible tunnels on different ports])
+OVS_VSWITCHD_START([add-port br0 p1 -- set Interface p1 type=vxlan \
+                    options:remote_ip=flow ofport_request=1])
+
+AT_CHECK([ovs-vsctl add-port br0 p2 -- set Interface p2 type=vxlan options:dst_port=9000 \
+                    options:remote_ip=flow options:exts=gbp ofport_request=2])
+
+AT_CHECK([grep p2 ovs-vswitchd.log | sed "s/^.*\(bridge br0:.*\)$/\1/"], [0],
+  [bridge br0: added interface p2 on port 2
+])
 
 OVS_VSWITCHD_STOP
 AT_CLEANUP

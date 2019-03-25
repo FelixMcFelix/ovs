@@ -343,9 +343,14 @@ ofputil_decode_flow_mod(struct ofputil_flow_mod *fm,
                 : OFPERR_OFPFMFC_TABLE_FULL);
     }
 
+    struct ofpact_check_params cp = {
+        .match = &match,
+        .max_ports = max_port,
+        .table_id = fm->table_id,
+        .n_tables = max_table
+    };
     error = ofpacts_check_consistency(fm->ofpacts, fm->ofpacts_len,
-                                      &match, max_port,
-                                      fm->table_id, max_table, protocol);
+                                      protocol, &cp);
     if (!error) {
         minimatch_init(&fm->match, &match);
     }
@@ -379,8 +384,7 @@ ofputil_encode_flow_mod(const struct ofputil_flow_mod *fm,
     case OFPUTIL_P_OF12_OXM:
     case OFPUTIL_P_OF13_OXM:
     case OFPUTIL_P_OF14_OXM:
-    case OFPUTIL_P_OF15_OXM:
-    case OFPUTIL_P_OF16_OXM: {
+    case OFPUTIL_P_OF15_OXM: {
         struct ofp11_flow_mod *ofm;
         int tailroom;
 
@@ -741,8 +745,7 @@ ofputil_encode_flow_stats_request(const struct ofputil_flow_stats_request *fsr,
     case OFPUTIL_P_OF12_OXM:
     case OFPUTIL_P_OF13_OXM:
     case OFPUTIL_P_OF14_OXM:
-    case OFPUTIL_P_OF15_OXM:
-    case OFPUTIL_P_OF16_OXM: {
+    case OFPUTIL_P_OF15_OXM: {
         struct ofp11_flow_stats_request *ofsr;
 
         if (protocol > OFPUTIL_P_OF14_OXM) {
@@ -1723,8 +1726,14 @@ parse_ofp_str__(struct ofputil_flow_mod *fm, int command, char *string,
         if (!error) {
             enum ofperr err;
 
-            err = ofpacts_check(ofpacts.data, ofpacts.size, &match,
-                                OFPP_MAX, fm->table_id, 255, usable_protocols);
+            struct ofpact_check_params cp = {
+                .match = &match,
+                .max_ports = OFPP_MAX,
+                .table_id = fm->table_id,
+                .n_tables = 255,
+            };
+            err = ofpacts_check(ofpacts.data, ofpacts.size, &cp);
+            *usable_protocols &= cp.usable_protocols;
             if (!err && !*usable_protocols) {
                 err = OFPERR_OFPBAC_MATCH_INCONSISTENT;
             }

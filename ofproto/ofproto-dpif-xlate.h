@@ -199,7 +199,8 @@ void xlate_ofport_remove(struct ofport_dpif *);
 
 struct ofproto_dpif * xlate_lookup_ofproto(const struct dpif_backer *,
                                            const struct flow *,
-                                           ofp_port_t *ofp_in_port);
+                                           ofp_port_t *ofp_in_port,
+                                           char **errorp);
 int xlate_lookup(const struct dpif_backer *, const struct flow *,
                  struct ofproto_dpif **, struct dpif_ipfix **,
                  struct dpif_sflow **, struct netflow **,
@@ -230,8 +231,8 @@ void xlate_out_uninit(struct xlate_out *);
 
 enum ofperr xlate_resume(struct ofproto_dpif *,
                          const struct ofputil_packet_in_private *,
-                         struct ofpbuf *odp_actions, enum slow_path_reason *);
-
+                         struct ofpbuf *odp_actions, enum slow_path_reason *,
+                         struct flow *, struct xlate_cache *);
 int xlate_send_packet(const struct ofport_dpif *, bool oam, struct dp_packet *);
 
 void xlate_mac_learning_update(const struct ofproto_dpif *ofproto,

@@ -479,6 +479,42 @@ atomic_count_set(atomic_count *count, unsigned int value)
     atomic_store_relaxed(&count->count, value);
 }
 
+static inline uint64_t
+atomic_count_inc64(atomic_uint64_t *counter)
+{
+    uint64_t old;
+
+    atomic_add_relaxed(counter, 1ull, &old);
+
+    return old;
+}
+
+static inline uint64_t
+atomic_count_dec64(atomic_uint64_t *counter)
+{
+    uint64_t old;
+
+    atomic_sub_relaxed(counter, 1ull, &old);
+
+    return old;
+}
+
+static inline uint64_t
+atomic_count_get64(atomic_uint64_t *counter)
+{
+    uint64_t value;
+
+    atomic_read_relaxed(counter, &value);
+
+    return value;
+}
+
+static inline void
+atomic_count_set64(atomic_uint64_t *counter, uint64_t value)
+{
+    atomic_store_relaxed(counter, value);
+}
+
 /* Reference count. */
 struct ovs_refcount {
     atomic_uint count;
@@ -509,7 +545,7 @@ ovs_refcount_ref(struct ovs_refcount *refcount)
  * in this form:
  *
  * if (ovs_refcount_unref(&object->ref_cnt) == 1) {
- *     // ...uninitialize object...
+ *     ...uninitialize object...
  *     free(object);
  * }
  *
@@ -593,7 +629,6 @@ ovs_refcount_try_ref_rcu(struct ovs_refcount *refcount)
  * For example:
  *
  * if (ovs_refcount_unref_relaxed(&object->ref_cnt) == 1) {
- *     // Schedule uninitialization and freeing of the object:
  *     ovsrcu_postpone(destructor_function, object);
  * }
  *

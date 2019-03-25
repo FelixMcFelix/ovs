@@ -35,6 +35,19 @@ extern "C" {
 struct netdev_tnl_build_header_params;
 #define NETDEV_NUMA_UNSPEC OVS_NUMA_UNSPEC
 
+/* Offload-capable (HW) netdev information */
+struct netdev_hw_info {
+    bool oor;		/* Out of Offload Resources ? */
+    int offload_count;  /* Pending (non-offloaded) flow count */
+    int pending_count;  /* Offloaded flow count */
+};
+
+enum hw_info_type {
+    HW_INFO_TYPE_OOR = 1,		/* OOR state */
+    HW_INFO_TYPE_PEND_COUNT = 2,	/* Pending(non-offloaded) flow count */
+    HW_INFO_TYPE_OFFL_COUNT = 3		/* Offloaded flow count */
+};
+
 /* A network device (e.g. an Ethernet device).
  *
  * Network device implementations may read these members but should not modify
@@ -80,6 +93,7 @@ struct netdev {
     int n_rxq;
     struct shash_node *node;            /* Pointer to element in global map. */
     struct ovs_list saved_flags_list; /* Contains "struct netdev_saved_flags". */
+    struct netdev_hw_info hw_info;	/* offload-capable netdev info */
 };
 
 static inline void
@@ -892,7 +906,5 @@ extern const struct netdev_class netdev_tap_class;
 #ifdef  __cplusplus
 }
 #endif
-
-#define NO_OFFLOAD_API NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
 
 #endif /* netdev.h */

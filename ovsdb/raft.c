@@ -296,6 +296,7 @@ static void raft_send_remove_server_reply__(
     struct raft *, const struct uuid *target_sid,
     const struct uuid *requester_sid, struct unixctl_conn *requester_conn,
     bool success, const char *comment);
+static void raft_finished_leaving_cluster(struct raft *);
 
 static void raft_server_init_leader(struct raft *, struct raft_server *);
 
@@ -303,9 +304,16 @@ static bool raft_rpc_is_heartbeat(const union raft_rpc *);
 static bool raft_is_rpc_synced(const struct raft *, const union raft_rpc *);
 
 static void raft_handle_rpc(struct raft *, const union raft_rpc *);
-static bool raft_send(struct raft *, const union raft_rpc *);
-static bool raft_send__(struct raft *, const union raft_rpc *,
-                        struct raft_conn *);
+
+static bool raft_send_at(struct raft *, const union raft_rpc *,
+                         int line_number);
+#define raft_send(raft, rpc) raft_send_at(raft, rpc, __LINE__)
+
+static bool raft_send_to_conn_at(struct raft *, const union raft_rpc *,
+                                 struct raft_conn *, int line_number);
+#define raft_send_to_conn(raft, rpc, conn) \
+    raft_send_to_conn_at(raft, rpc, conn, __LINE__)
+
 static void raft_send_append_request(struct raft *,
                                      struct raft_server *, unsigned int n,
                                      const char *comment);
@@ -1055,7 +1063,7 @@ raft_transfer_leadership(struct raft *raft, const char *reason)
                     .term = raft->term,
                 }
             };
-            raft_send__(raft, &rpc, conn);
+            raft_send_to_conn(raft, &rpc, conn);
 
             raft_record_note(raft, "transfer leadership",
                              "transferring leadership to %s because %s",
@@ -1295,14 +1303,18 @@ raft_get_nickname(const struct raft *raft, const struct uuid *sid,
 }
 
 static void
-log_rpc(const union raft_rpc *rpc,
-        const char *direction, const struct raft_conn *conn)
+log_rpc(const union raft_rpc *rpc, const char *direction,
+        const struct raft_conn *conn, int line_number)
 {
     static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(600, 600);
     if (!raft_rpc_is_heartbeat(rpc) && !VLOG_DROP_DBG(&rl)) {
         struct ds s = DS_EMPTY_INITIALIZER;
+        if (line_number) {
+            ds_put_format(&s, "raft.c:%d ", line_number);
+        }
+        ds_put_format(&s, "%s%s ", direction, conn->nickname);
         raft_rpc_format(rpc, &s);
-        VLOG_DBG("%s%s %s", direction, conn->nickname, ds_cstr(&s));
+        VLOG_DBG("%s", ds_cstr(&s));
         ds_destroy(&s);
     }
 }
@@ -1320,7 +1332,7 @@ raft_send_add_server_request(struct raft *raft, struct raft_conn *conn)
             .address = raft->local_address,
         },
     };
-    raft_send__(raft, &rq, conn);
+    raft_send_to_conn(raft, &rq, conn);
 }
 
 static void
@@ -1345,7 +1357,7 @@ raft_conn_run(struct raft *raft, struct raft_conn *conn)
                     .sid = raft->sid,
                 },
             };
-            raft_send__(raft, &rq, conn);
+            raft_send_to_conn(raft, &rq, conn);
         } else {
             union raft_rpc rq = (union raft_rpc) {
                 .hello_request = {
@@ -1356,7 +1368,7 @@ raft_conn_run(struct raft *raft, struct raft_conn *conn)
                     .address = raft->local_address,
                 },
             };
-            raft_send__(raft, &rq, conn);
+            raft_send_to_conn(raft, &rq, conn);
         }
     }
 
@@ -1366,7 +1378,7 @@ raft_conn_run(struct raft *raft, struct raft_conn *conn)
             break;
         }
 
-        log_rpc(&rpc, "<--", conn);
+        log_rpc(&rpc, "<--", conn, 0);
         raft_handle_rpc(raft, &rpc);
         raft_rpc_uninit(&rpc);
     }
@@ -1434,7 +1446,7 @@ raft_waiter_complete_rpc(struct raft *raft, const union raft_rpc *rpc)
 
     struct raft_conn *dst = raft_find_conn_by_sid(raft, &rpc->common.sid);
     if (dst) {
-        raft_send__(raft, rpc, dst);
+        raft_send_to_conn(raft, rpc, dst);
     }
 }
 
@@ -1894,7 +1906,7 @@ raft_get_eid(const struct raft *raft, uint64_t index)
     return &raft->snap.eid;
 }
 
-static const struct uuid *
+const struct uuid *
 raft_current_eid(const struct raft *raft)
 {
     return raft_get_eid(raft, raft->log_end - 1);
@@ -2186,16 +2198,28 @@ raft_send_add_server_reply__(struct raft *raft, const struct uuid *sid,
 }
 
 static void
-raft_send_remove_server_reply_rpc(struct raft *raft, const struct uuid *sid,
+raft_send_remove_server_reply_rpc(struct raft *raft,
+                                  const struct uuid *dst_sid,
+                                  const struct uuid *target_sid,
                                   bool success, const char *comment)
 {
+    if (uuid_equals(&raft->sid, dst_sid)) {
+        if (success && uuid_equals(&raft->sid, target_sid)) {
+            raft_finished_leaving_cluster(raft);
+        }
+        return;
+    }
+
     const union raft_rpc rpy = {
         .remove_server_reply = {
             .common = {
                 .type = RAFT_RPC_REMOVE_SERVER_REPLY,
-                .sid = *sid,
+                .sid = *dst_sid,
                 .comment = CONST_CAST(char *, comment),
             },
+            .target_sid = (uuid_equals(dst_sid, target_sid)
+                           ? UUID_ZERO
+                           : *target_sid),
             .success = success,
         }
     };
@@ -2224,6 +2248,9 @@ raft_send_remove_server_reply__(struct raft *raft,
     } else {
         char buf[SID_LEN + 1];
         ds_put_cstr(&s, raft_get_nickname(raft, target_sid, buf, sizeof buf));
+        if (uuid_equals(target_sid, &raft->sid)) {
+            ds_put_cstr(&s, " (ourselves)");
+        }
     }
     ds_put_format(&s, " from cluster "CID_FMT" %s",
                   CID_ARGS(&raft->cid),
@@ -2240,11 +2267,12 @@ raft_send_remove_server_reply__(struct raft *raft,
      * allows it to be sure that it's really removed and update its log and
      * disconnect permanently.  */
     if (!uuid_is_zero(requester_sid)) {
-        raft_send_remove_server_reply_rpc(raft, requester_sid,
+        raft_send_remove_server_reply_rpc(raft, requester_sid, target_sid,
                                           success, comment);
     }
     if (!uuid_equals(requester_sid, target_sid)) {
-        raft_send_remove_server_reply_rpc(raft, target_sid, success, comment);
+        raft_send_remove_server_reply_rpc(raft, target_sid, target_sid,
+                                          success, comment);
     }
     if (requester_conn) {
         if (success) {
@@ -2556,15 +2584,18 @@ raft_update_commit_index(struct raft *raft, uint64_t new_commit_index)
         while (raft->commit_index < new_commit_index) {
             uint64_t index = ++raft->commit_index;
             const struct raft_entry *e = raft_get_entry(raft, index);
-            if (e->servers) {
-                raft_run_reconfigure(raft);
-            }
             if (e->data) {
                 struct raft_command *cmd
                     = raft_find_command_by_index(raft, index);
                 if (cmd) {
                     raft_command_complete(raft, cmd, RAFT_CMD_SUCCESS);
                 }
+            }
+            if (e->servers) {
+                /* raft_run_reconfigure() can write a new Raft entry, which can
+                 * reallocate raft->entries, which would invalidate 'e', so
+                 * this case must be last, after the one for 'e->data'. */
+                raft_run_reconfigure(raft);
             }
         }
     } else {
@@ -3031,8 +3062,10 @@ raft_update_match_index(struct raft *raft, struct raft_server *s,
 static void
 raft_update_our_match_index(struct raft *raft, uint64_t min_index)
 {
-    raft_update_match_index(raft, raft_find_server(raft, &raft->sid),
-                            min_index);
+    struct raft_server *server = raft_find_server(raft, &raft->sid);
+    if (server) {
+        raft_update_match_index(raft, server, min_index);
+    }
 }
 
 static void
@@ -3543,17 +3576,25 @@ raft_handle_remove_server_request(struct raft *raft,
 }
 
 static void
+raft_finished_leaving_cluster(struct raft *raft)
+{
+    VLOG_INFO(SID_FMT": finished leaving cluster "CID_FMT,
+              SID_ARGS(&raft->sid), CID_ARGS(&raft->cid));
+
+    raft_record_note(raft, "left", "this server left the cluster");
+
+    raft->leaving = false;
+    raft->left = true;
+}
+
+static void
 raft_handle_remove_server_reply(struct raft *raft,
                                 const struct raft_remove_server_reply *rpc)
 {
-    if (rpc->success) {
-        VLOG_INFO(SID_FMT": finished leaving cluster "CID_FMT,
-                  SID_ARGS(&raft->sid), CID_ARGS(&raft->cid));
-
-        raft_record_note(raft, "left", "this server left the cluster");
-
-        raft->leaving = false;
-        raft->left = true;
+    if (rpc->success
+        && (uuid_is_zero(&rpc->target_sid)
+            || uuid_equals(&rpc->target_sid, &raft->sid))) {
+        raft_finished_leaving_cluster(raft);
     }
 }
 
@@ -3838,22 +3879,22 @@ raft_store_snapshot(struct raft *raft, const struct json *new_snapshot_data)
     }
 
     uint64_t new_log_start = raft->last_applied + 1;
-    const struct raft_entry new_snapshot = {
+    struct raft_entry new_snapshot = {
         .term = raft_get_term(raft, new_log_start - 1),
-        .data = CONST_CAST(struct json *, new_snapshot_data),
+        .data = json_clone(new_snapshot_data),
         .eid = *raft_get_eid(raft, new_log_start - 1),
-        .servers = CONST_CAST(struct json *,
-                              raft_servers_for_index(raft, new_log_start - 1)),
+        .servers = json_clone(raft_servers_for_index(raft, new_log_start - 1)),
     };
     struct ovsdb_error *error = raft_save_snapshot(raft, new_log_start,
                                                    &new_snapshot);
     if (error) {
+        raft_entry_uninit(&new_snapshot);
         return error;
     }
 
     raft->log_synced = raft->log_end - 1;
     raft_entry_uninit(&raft->snap);
-    raft_entry_clone(&raft->snap, &new_snapshot);
+    raft->snap = new_snapshot;
     for (size_t i = 0; i < new_log_start - raft->log_start; i++) {
         raft_entry_uninit(&raft->entries[i]);
     }
@@ -4001,10 +4042,10 @@ raft_rpc_is_heartbeat(const union raft_rpc *rpc)
 
 
 static bool
-raft_send__(struct raft *raft, const union raft_rpc *rpc,
-            struct raft_conn *conn)
+raft_send_to_conn_at(struct raft *raft, const union raft_rpc *rpc,
+                     struct raft_conn *conn, int line_number)
 {
-    log_rpc(rpc, "-->", conn);
+    log_rpc(rpc, "-->", conn, line_number);
     return !jsonrpc_session_send(
         conn->js, raft_rpc_to_jsonrpc(&raft->cid, &raft->sid, rpc));
 }
@@ -4022,12 +4063,13 @@ raft_is_rpc_synced(const struct raft *raft, const union raft_rpc *rpc)
 }
 
 static bool
-raft_send(struct raft *raft, const union raft_rpc *rpc)
+raft_send_at(struct raft *raft, const union raft_rpc *rpc, int line_number)
 {
     const struct uuid *dst = &rpc->common.sid;
     if (uuid_equals(dst, &raft->sid)) {
         static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
-        VLOG_WARN_RL(&rl, "attempting to send RPC to self");
+        VLOG_WARN_RL(&rl, "attempted to send RPC to self from raft.c:%d",
+                     line_number);
         return false;
     }
 
@@ -4035,9 +4077,10 @@ raft_send(struct raft *raft, const union raft_rpc *rpc)
     if (!conn) {
         static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
         char buf[SID_LEN + 1];
-        VLOG_DBG_RL(&rl, "%s: no connection to %s, cannot send RPC",
-                    raft->local_nickname,
-                    raft_get_nickname(raft, dst, buf, sizeof buf));
+        VLOG_DBG_RL(&rl, "%s: no connection to %s, cannot send RPC "
+                    "from raft.c:%d", raft->local_nickname,
+                    raft_get_nickname(raft, dst, buf, sizeof buf),
+                    line_number);
         return false;
     }
 
@@ -4046,7 +4089,7 @@ raft_send(struct raft *raft, const union raft_rpc *rpc)
         return true;
     }
 
-    return raft_send__(raft, rpc, conn);
+    return raft_send_to_conn_at(raft, rpc, conn, line_number);
 }
 
 static struct raft *

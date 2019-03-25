@@ -255,6 +255,9 @@ cluster: transactions not yet replicated to the server will be lost, and
 transactions not yet applied to the cluster may be committed.  Afterward, any
 servers in its former cluster will regard the server to have failed.
 
+Once a server leaves a cluster, it may never rejoin it.  Instead, create a new
+server and join it to the cluster.
+
 The servers in a cluster synchronize data over a cluster management protocol
 that is specific to Open vSwitch; it is not the same as the OVSDB protocol
 specified in RFC 7047.  For this purpose, a server in a cluster is tied to a
@@ -379,11 +382,11 @@ the opposite arrangement as well.
 
 OVSDB supports the following active connection methods:
 
-ssl:<ip>:<port>
-    The specified SSL or TLS <port> on the host at the given <ip>.
+ssl:<host>:<port>
+    The specified SSL or TLS <port> on the given <host>.
 
-tcp:<ip>:<port>
-    The specified TCP <port> on the host at the given <ip>.
+tcp:<host>:<port>
+    The specified TCP <port> on the given <host>.
 
 unix:<file>
     On Unix-like systems, connect to the Unix domain server socket named
@@ -402,7 +405,7 @@ unix:<file>
     way, a client could talk to the wrong instance of a database.  To avoid
     this possibility, add ``cid:<uuid>`` to the list of methods, where <uuid>
     is the cluster ID of the desired database cluster, as printed by
-    ``ovsdb-tool get-cid``.  This feature is optional.
+    ``ovsdb-tool db-cid``.  This feature is optional.
 
 OVSDB supports the following passive connection methods:
 
@@ -427,9 +430,9 @@ All IP-based connection methods accept IPv4 and IPv6 addresses.  To specify an
 IPv6 address, wrap it in square brackets, e.g.  ``ssl:[::1]:6640``.  Passive
 IP-based connection methods by default listen for IPv4 connections only; use
 ``[::]`` as the address to accept both IPv4 and IPv6 connections,
-e.g. ``pssl:6640:[::]``.  DNS names are not accepted.  On Linux, use
-``%<device>`` to designate a scope for IPv6 link-level addresses,
-e.g. ``ssl:[fe80::1234%eth0]:6653``.
+e.g. ``pssl:6640:[::]``.  DNS names are also accepted if built with unbound
+library.  On Linux, use ``%<device>`` to designate a scope for IPv6 link-level
+addresses, e.g. ``ssl:[fe80::1234%eth0]:6653``.
 
 The <port> may be omitted from connection methods that use a port number.  The
 default <port> for TCP-based connection methods is 6640, e.g. ``pssl:`` is

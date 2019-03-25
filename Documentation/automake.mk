@@ -28,6 +28,9 @@ DOC_SOURCE = \
 	Documentation/tutorials/ovn-openstack.rst \
 	Documentation/tutorials/ovn-sandbox.rst \
 	Documentation/tutorials/ovs-conntrack.rst \
+	Documentation/tutorials/ipsec.rst \
+	Documentation/tutorials/ovn-ipsec.rst \
+	Documentation/tutorials/ovn-rbac.rst \
 	Documentation/topics/index.rst \
 	Documentation/topics/bonding.rst \
 	Documentation/topics/idl-compound-indexes.rst \
@@ -36,6 +39,7 @@ DOC_SOURCE = \
 	Documentation/topics/dpdk/index.rst \
 	Documentation/topics/dpdk/bridge.rst \
 	Documentation/topics/dpdk/jumbo-frames.rst \
+	Documentation/topics/dpdk/memory.rst \
 	Documentation/topics/dpdk/pdump.rst \
 	Documentation/topics/dpdk/phy.rst \
 	Documentation/topics/dpdk/pmd.rst \
@@ -59,6 +63,7 @@ DOC_SOURCE = \
 	Documentation/howto/docker.rst \
 	Documentation/howto/dpdk.rst \
 	Documentation/howto/firewalld.rst \
+	Documentation/howto/ipsec.rst \
 	Documentation/howto/kvm.rst \
 	Documentation/howto/libvirt.rst \
 	Documentation/howto/selinux.rst \

@@ -1,8 +1,3 @@
-.de IQ
-.  br
-.  ns
-.  IP "\\$1"
-..
 .IP "\fB\-O \fR[\fIversion\fR[\fB,\fIversion\fR]...]\fR"
 .IQ "\fB\-\-protocols=\fR[\fIversion\fR[\fB,\fIversion\fR]...]\fR"
 Sets the OpenFlow protocol versions that are allowed when establishing
@@ -41,7 +36,3 @@ and development purposes.  They are not enabled by default:
 .RS
 .IP \(bu
 \fBOpenFlow15\fR, for OpenFlow 1.5.
-.
-.IP \(bu
-\fBOpenFlow16\fR, for OpenFlow 1.6.
-.RE

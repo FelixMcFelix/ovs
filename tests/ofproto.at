@@ -39,8 +39,8 @@ n_tables:254, n_buffers:0
 capabilities: FLOW_STATS TABLE_STATS PORT_STATS QUEUE_STATS ARP_MATCH_IP
 actions: output enqueue set_vlan_vid set_vlan_pcp strip_vlan mod_dl_src mod_dl_dst mod_nw_src mod_nw_dst mod_nw_tos mod_tp_src mod_tp_dst
  LOCAL(br0): addr:aa:55:aa:55:00:00
-     config:     PORT_DOWN
-     state:      LINK_DOWN
+     config:     0
+     state:      0
      speed: 0 Mbps now, 0 Mbps max
 OFPT_GET_CONFIG_REPLY: frags=normal miss_send_len=0
 ])
@@ -61,16 +61,16 @@ n_tables:254, n_buffers:0
 capabilities: FLOW_STATS TABLE_STATS PORT_STATS QUEUE_STATS ARP_MATCH_IP
 actions: output enqueue set_vlan_vid set_vlan_pcp strip_vlan mod_dl_src mod_dl_dst mod_nw_src mod_nw_dst mod_nw_tos mod_tp_src mod_tp_dst
  1(p1): addr:aa:55:aa:55:00:0x
-     config:     PORT_DOWN
-     state:      LINK_DOWN
+     config:     0
+     state:      0
      speed: 0 Mbps now, 0 Mbps max
  99(p2): addr:aa:55:aa:55:00:0x
-     config:     PORT_DOWN
-     state:      LINK_DOWN
+     config:     0
+     state:      0
      speed: 0 Mbps now, 0 Mbps max
  LOCAL(br0): addr:aa:55:aa:55:00:0x
-     config:     PORT_DOWN
-     state:      LINK_DOWN
+     config:     0
+     state:      0
      speed: 0 Mbps now, 0 Mbps max
 OFPT_GET_CONFIG_REPLY: frags=normal miss_send_len=0
 ])
@@ -125,8 +125,8 @@ AT_CHECK([ovs-ofctl -vwarn dump-ports-desc br0], [0], [stdout])
 AT_CHECK([strip_xids < stdout], [0], [dnl
 OFPST_PORT_DESC reply:
  LOCAL(br0): addr:aa:55:aa:55:00:00
-     config:     PORT_DOWN
-     state:      LINK_DOWN
+     config:     0
+     state:      0
      speed: 0 Mbps now, 0 Mbps max
 ])
 OVS_VSWITCHD_STOP
@@ -140,8 +140,8 @@ AT_CHECK([ovs-ofctl -O OpenFlow12 -vwarn dump-ports-desc br0], [0], [stdout])
 AT_CHECK([strip_xids < stdout], [0], [dnl
 OFPST_PORT_DESC reply (OF1.2):
  LOCAL(br0): addr:aa:55:aa:55:00:00
-     config:     PORT_DOWN
-     state:      LINK_DOWN
+     config:     0
+     state:      LIVE
      speed: 0 Mbps now, 0 Mbps max
 ])
 OVS_VSWITCHD_STOP
@@ -154,62 +154,28 @@ AT_CHECK([ovs-ofctl -F OXM-OpenFlow15 -O OpenFlow15 -vwarn dump-ports-desc br0],
 AT_CHECK([strip_xids < stdout | sed 's/00:0./00:0x/'], [0], [dnl
 OFPST_PORT_DESC reply (OF1.5):
  1(p1): addr:aa:55:aa:55:00:0x
-     config:     PORT_DOWN
-     state:      LINK_DOWN
+     config:     0
+     state:      LIVE
      speed: 0 Mbps now, 0 Mbps max
  2(p2): addr:aa:55:aa:55:00:0x
-     config:     PORT_DOWN
-     state:      LINK_DOWN
+     config:     0
+     state:      LIVE
      speed: 0 Mbps now, 0 Mbps max
  3(p3): addr:aa:55:aa:55:00:0x
-     config:     PORT_DOWN
-     state:      LINK_DOWN
+     config:     0
+     state:      LIVE
      speed: 0 Mbps now, 0 Mbps max
  LOCAL(br0): addr:aa:55:aa:55:00:0x
-     config:     PORT_DOWN
-     state:      LINK_DOWN
+     config:     0
+     state:      LIVE
      speed: 0 Mbps now, 0 Mbps max
 ])
 AT_CHECK([ovs-ofctl -F OXM-OpenFlow15 -O OpenFlow15 -vwarn dump-ports-desc br0 2], [0], [stdout])
 AT_CHECK([strip_xids < stdout | sed 's/00:0./00:0x/'], [0], [dnl
 OFPST_PORT_DESC reply (OF1.5):
  2(p2): addr:aa:55:aa:55:00:0x
-     config:     PORT_DOWN
-     state:      LINK_DOWN
-     speed: 0 Mbps now, 0 Mbps max
-])
-OVS_VSWITCHD_STOP
-AT_CLEANUP
-
-AT_SETUP([ofproto - port-desc stats (OpenFlow 1.6)])
-OVS_VSWITCHD_START
-add_of_ports br0 1 2 3
-AT_CHECK([ovs-ofctl -F OXM-OpenFlow16 -O OpenFlow16 -vwarn dump-ports-desc br0], [0], [stdout])
-AT_CHECK([strip_xids < stdout | sed 's/00:0./00:0x/'], [0], [dnl
-OFPST_PORT_DESC reply (OF1.6):
- 1(p1): addr:aa:55:aa:55:00:0x
-     config:     PORT_DOWN
-     state:      LINK_DOWN
-     speed: 0 Mbps now, 0 Mbps max
- 2(p2): addr:aa:55:aa:55:00:0x
-     config:     PORT_DOWN
-     state:      LINK_DOWN
-     speed: 0 Mbps now, 0 Mbps max
- 3(p3): addr:aa:55:aa:55:00:0x
-     config:     PORT_DOWN
-     state:      LINK_DOWN
-     speed: 0 Mbps now, 0 Mbps max
- LOCAL(br0): addr:aa:55:aa:55:00:0x
-     config:     PORT_DOWN
-     state:      LINK_DOWN
-     speed: 0 Mbps now, 0 Mbps max
-])
-AT_CHECK([ovs-ofctl -F OXM-OpenFlow16 -O OpenFlow16 -vwarn dump-ports-desc br0 2], [0], [stdout])
-AT_CHECK([strip_xids < stdout | sed 's/00:0./00:0x/'], [0], [dnl
-OFPST_PORT_DESC reply (OF1.6):
- 2(p2): addr:aa:55:aa:55:00:0x
-     config:     PORT_DOWN
-     state:      LINK_DOWN
+     config:     0
+     state:      LIVE
      speed: 0 Mbps now, 0 Mbps max
 ])
 OVS_VSWITCHD_STOP
@@ -678,6 +644,20 @@ AT_CHECK([ovs-ofctl -O OpenFlow15 -vwarn insert-buckets br0 group_id=1234,comman
 AT_CHECK([ovs-ofctl -O OpenFlow11 -vwarn insert-buckets br0 group_id=1234,command_bucket_id=first,bucket=bucket_id:0,actions=output:0,bucket=bucket_id:1,actions=output:1], [1], [],
   [ovs-ofctl: insert-bucket needs OpenFlow 1.5 or later ('-O OpenFlow15')
 ])
+
+# Verify insert-buckets command to insert bucket with weight value for select group.
+AT_CHECK([ovs-ofctl -O OpenFlow15 --strict del-groups br0 group_id=1234])
+AT_DATA([groups.txt], [dnl
+group_id=1234,type=select,selection_method=hash,bucket=bucket_id=1,weight:100,output:11
+])
+AT_CHECK([ovs-ofctl -O OpenFlow15 -vwarn add-groups br0 groups.txt])
+AT_CHECK([ovs-ofctl -O OpenFlow15 insert-buckets br0 group_id=1234,command_bucket_id=last,bucket=bucket_id=2,weight=100,actions=output:11])
+AT_CHECK([ovs-ofctl -O OpenFlow15 -vwarn dump-groups br0], [0], [stdout])
+AT_CHECK([strip_xids < stdout], [0], [dnl
+OFPST_GROUP_DESC reply (OF1.5):
+ group_id=1234,type=select,selection_method=hash,bucket=bucket_id:1,weight:100,actions=output:11,bucket=bucket_id:2,weight:100,actions=output:11
+])
+
 OVS_VSWITCHD_STOP
 AT_CLEANUP
 
@@ -733,7 +713,7 @@ OFPT_GROUP_MOD (OF1.5):
 ])
 # Negative test.
 AT_CHECK([ovs-ofctl -O OpenFlow11 -vwarn remove-buckets br0 group_id=1234,command_bucket_id=last], [1], [],
-  [ovs-ofctl: none of the usable flow formats (OpenFlow10,NXM,OXM-OpenFlow15,OXM-OpenFlow16) is among the allowed flow formats (OpenFlow11)
+  [ovs-ofctl: none of the usable flow formats (OpenFlow10,NXM,OXM-OpenFlow15) is among the allowed flow formats (OpenFlow11)
 ])
 OVS_VSWITCHD_STOP
 AT_CLEANUP
@@ -1040,7 +1020,7 @@ Error OFPBFC_MSG_FAILED for: OFPT_BUNDLE_CONTROL (OF1.5):
 ])
 # Negative test.
 AT_CHECK([ovs-ofctl --bundle -O OpenFlow11 -vwarn remove-buckets br0 group_id=1234,command_bucket_id=last], [1], [],
-  [ovs-ofctl: none of the usable flow formats (OXM-OpenFlow15,OXM-OpenFlow16) is among the allowed flow formats (OXM-OpenFlow14)
+  [ovs-ofctl: none of the usable flow formats (OXM-OpenFlow15) is among the allowed flow formats (OXM-OpenFlow14)
 ])
 OVS_VSWITCHD_STOP
 AT_CLEANUP
@@ -1265,16 +1245,17 @@ OVS_VSWITCHD_START
 for command_config_state in \
     'up 0 0' \
     'noflood NO_FLOOD 0' \
-    'down PORT_DOWN,NO_FLOOD LINK_DOWN' \
-    'flood PORT_DOWN LINK_DOWN' \
-    'no-receive PORT_DOWN,NO_RECV LINK_DOWN' \
-    'no-forward PORT_DOWN,NO_RECV,NO_FWD LINK_DOWN' \
-    'no-packet-in PORT_DOWN,NO_RECV,NO_FWD,NO_PACKET_IN LINK_DOWN' \
-    'forward PORT_DOWN,NO_RECV,NO_PACKET_IN LINK_DOWN' \
-    'packet-in PORT_DOWN,NO_RECV LINK_DOWN' \
+    'flood 0 0' \
+    'no-receive NO_RECV 0' \
+    'no-forward NO_RECV,NO_FWD 0' \
+    'no-packet-in NO_RECV,NO_FWD,NO_PACKET_IN 0' \
+    'forward NO_RECV,NO_PACKET_IN 0' \
+    'packet-in NO_RECV 0' \
     'up NO_RECV 0' \
-    'receive 0 0'
+    'receive 0 0' \
+    'down PORT_DOWN LINK_DOWN'
 do
+    printf '\n--- %s --- \n\n' "$command_config_state"
     set $command_config_state
     command=$[1] config=`echo $[2] | sed 's/,/ /g'` state=$[3]
     AT_CHECK([ovs-ofctl -vwarn mod-port br0 br0 $command])
@@ -1298,15 +1279,16 @@ AT_SETUP([ofproto - mod-port (OpenFlow 1.2)])
 OVS_VSWITCHD_START
 for command_config_state in \
     'up 0 LIVE' \
-    'down PORT_DOWN LINK_DOWN' \
-    'no-receive PORT_DOWN,NO_RECV LINK_DOWN' \
-    'no-forward PORT_DOWN,NO_RECV,NO_FWD LINK_DOWN' \
-    'no-packet-in PORT_DOWN,NO_RECV,NO_FWD,NO_PACKET_IN LINK_DOWN' \
-    'forward PORT_DOWN,NO_RECV,NO_PACKET_IN LINK_DOWN' \
-    'packet-in PORT_DOWN,NO_RECV LINK_DOWN' \
+    'no-receive NO_RECV LIVE' \
+    'no-forward NO_RECV,NO_FWD LIVE' \
+    'no-packet-in NO_RECV,NO_FWD,NO_PACKET_IN LIVE' \
+    'forward NO_RECV,NO_PACKET_IN LIVE' \
+    'packet-in NO_RECV LIVE' \
     'up NO_RECV LIVE' \
-    'receive 0 LIVE'
+    'receive 0 LIVE' \
+    'down PORT_DOWN LINK_DOWN'
 do
+    printf '\n--- %s --- \n\n' "$command_config_state"
     set $command_config_state
     command=$[1] config=`echo $[2] | sed 's/,/ /g'` state=$[3]
     AT_CHECK([ovs-ofctl -O OpenFlow12 -vwarn mod-port br0 br0 $command])
@@ -1329,15 +1311,16 @@ AT_SETUP([ofproto - mod-port (OpenFlow 1.4)])
 OVS_VSWITCHD_START
 for command_config_state in \
     'up 0 LIVE' \
-    'down PORT_DOWN LINK_DOWN' \
-    'no-receive PORT_DOWN,NO_RECV LINK_DOWN' \
-    'no-forward PORT_DOWN,NO_RECV,NO_FWD LINK_DOWN' \
-    'no-packet-in PORT_DOWN,NO_RECV,NO_FWD,NO_PACKET_IN LINK_DOWN' \
-    'forward PORT_DOWN,NO_RECV,NO_PACKET_IN LINK_DOWN' \
-    'packet-in PORT_DOWN,NO_RECV LINK_DOWN' \
+    'no-receive NO_RECV LIVE' \
+    'no-forward NO_RECV,NO_FWD LIVE' \
+    'no-packet-in NO_RECV,NO_FWD,NO_PACKET_IN LIVE' \
+    'forward NO_RECV,NO_PACKET_IN LIVE' \
+    'packet-in NO_RECV LIVE' \
     'up NO_RECV LIVE' \
-    'receive 0 LIVE'
+    'receive 0 LIVE' \
+    'down PORT_DOWN LINK_DOWN'
 do
+    printf '\n--- %s --- \n\n' "$command_config_state"
     set $command_config_state
     command=$[1] config=`echo $[2] | sed 's/,/ /g'` state=$[3]
     AT_CHECK([ovs-ofctl -O OpenFlow14 -vwarn mod-port br0 br0 $command])
@@ -1352,38 +1335,6 @@ OFPST_PORT_DESC reply (OF1.4):
      state:      $state
      speed: 0 Mbps now, 0 Mbps max
 OFPT_GET_CONFIG_REPLY (OF1.4): frags=normal miss_send_len=0
-])
-done
-OVS_VSWITCHD_STOP
-AT_CLEANUP
-
-AT_SETUP([ofproto - mod-port (OpenFlow 1.6)])
-OVS_VSWITCHD_START
-for command_config_state in \
-    'up 0 LIVE' \
-    'down PORT_DOWN LINK_DOWN' \
-    'no-receive PORT_DOWN,NO_RECV LINK_DOWN' \
-    'no-forward PORT_DOWN,NO_RECV,NO_FWD LINK_DOWN' \
-    'no-packet-in PORT_DOWN,NO_RECV,NO_FWD,NO_PACKET_IN LINK_DOWN' \
-    'forward PORT_DOWN,NO_RECV,NO_PACKET_IN LINK_DOWN' \
-    'packet-in PORT_DOWN,NO_RECV LINK_DOWN' \
-    'up NO_RECV LIVE' \
-    'receive 0 LIVE'
-do
-    set $command_config_state
-    command=$[1] config=`echo $[2] | sed 's/,/ /g'` state=$[3]
-    AT_CHECK([ovs-ofctl -O OpenFlow16 -vwarn mod-port br0 br0 $command])
-    AT_CHECK([ovs-ofctl -O OpenFlow16 -vwarn show br0], [0], [stdout])
-    AT_CHECK_UNQUOTED([strip_xids < stdout], [0], [dnl
-OFPT_FEATURES_REPLY (OF1.6): dpid:fedcba9876543210
-n_tables:254, n_buffers:0
-capabilities: FLOW_STATS TABLE_STATS PORT_STATS GROUP_STATS QUEUE_STATS BUNDLES
-OFPST_PORT_DESC reply (OF1.6):
- LOCAL(br0): addr:aa:55:aa:55:00:00
-     config:     $config
-     state:      $state
-     speed: 0 Mbps now, 0 Mbps max
-OFPT_GET_CONFIG_REPLY (OF1.6): frags=normal miss_send_len=0
 ])
 done
 OVS_VSWITCHD_STOP
@@ -2253,12 +2204,7 @@ head_table() {
 
 ' "$1"
 }
-ditto() {
-    for i in `seq $1 $2`; do
-        printf '  table %d: ditto\n' $i
-    done
-}
-(head_table; ditto 1 253) > expout
+(head_table; echo '  tables 1...253: ditto') > expout
 AT_CHECK([ovs-ofctl dump-tables br0], [0], [expout])
 # Change the configuration.
 AT_CHECK(
@@ -2280,7 +2226,7 @@ AT_CHECK(
     active=0, lookup=0, matched=0
     max_entries=1000000
     (same matching)
-'; ditto 3 253) > expout
+'; echo '  tables 3...253: ditto') > expout
 AT_CHECK([ovs-ofctl dump-tables br0], [0], [expout])
 OVS_VSWITCHD_STOP
 AT_CLEANUP
@@ -2329,12 +2275,7 @@ head_table() {
 
 '
 }
-ditto() {
-    for i in `seq $1 $2`; do
-        printf '  table %d: ditto\n' $i
-    done
-}
-(head_table; ditto 1 253) > expout
+(head_table; echo '  tables 1...253: ditto') > expout
 AT_CHECK([ovs-ofctl dump-tables br0 | strip_xids], [0], [expout])
 OVS_VSWITCHD_STOP(["/240\.0\.0\.1/d"])
 AT_CLEANUP
@@ -2393,11 +2334,6 @@ head_table() {
 
 ' "$1"
 }
-ditto() {
-    for i in `seq $1 $2`; do
-        printf '  table %d: ditto\n' $i
-    done
-}
 tail_table() {
     printf '  table 253:
     active=0, lookup=0, matched=0
@@ -2410,7 +2346,7 @@ tail_table() {
     (same matching)
 '
 }
-(head_table; ditto 1 252; tail_table) > expout
+(head_table; printf '  tables 1...252: ditto\n\n'; tail_table) > expout
 AT_CHECK([ovs-ofctl -O OpenFlow12 dump-tables br0], [0], [expout])
 # Change the configuration.
 AT_CHECK(
@@ -2438,7 +2374,7 @@ AT_CHECK(
     max_entries=1000000
     (same instructions)
     (same matching)
-'; ditto 3 252; tail_table) > expout
+'; printf '  tables 3...252: ditto\n\n'; tail_table) > expout
 AT_CHECK([ovs-ofctl -O OpenFlow12 dump-tables br0], [0], [expout])
 OVS_VSWITCHD_STOP
 AT_CLEANUP
@@ -2456,7 +2392,7 @@ head_table () {
         actions: output group set_field strip_vlan push_vlan mod_nw_ttl dec_ttl set_mpls_ttl dec_mpls_ttl push_mpls pop_mpls set_queue
         supported on Set-Field: tun_id tun_src tun_dst tun_ipv6_src tun_ipv6_dst tun_flags tun_gbp_id tun_gbp_flags tun_erspan_idx tun_erspan_ver tun_erspan_dir tun_erspan_hwid tun_metadata0 dnl
 tun_metadata1 tun_metadata2 tun_metadata3 tun_metadata4 tun_metadata5 tun_metadata6 tun_metadata7 tun_metadata8 tun_metadata9 tun_metadata10 tun_metadata11 tun_metadata12 tun_metadata13 tun_metadata14 tun_metadata15 tun_metadata16 tun_metadata17 tun_metadata18 tun_metadata19 tun_metadata20 tun_metadata21 tun_metadata22 tun_metadata23 tun_metadata24 tun_metadata25 tun_metadata26 tun_metadata27 tun_metadata28 tun_metadata29 tun_metadata30 tun_metadata31 tun_metadata32 tun_metadata33 tun_metadata34 tun_metadata35 tun_metadata36 tun_metadata37 tun_metadata38 tun_metadata39 tun_metadata40 tun_metadata41 tun_metadata42 tun_metadata43 tun_metadata44 tun_metadata45 tun_metadata46 tun_metadata47 tun_metadata48 tun_metadata49 tun_metadata50 tun_metadata51 tun_metadata52 tun_metadata53 tun_metadata54 tun_metadata55 tun_metadata56 tun_metadata57 tun_metadata58 tun_metadata59 tun_metadata60 tun_metadata61 tun_metadata62 tun_metadata63 dnl
-metadata in_port in_port_oxm pkt_mark ct_mark ct_label reg0 reg1 reg2 reg3 reg4 reg5 reg6 reg7 reg8 reg9 reg10 reg11 reg12 reg13 reg14 reg15 xreg0 xreg1 xreg2 xreg3 xreg4 xreg5 xreg6 xreg7 xxreg0 xxreg1 xxreg2 xxreg3 eth_src eth_dst vlan_tci vlan_vid vlan_pcp mpls_label mpls_tc mpls_ttl ip_src ip_dst ipv6_src ipv6_dst ipv6_label nw_tos ip_dscp nw_ecn nw_ttl arp_op arp_spa arp_tpa arp_sha arp_tha tcp_src tcp_dst udp_src udp_dst sctp_src sctp_dst icmp_type icmp_code icmpv6_type icmpv6_code nd_target nd_sll nd_tll nsh_flags nsh_spi nsh_si nsh_c1 nsh_c2 nsh_c3 nsh_c4 nsh_ttl
+metadata in_port in_port_oxm pkt_mark ct_mark ct_label reg0 reg1 reg2 reg3 reg4 reg5 reg6 reg7 reg8 reg9 reg10 reg11 reg12 reg13 reg14 reg15 xreg0 xreg1 xreg2 xreg3 xreg4 xreg5 xreg6 xreg7 xxreg0 xxreg1 xxreg2 xxreg3 eth_src eth_dst vlan_tci vlan_vid vlan_pcp mpls_label mpls_tc mpls_ttl ip_src ip_dst ipv6_src ipv6_dst ipv6_label nw_tos ip_dscp nw_ecn nw_ttl arp_op arp_spa arp_tpa arp_sha arp_tha tcp_src tcp_dst udp_src udp_dst sctp_src sctp_dst icmp_type icmp_code icmpv6_type icmpv6_code nd_target nd_sll nd_tll nd_reserved nd_options_type nsh_flags nsh_spi nsh_si nsh_c1 nsh_c2 nsh_c3 nsh_c4 nsh_ttl
     matching:
       dp_hash: arbitrary mask
       recirc_id: exact match or wildcard
@@ -2622,6 +2558,8 @@ metadata in_port in_port_oxm pkt_mark ct_mark ct_label reg0 reg1 reg2 reg3 reg4 
       nd_target: arbitrary mask
       nd_sll: arbitrary mask
       nd_tll: arbitrary mask
+      nd_reserved: exact match or wildcard
+      nd_options_type: exact match or wildcard
       nsh_flags: arbitrary mask
       nsh_mdtype: exact match or wildcard
       nsh_np: exact match or wildcard
@@ -2635,29 +2573,8 @@ metadata in_port in_port_oxm pkt_mark ct_mark ct_label reg0 reg1 reg2 reg3 reg4 
 
 ' "$1"
 }
-ditto() {
-    printf '  table %d:
-    metadata: match=0xffffffffffffffff write=0xffffffffffffffff
-    max_entries=%d
-    instructions (table miss and others):
-      next tables: %d-253
-      (same instructions)
-      (same actions)
-    (same matching)
-
-' $1 $2 `expr $1 + 1`
-}
 tail_tables() {
-echo '  table 252:
-    metadata: match=0xffffffffffffffff write=0xffffffffffffffff
-    max_entries=1000000
-    instructions (table miss and others):
-      next tables: 253
-      (same instructions)
-      (same actions)
-    (same matching)
-
-  table 253:
+echo '  table 253:
     metadata: match=0xffffffffffffffff write=0xffffffffffffffff
     max_entries=1000000
     instructions (table miss and others):
@@ -2667,9 +2584,7 @@ echo '  table 252:
 '
 }
 (head_table
- for i in `seq 1 251`; do
-     ditto $i 1000000
- done
+ printf '  tables 1...252: ditto\n\n'
  tail_tables) > expout
 AT_CHECK([ovs-ofctl -O OpenFlow13 dump-table-features br0], [0], [expout])
 # Change the configuration.
@@ -2684,10 +2599,20 @@ AT_CHECK(
 ])
 # Check that the configuration was updated.
 (head_table ' ("main")'
- ditto 1 1024
- for i in `seq 2 251`; do
-     ditto $i 1000000
- done
+ echo '  table 1:
+    metadata: match=0xffffffffffffffff write=0xffffffffffffffff
+    max_entries=1024
+    (same instructions)
+    (same matching)
+
+  table 2:
+    metadata: match=0xffffffffffffffff write=0xffffffffffffffff
+    max_entries=1000000
+    (same instructions)
+    (same matching)
+
+  tables 3...252: ditto
+'
  tail_tables) > expout
 AT_CHECK([ovs-ofctl -O OpenFlow13 dump-table-features br0], [0], [expout])
 OVS_VSWITCHD_STOP
@@ -2696,6 +2621,19 @@ AT_CLEANUP
 AT_SETUP([ofproto - flow table names])
 OVS_VSWITCHD_START
 add_of_ports br0 1 2
+
+# Set a table name via OpenFlow 1.3 and one via OpenFlow 1.5.
+AT_CHECK([ovs-ofctl -O OpenFlow13 mod-table br0 0 name:xyzzy])
+AT_CHECK([ovs-ofctl -O OpenFlow15 mod-table br0 1 name:quux])
+AT_CHECK([ovs-ofctl -O OpenFlow15 dump-table-features br0 |grep '^  table'],
+  [0], [dnl
+  table 0 ("xyzzy"):
+  table 1 ("quux"): ditto
+  tables 2...252: ditto
+  table 253:
+])
+
+# Set some table names via OVSDB.
 AT_CHECK(
   [ovs-vsctl \
      -- --id=@t0 create Flow_Table name=zero \
@@ -2707,6 +2645,16 @@ AT_CHECK(
 <1>
 <2>
 ])
+AT_CHECK([ovs-ofctl -O OpenFlow15 dump-table-features br0 |grep '^  table'],
+  [0], [dnl
+  table 0 ("zero"):
+  table 1 ("one"): ditto
+  table 2 ("two"): ditto
+  tables 3...252: ditto
+  table 253:
+])
+
+# Check that flow table parsing and dumping uses the names.
 AT_DATA([flows.txt], [dnl
 table=zero in_port=p2 actions=p1,resubmit(,one)
 table=one,in_port=p1,ip,actions=ct(table=two)
@@ -2723,6 +2671,73 @@ AT_CHECK([ovs-ofctl --no-names --no-stats dump-flows br0], [0], [dnl
  table=1, ip,in_port=1 actions=ct(table=2)
  table=1, arp,in_port=1 actions=resubmit(,2)
 ])
+
+# Setting the same table names via OpenFlow 1.3 or OpenFlow 1.5 is a no-op.
+AT_CHECK([ovs-ofctl -O OpenFlow13 mod-table br0 0 name:zero])
+AT_CHECK([ovs-ofctl -O OpenFlow15 mod-table br0 1 name:one])
+AT_CHECK([ovs-ofctl -O OpenFlow15 dump-table-features br0 |grep '^  table'],
+  [0], [dnl
+  table 0 ("zero"):
+  table 1 ("one"): ditto
+  table 2 ("two"): ditto
+  tables 3...252: ditto
+  table 253:
+])
+
+# Setting different tables names via OpenFlow 1.3 or OpenFlow 1.5 yield errors.
+AT_CHECK([ovs-ofctl -O OpenFlow13 mod-table br0 0 name:xyzzy], 1, [], [stderr])
+AT_CHECK([head -1 stderr], [0], [OFPT_ERROR (OF1.3) (xid=0x5): OFPTFFC_EPERM
+])
+AT_CHECK([ovs-ofctl -O OpenFlow15 mod-table br0 1 name:quux], 1, [], [stderr])
+AT_CHECK([head -1 stderr], [0], [OFPT_ERROR (OF1.5) (xid=0x5): OFPTFFC_EPERM
+])
+
+# But we can still set table names for those not set via OVSDB.
+AT_CHECK([ovs-ofctl -O OpenFlow13 mod-table br0 3 name:three])
+AT_CHECK([ovs-ofctl -O OpenFlow15 dump-table-features br0 |grep '^  table'],
+  [0], [dnl
+  table 0 ("zero"):
+  table 1 ("one"): ditto
+  table 2 ("two"): ditto
+  table 3 ("three"): ditto
+  tables 4...252: ditto
+  table 253:
+])
+
+# Unsetting names via OVSDB then setting them via OpenFlow works too.
+AT_CHECK([ovs-vsctl remove bridge br0 Flow_Table 2])
+AT_CHECK([ovs-ofctl -O OpenFlow15 dump-table-features br0 |grep '^  table'],
+  [0], [dnl
+  table 0 ("zero"):
+  table 1 ("one"): ditto
+  table 2: ditto
+  table 3 ("three"): ditto
+  tables 4...252: ditto
+  table 253:
+])
+AT_CHECK([ovs-ofctl -O OpenFlow13 mod-table br0 2 name:foobar])
+AT_CHECK([ovs-ofctl -O OpenFlow15 dump-table-features br0 |grep '^  table'],
+  [0], [dnl
+  table 0 ("zero"):
+  table 1 ("one"): ditto
+  table 2 ("foobar"): ditto
+  table 3 ("three"): ditto
+  tables 4...252: ditto
+  table 253:
+])
+
+# We can clear names via OpenFlow, at least if they were set that way.
+AT_CHECK([ovs-ofctl -O OpenFlow13 mod-table br0 2 name:])
+AT_CHECK([ovs-ofctl -O OpenFlow15 dump-table-features br0 |grep '^  table'],
+  [0], [dnl
+  table 0 ("zero"):
+  table 1 ("one"): ditto
+  table 2: ditto
+  table 3 ("three"): ditto
+  tables 4...252: ditto
+  table 253:
+])
+
 OVS_VSWITCHD_STOP
 AT_CLEANUP
 
@@ -3280,7 +3295,7 @@ OVS_VSWITCHD_STOP
 AT_CLEANUP
 
 AT_SETUP([ofproto - asynchronous message control (OpenFlow 1.0)])
-OVS_VSWITCHD_START
+OVS_VSWITCHD_START([set bridge br0 other_config:hwaddr=00:01:02:03:04:05])
 AT_CHECK([ovs-ofctl -P standard monitor br0 --detach --no-chdir --pidfile])
 check_async () {
     printf '\n\n--- check_async %d ---\n\n\n' $1
@@ -3315,8 +3330,8 @@ udp,vlan_tci=0x0000,dl_src=00:26:b9:8c:b0:f9,dl_dst=00:25:83:df:b4:00,nw_src=172
     ovs-vsctl add-port br0 test -- set Interface test type=dummy ofport_request=1
     if test X"$1" = X"OFPPR_ADD"; then shift;
         echo >>expout "OFPT_PORT_STATUS: ADD: 1(test): addr:aa:55:aa:55:00:0x
-     config:     PORT_DOWN
-     state:      LINK_DOWN
+     config:     0
+     state:      0
      speed: 0 Mbps now, 0 Mbps max"
     fi
 
@@ -3324,8 +3339,8 @@ udp,vlan_tci=0x0000,dl_src=00:26:b9:8c:b0:f9,dl_dst=00:25:83:df:b4:00,nw_src=172
     ovs-vsctl del-port br0 test
     if test X"$1" = X"OFPPR_DELETE"; then shift;
         echo >>expout "OFPT_PORT_STATUS: DEL: 1(test): addr:aa:55:aa:55:00:0x
-     config:     PORT_DOWN
-     state:      LINK_DOWN
+     config:     0
+     state:      0
      speed: 0 Mbps now, 0 Mbps max"
     fi
 
@@ -3418,8 +3433,12 @@ udp,vlan_tci=0x0000,dl_src=00:26:b9:8c:b0:f9,dl_dst=00:25:83:df:b4:00,nw_src=172
     ovs-vsctl add-port br0 test -- set Interface test type=dummy
     if test X"$1" = X"OFPPR_ADD"; then shift;
         echo >>expout "OFPT_PORT_STATUS (OF1.2): ADD: ${INDEX}(test): addr:aa:55:aa:55:00:0x
-     config:     PORT_DOWN
-     state:      LINK_DOWN
+     config:     0
+     state:      0
+     speed: 0 Mbps now, 0 Mbps max
+OFPT_PORT_STATUS (OF1.2): MOD: ${INDEX}(test): addr:aa:55:aa:55:00:0x
+     config:     0
+     state:      LIVE
      speed: 0 Mbps now, 0 Mbps max"
     fi
 
@@ -3427,8 +3446,8 @@ udp,vlan_tci=0x0000,dl_src=00:26:b9:8c:b0:f9,dl_dst=00:25:83:df:b4:00,nw_src=172
     ovs-vsctl del-port br0 test
     if test X"$1" = X"OFPPR_DELETE"; then shift;
         echo >>expout "OFPT_PORT_STATUS (OF1.2): DEL: ${INDEX}(test): addr:aa:55:aa:55:00:0x
-     config:     PORT_DOWN
-     state:      LINK_DOWN
+     config:     0
+     state:      LIVE
      speed: 0 Mbps now, 0 Mbps max"
     fi
 
@@ -3528,8 +3547,12 @@ udp,vlan_tci=0x0000,dl_src=00:26:b9:8c:b0:f9,dl_dst=00:25:83:df:b4:00,nw_src=172
     ovs-vsctl add-port br0 test -- set Interface test type=dummy
     if test X"$1" = X"OFPPR_ADD"; then shift;
         echo >>expout "OFPT_PORT_STATUS (OF1.3): ADD: ${INDEX}(test): addr:aa:55:aa:55:00:0x
-     config:     PORT_DOWN
-     state:      LINK_DOWN
+     config:     0
+     state:      0
+     speed: 0 Mbps now, 0 Mbps max
+OFPT_PORT_STATUS (OF1.3): MOD: ${INDEX}(test): addr:aa:55:aa:55:00:0x
+     config:     0
+     state:      LIVE
      speed: 0 Mbps now, 0 Mbps max"
     fi
 
@@ -3537,8 +3560,8 @@ udp,vlan_tci=0x0000,dl_src=00:26:b9:8c:b0:f9,dl_dst=00:25:83:df:b4:00,nw_src=172
     ovs-vsctl del-port br0 test
     if test X"$1" = X"OFPPR_DELETE"; then shift;
         echo >>expout "OFPT_PORT_STATUS (OF1.3): DEL: ${INDEX}(test): addr:aa:55:aa:55:00:0x
-     config:     PORT_DOWN
-     state:      LINK_DOWN
+     config:     0
+     state:      LIVE
      speed: 0 Mbps now, 0 Mbps max"
     fi
 
@@ -3646,17 +3669,8 @@ udp,vlan_tci=0x0000,dl_src=00:26:b9:8c:b0:f9,dl_dst=00:25:83:df:b4:00,nw_src=172
     ovs-vsctl add-port br0 test -- set Interface test type=dummy
     if test X"$1" = X"OFPPR_ADD"; then shift;
         echo >>expout "OFPT_PORT_STATUS (OF1.4): ADD: ${INDEX}(test): addr:aa:55:aa:55:00:0x
-     config:     PORT_DOWN
-     state:      LINK_DOWN
-     speed: 0 Mbps now, 0 Mbps max"
-    fi
-
-    # OFPT_PORT_STATUS, OFPPR_MODIFY
-    ovs-ofctl -O OpenFlow14 -vwarn mod-port br0 test up
-    if test X"$1" = X"OFPPR_MODIFY"; then shift;
-        echo >>expout "OFPT_PORT_STATUS (OF1.4): MOD: ${INDEX}(test): addr:aa:55:aa:55:00:0x
      config:     0
-     state:      LINK_DOWN
+     state:      0
      speed: 0 Mbps now, 0 Mbps max
 OFPT_PORT_STATUS (OF1.4): MOD: ${INDEX}(test): addr:aa:55:aa:55:00:0x
      config:     0
@@ -3664,12 +3678,25 @@ OFPT_PORT_STATUS (OF1.4): MOD: ${INDEX}(test): addr:aa:55:aa:55:00:0x
      speed: 0 Mbps now, 0 Mbps max"
     fi
 
+    # OFPT_PORT_STATUS, OFPPR_MODIFY
+    ovs-ofctl -O OpenFlow14 -vwarn mod-port br0 test down
+    if test X"$1" = X"OFPPR_MODIFY"; then shift;
+        echo >>expout "OFPT_PORT_STATUS (OF1.4): MOD: ${INDEX}(test): addr:aa:55:aa:55:00:0x
+     config:     PORT_DOWN
+     state:      0
+     speed: 0 Mbps now, 0 Mbps max
+OFPT_PORT_STATUS (OF1.4): MOD: ${INDEX}(test): addr:aa:55:aa:55:00:0x
+     config:     PORT_DOWN
+     state:      LINK_DOWN
+     speed: 0 Mbps now, 0 Mbps max"
+    fi
+
     # OFPT_PORT_STATUS, OFPPR_DELETE
     ovs-vsctl del-port br0 test
     if test X"$1" = X"OFPPR_DELETE"; then shift;
         echo >>expout "OFPT_PORT_STATUS (OF1.4): DEL: ${INDEX}(test): addr:aa:55:aa:55:00:0x
-     config:     0
-     state:      LIVE
+     config:     PORT_DOWN
+     state:      LINK_DOWN
      speed: 0 Mbps now, 0 Mbps max"
     fi
 
@@ -3827,21 +3854,25 @@ check_async () {
     ovs-vsctl add-port br0 test -- set Interface test type=dummy
     if test X"$1" = X"OFPPR_ADD"; then shift;
         echo >>expout "OFPT_PORT_STATUS (OF1.5): ADD: ${INDEX}(test): addr:aa:55:aa:55:00:0x
-     config:     PORT_DOWN
-     state:      LINK_DOWN
+     config:     0
+     state:      0
+     speed: 0 Mbps now, 0 Mbps max
+OFPT_PORT_STATUS (OF1.5): MOD: ${INDEX}(test): addr:aa:55:aa:55:00:0x
+     config:     0
+     state:      LIVE
      speed: 0 Mbps now, 0 Mbps max"
     fi
 
     # OFPT_PORT_STATUS, OFPPR_MODIFY
-    ovs-ofctl -O OpenFlow15 -vwarn mod-port br0 test up
+    ovs-ofctl -O OpenFlow15 -vwarn mod-port br0 test down
     if test X"$1" = X"OFPPR_MODIFY"; then shift;
         echo >>expout "OFPT_PORT_STATUS (OF1.5): MOD: ${INDEX}(test): addr:aa:55:aa:55:00:0x
-     config:     0
-     state:      LINK_DOWN
+     config:     PORT_DOWN
+     state:      0
      speed: 0 Mbps now, 0 Mbps max
-OFPT_PORT_STATUS (OF1.5): MOD: 2(test): addr:aa:55:aa:55:00:0x
-     config:     0
-     state:      LIVE
+OFPT_PORT_STATUS (OF1.5): MOD: ${INDEX}(test): addr:aa:55:aa:55:00:0x
+     config:     PORT_DOWN
+     state:      LINK_DOWN
      speed: 0 Mbps now, 0 Mbps max"
     fi
 
@@ -3849,8 +3880,8 @@ OFPT_PORT_STATUS (OF1.5): MOD: 2(test): addr:aa:55:aa:55:00:0x
     ovs-vsctl del-port br0 test
     if test X"$1" = X"OFPPR_DELETE"; then shift;
         echo >>expout "OFPT_PORT_STATUS (OF1.5): DEL: ${INDEX}(test): addr:aa:55:aa:55:00:0x
-     config:     0
-     state:      LIVE
+     config:     PORT_DOWN
+     state:      LINK_DOWN
      speed: 0 Mbps now, 0 Mbps max"
     fi
 
@@ -4165,6 +4196,205 @@ check_async 1 OFPGC_ADD OFPGC_MODIFY
 
 OVS_VSWITCHD_STOP
 AT_CLEANUP
+
+dnl This test checks the backwards compatibility of the NXT_REQUESTFORWARD
+dnl message type to OpenFlow 1.0, also relying on the Nicira Extensions:
+dnl NXT_GROUP_MOD, NXT_ROLE_REQUEST, and OFPRAW_NXT_SET_ASYNC_CONFIG2,
+dnl while also testing the functionality of the previous test.
+AT_SETUP([ofproto - NXT requestforward (OpenFlow 1.0)])
+OVS_VSWITCHD_START
+on_exit 'kill `cat c1.pid c2.pid c3.pid`'
+
+# Start two ovs-ofctl controller processes.
+AT_CAPTURE_FILE([monitor1.log])
+AT_CAPTURE_FILE([expout1])
+AT_CAPTURE_FILE([monitor2.log])
+AT_CAPTURE_FILE([expout2])
+AT_CAPTURE_FILE([monitor3.log])
+AT_CAPTURE_FILE([expout3])
+
+ovs-ofctl -O OpenFlow10 monitor br0 --detach --no-chdir --pidfile=c1.pid --unixctl=c1
+ovs-ofctl -O OpenFlow10 monitor br0 --detach --no-chdir --pidfile=c2.pid --unixctl=c2
+ovs-ofctl -O OpenFlow10 monitor br0 --detach --no-chdir --pidfile=c3.pid --unixctl=c3
+
+check_async () {
+    for i in 1 3; do
+        ovs-appctl -t `pwd`/c$i ofctl/barrier
+        ovs-appctl -t `pwd`/c$i ofctl/set-output-file monitor$i.log
+        : > expout$i
+    done
+
+    printf '\n\n--- check_async %d ---\n\n\n' $1
+    INDEX=$1
+    shift
+
+    # OFPGC_ADD
+    # NXT_GROUP_MOD (xid=0x2):
+    # ADD group_id=2271560481,type=select,selection_method=hash,selection_method_param=7,bucket=bucket_id:0,weight:100,watch_port:1,actions=output:1,bucket=bucket_id:1,weight:200,watch_port:2,actions=output:2,bucket=bucket_id:2,weight:200,watch_port:3,actions=output:3
+    ovs-appctl -t `pwd`/c2 ofctl/send "01 04 00 a8 00 00 00 02 00 00 23 20 00 00 00 1f 00 00 01 00 87 65 43 21 00 60 00 00 ff ff ff ff 00 20 00 08 00 00 00 00 00 00 00 08 00 01 00 00 00 00 00 08 00 64 00 00 00 01 00 08 00 00 00 01 00 20 00 08 00 00 00 01 00 00 00 08 00 02 00 00 00 00 00 08 00 c8 00 00 00 01 00 08 00 00 00 02 00 20 00 08 00 00 00 02 00 00 00 08 00 03 00 00 00 00 00 08 00 c8 00 00 00 01 00 08 00 00 00 03 ff ff 00 28 00 00 15 40 00 00 00 01 00 00 00 00 68 61 73 68 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 07"
+    if test X"$1" = X"OFPGC_ADD"; then shift;
+        echo >>expout2 "send: NXT_GROUP_MOD:
+ ADD group_id=2271560481,type=select,selection_method=hash,selection_method_param=7,bucket=bucket_id:0,weight:100,watch_port:1,actions=output:1,bucket=bucket_id:1,weight:200,watch_port:2,actions=output:2,bucket=bucket_id:2,weight:200,watch_port:3,actions=output:3"
+        echo >>expout1 "NXT_REQUESTFORWARD: reason=group_mod
+ ADD group_id=2271560481,type=select,selection_method=hash,selection_method_param=7,bucket=bucket_id:0,weight:100,watch_port:1,actions=output:1,bucket=bucket_id:1,weight:200,watch_port:2,actions=output:2,bucket=bucket_id:2,weight:200,watch_port:3,actions=output:3"
+        echo >>expout3 "NXT_REQUESTFORWARD: reason=group_mod
+ ADD group_id=2271560481,type=select,selection_method=hash,selection_method_param=7,bucket=bucket_id:0,weight:100,watch_port:1,actions=output:1,bucket=bucket_id:1,weight:200,watch_port:2,actions=output:2,bucket=bucket_id:2,weight:200,watch_port:3,actions=output:3"
+    fi
+
+    # OFPGC_MODIFY
+    # NXT_GROUP_MOD (xid=0x2):
+    # MOD group_id=2271560481,type=select,selection_method=hash,selection_method_param=7,bucket=bucket_id:0,weight:150,watch_port:1,actions=output:1,bucket=bucket_id:1,weight:150,watch_port:2,actions=output:2,bucket=bucket_id:2,weight:150,watch_port:3,actions=output:3
+    ovs-appctl -t `pwd`/c2 ofctl/send "01 04 00 a8 00 00 00 02 00 00 23 20 00 00 00 1f 00 01 01 00 87 65 43 21 00 60 00 00 ff ff ff ff 00 20 00 08 00 00 00 00 00 00 00 08 00 01 00 00 00 00 00 08 00 96 00 00 00 01 00 08 00 00 00 01 00 20 00 08 00 00 00 01 00 00 00 08 00 02 00 00 00 00 00 08 00 96 00 00 00 01 00 08 00 00 00 02 00 20 00 08 00 00 00 02 00 00 00 08 00 03 00 00 00 00 00 08 00 96 00 00 00 01 00 08 00 00 00 03 ff ff 00 28 00 00 15 40 00 00 00 01 00 00 00 00 68 61 73 68 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 07"
+    if test X"$1" = X"OFPGC_MODIFY"; then shift;
+        echo >>expout2 "send: NXT_GROUP_MOD:
+ MOD group_id=2271560481,type=select,selection_method=hash,selection_method_param=7,bucket=bucket_id:0,weight:150,watch_port:1,actions=output:1,bucket=bucket_id:1,weight:150,watch_port:2,actions=output:2,bucket=bucket_id:2,weight:150,watch_port:3,actions=output:3"
+        echo >>expout1 "NXT_REQUESTFORWARD: reason=group_mod
+ MOD group_id=2271560481,type=select,selection_method=hash,selection_method_param=7,bucket=bucket_id:0,weight:150,watch_port:1,actions=output:1,bucket=bucket_id:1,weight:150,watch_port:2,actions=output:2,bucket=bucket_id:2,weight:150,watch_port:3,actions=output:3"
+        echo >>expout3 "NXT_REQUESTFORWARD: reason=group_mod
+ MOD group_id=2271560481,type=select,selection_method=hash,selection_method_param=7,bucket=bucket_id:0,weight:150,watch_port:1,actions=output:1,bucket=bucket_id:1,weight:150,watch_port:2,actions=output:2,bucket=bucket_id:2,weight:150,watch_port:3,actions=output:3"
+    fi
+
+    ovs-appctl -t `pwd`/c1 ofctl/barrier
+    echo >>expout1 "OFPT_BARRIER_REPLY:"
+    ovs-appctl -t `pwd`/c2 ofctl/barrier
+    echo >>expout2 "OFPT_BARRIER_REPLY:"
+    ovs-appctl -t `pwd`/c3 ofctl/barrier
+    echo >>expout3 "OFPT_BARRIER_REPLY:"
+
+    # Check output.
+    for i in 1 3; do
+        cp expout$i expout
+        AT_CHECK(
+      [[sed '
+s/ (xid=0x[0-9a-fA-F]*)//'< monitor$i.log]],
+      [0], [expout])
+    done
+}
+
+# controller 1: Become slave
+# NXT_ROLE_REQUEST (xid=0x3): role=slave
+ovs-appctl -t `pwd`/c1 ofctl/send 0104001400000003000023200000000a00000002
+
+# controller 2: Become master
+# NXT_ROLE_REQUEST (xid=0x3): role=master
+ovs-appctl -t `pwd`/c2 ofctl/send 0104001400000003000023200000000a00000001
+
+# controller 1: Become slave
+# NXT_ROLE_REQUEST (xid=0x3): role=slave
+ovs-appctl -t `pwd`/c3 ofctl/send 0104001400000003000023200000000a00000002
+
+# controller 1: Enabled requestforward using OFPRAW_NXT_SET_ASYNC_CONFIG2
+ovs-appctl -t `pwd`/c1 ofctl/send 0104003000000002000023200000001b00000008000000050002000800000002000400080000001a000a000800000003
+
+# controller 2: Enabled requestforward using OFPRAW_NXT_SET_ASYNC_CONFIG2
+ovs-appctl -t `pwd`/c2 ofctl/send 0104003000000002000023200000001b000100080000000200030008000000050005000800000005000b000800000003
+
+# controller 1: Enabled requestforward using OFPRAW_NXT_SET_ASYNC_CONFIG2
+ovs-appctl -t `pwd`/c3 ofctl/send 0104003000000002000023200000001b00000008000000050002000800000002000400080000001a000a000800000003
+check_async 1 OFPGC_ADD OFPGC_MODIFY
+
+OVS_VSWITCHD_STOP
+AT_CLEANUP
+
+dnl This test checks the Group and meter notifications when a group mod
+dnl command is sent from one controller and the reply is received by
+dnl other controllers, using the ONF Extension for OF 1.3.
+AT_SETUP([ofproto - ONF requestforward (OpenFlow 1.3)])
+OVS_VSWITCHD_START
+on_exit 'kill `cat c1.pid c2.pid c3.pid`'
+
+# Start two ovs-ofctl controller processes.
+AT_CAPTURE_FILE([monitor1.log])
+AT_CAPTURE_FILE([expout1])
+AT_CAPTURE_FILE([monitor2.log])
+AT_CAPTURE_FILE([expout2])
+AT_CAPTURE_FILE([monitor3.log])
+AT_CAPTURE_FILE([expout3])
+
+ovs-ofctl -O OpenFlow13 monitor br0 --detach --no-chdir --pidfile=c1.pid --unixctl=c1
+ovs-ofctl -O OpenFlow13 monitor br0 --detach --no-chdir --pidfile=c2.pid --unixctl=c2
+ovs-ofctl -O OpenFlow13 monitor br0 --detach --no-chdir --pidfile=c3.pid --unixctl=c3
+
+check_async () {
+    for i in 1 3; do
+        ovs-appctl -t `pwd`/c$i ofctl/barrier
+        ovs-appctl -t `pwd`/c$i ofctl/set-output-file monitor$i.log
+        : > expout$i
+    done
+
+    printf '\n\n--- check_async %d ---\n\n\n' $1
+    INDEX=$1
+    shift
+
+    # OFPGC_ADD
+    # OFPT_GROUP_MOD (OF1.3) (xid=0x2):
+    # ADD group_id=1,type=all,bucket=actions=drop
+    ovs-appctl -t `pwd`/c2 ofctl/send "040f0020000000020000000000000001 00100000 ffffffffffffffff 00000000"
+    if test X"$1" = X"OFPGC_ADD"; then shift;
+        echo >>expout2 "send: OFPT_GROUP_MOD (OF1.3):
+ ADD group_id=1,type=all,bucket=actions=drop"
+        echo >>expout1 "ONFT_REQUESTFORWARD (OF1.3): reason=group_mod
+ ADD group_id=1,type=all,bucket=actions=drop"
+        echo >>expout3 "ONFT_REQUESTFORWARD (OF1.3): reason=group_mod
+ ADD group_id=1,type=all,bucket=actions=drop"
+    fi
+
+    # OFPGC_MODIFY
+    # OFPT_GROUP_MOD (OF1.3) (xid=0x2):
+    # MOD group_id=1,type=select,bucket=weight:0,actions=drop
+    ovs-appctl -t `pwd`/c2 ofctl/send "040f0020000000020001010000000001 00100000 ffffffffffffffff 00000000"
+    if test X"$1" = X"OFPGC_MODIFY"; then shift;
+        echo >>expout2 "send: OFPT_GROUP_MOD (OF1.3):
+ MOD group_id=1,type=select,bucket=weight:0,actions=drop"
+        echo >>expout1 "ONFT_REQUESTFORWARD (OF1.3): reason=group_mod
+ MOD group_id=1,type=select,bucket=weight:0,actions=drop"
+        echo >>expout3 "ONFT_REQUESTFORWARD (OF1.3): reason=group_mod
+ MOD group_id=1,type=select,bucket=weight:0,actions=drop"
+    fi
+
+    ovs-appctl -t `pwd`/c1 ofctl/barrier
+    echo >>expout1 "OFPT_BARRIER_REPLY (OF1.3):"
+    ovs-appctl -t `pwd`/c2 ofctl/barrier
+    echo >>expout2 "OFPT_BARRIER_REPLY (OF1.3):"
+    ovs-appctl -t `pwd`/c3 ofctl/barrier
+    echo >>expout3 "OFPT_BARRIER_REPLY (OF1.3):"
+
+    # Check output.
+    for i in 1 3; do
+        cp expout$i expout
+        AT_CHECK(
+      [[sed '
+s/ (xid=0x[0-9a-fA-F]*)//'< monitor$i.log]],
+      [0], [expout])
+    done
+}
+
+# controller 1: Become slave
+# OFPT_ROLE_REQUEST (OF1.3) (xid=0x3): role=slave
+ovs-appctl -t `pwd`/c1 ofctl/send 041800180000000300000003000000008000000000000002
+
+# controller 2: Become master
+# OFPT_ROLE_REQUEST (OF1.3) (xid=0x3): role=master
+ovs-appctl -t `pwd`/c2 ofctl/send 041800180000000300000002000000008000000000000003
+
+# controller 1: Become slave
+# OFPT_ROLE_REQUEST (OF1.3) (xid=0x3): role=slave
+ovs-appctl -t `pwd`/c3 ofctl/send 041800180000000300000003000000008000000000000004
+
+# controller 1: Enabled requestforward using OFPRAW_NXT_SET_ASYNC_CONFIG2 (necessary for OF1.3)
+ovs-appctl -t `pwd`/c1 ofctl/send 0404003000000002000023200000001b00000008000000050002000800000002000400080000001a000a000800000003
+
+# controller 2: Enabled requestforward using OFPRAW_NXT_SET_ASYNC_CONFIG2 (necessary for OF1.3)
+ovs-appctl -t `pwd`/c2 ofctl/send 0404003000000002000023200000001b000100080000000200030008000000050005000800000005000b000800000003
+
+# controller 1: Enabled requestforward using OFPRAW_NXT_SET_ASYNC_CONFIG2 (necessary for OF1.3)
+ovs-appctl -t `pwd`/c3 ofctl/send 0404003000000002000023200000001b00000008000000050002000800000002000400080000001a000a000800000003
+check_async 1 OFPGC_ADD OFPGC_MODIFY
+
+OVS_VSWITCHD_STOP
+AT_CLEANUP
+
+
 
 dnl This test checks that OFPT_PACKET_OUT accepts both OFPP_NONE (as
 dnl specified by OpenFlow 1.0) and OFPP_CONTROLLER (used by some
@@ -5267,19 +5497,19 @@ dnl Check logs for OpenFlow trace
 # Prevent race.
 OVS_WAIT_UNTIL([vconn_sub < ovs-vswitchd.log | test `grep -- "|vconn|DBG|unix: sent (Success): NXST_FLOW reply" | wc -l` -ge 3])
 AT_CHECK([print_vconn_debug | vconn_sub | ofctl_strip], [0], [dnl
-vconn|DBG|unix: sent (Success): OFPT_HELLO (OF1.6):
- version bitmap: 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07
+vconn|DBG|unix: sent (Success): OFPT_HELLO (OF1.5):
+ version bitmap: 0x01, 0x02, 0x03, 0x04, 0x05, 0x06
 vconn|DBG|unix: received: OFPT_HELLO:
  version bitmap: 0x01
-vconn|DBG|unix: negotiated OpenFlow version 0x01 (we support version 0x07 and earlier, peer supports version 0x01)
+vconn|DBG|unix: negotiated OpenFlow version 0x01 (we support version 0x06 and earlier, peer supports version 0x01)
 vconn|DBG|unix: received: OFPT_FLOW_MOD: DEL actions=drop
 vconn|DBG|unix: received: OFPT_BARRIER_REQUEST:
 vconn|DBG|unix: sent (Success): OFPT_BARRIER_REPLY:
-vconn|DBG|unix: sent (Success): OFPT_HELLO (OF1.6):
- version bitmap: 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07
+vconn|DBG|unix: sent (Success): OFPT_HELLO (OF1.5):
+ version bitmap: 0x01, 0x02, 0x03, 0x04, 0x05, 0x06
 vconn|DBG|unix: received: OFPT_HELLO (OF1.4):
  version bitmap: 0x05
-vconn|DBG|unix: negotiated OpenFlow version 0x05 (we support version 0x07 and earlier, peer supports version 0x05)
+vconn|DBG|unix: negotiated OpenFlow version 0x05 (we support version 0x06 and earlier, peer supports version 0x05)
 vconn|DBG|unix: received: OFPT_BUNDLE_CONTROL (OF1.4):
  bundle_id=0 type=OPEN_REQUEST flags=atomic ordered
 vconn|DBG|unix: sent (Success): OFPT_BUNDLE_CONTROL (OF1.4):
@@ -5317,11 +5547,11 @@ vconn|DBG|unix: received: OFPT_BUNDLE_CONTROL (OF1.4):
  bundle_id=0 type=COMMIT_REQUEST flags=atomic ordered
 vconn|DBG|unix: sent (Success): OFPT_BUNDLE_CONTROL (OF1.4):
  bundle_id=0 type=COMMIT_REPLY flags=0
-vconn|DBG|unix: sent (Success): OFPT_HELLO (OF1.6):
- version bitmap: 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07
+vconn|DBG|unix: sent (Success): OFPT_HELLO (OF1.5):
+ version bitmap: 0x01, 0x02, 0x03, 0x04, 0x05, 0x06
 vconn|DBG|unix: received: OFPT_HELLO:
  version bitmap: 0x01
-vconn|DBG|unix: negotiated OpenFlow version 0x01 (we support version 0x07 and earlier, peer supports version 0x01)
+vconn|DBG|unix: negotiated OpenFlow version 0x01 (we support version 0x06 and earlier, peer supports version 0x01)
 vconn|DBG|unix: received: NXT_SET_FLOW_FORMAT: format=nxm
 vconn|DBG|unix: received: OFPT_BARRIER_REQUEST:
 vconn|DBG|unix: sent (Success): OFPT_BARRIER_REPLY:
@@ -5329,11 +5559,11 @@ vconn|DBG|unix: received: NXST_FLOW request:
 vconn|DBG|unix: sent (Success): NXST_FLOW reply:
  idle_timeout=50, in_port=2,dl_src=00:66:77:88:99:aa actions=output:5
  idle_timeout=60, in_port=2,dl_src=00:77:88:99:aa:bb actions=output:6
-vconn|DBG|unix: sent (Success): OFPT_HELLO (OF1.6):
- version bitmap: 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07
+vconn|DBG|unix: sent (Success): OFPT_HELLO (OF1.5):
+ version bitmap: 0x01, 0x02, 0x03, 0x04, 0x05, 0x06
 vconn|DBG|unix: received: OFPT_HELLO (OF1.4):
  version bitmap: 0x05
-vconn|DBG|unix: negotiated OpenFlow version 0x05 (we support version 0x07 and earlier, peer supports version 0x05)
+vconn|DBG|unix: negotiated OpenFlow version 0x05 (we support version 0x06 and earlier, peer supports version 0x05)
 vconn|DBG|unix: received: OFPT_BUNDLE_CONTROL (OF1.4):
  bundle_id=0 type=OPEN_REQUEST flags=atomic ordered
 vconn|DBG|unix: sent (Success): OFPT_BUNDLE_CONTROL (OF1.4):
@@ -5350,11 +5580,11 @@ vconn|DBG|unix: received: OFPT_BUNDLE_CONTROL (OF1.4):
  bundle_id=0 type=COMMIT_REQUEST flags=atomic ordered
 vconn|DBG|unix: sent (Success): OFPT_BUNDLE_CONTROL (OF1.4):
  bundle_id=0 type=COMMIT_REPLY flags=0
-vconn|DBG|unix: sent (Success): OFPT_HELLO (OF1.6):
- version bitmap: 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07
+vconn|DBG|unix: sent (Success): OFPT_HELLO (OF1.5):
+ version bitmap: 0x01, 0x02, 0x03, 0x04, 0x05, 0x06
 vconn|DBG|unix: received: OFPT_HELLO:
  version bitmap: 0x01
-vconn|DBG|unix: negotiated OpenFlow version 0x01 (we support version 0x07 and earlier, peer supports version 0x01)
+vconn|DBG|unix: negotiated OpenFlow version 0x01 (we support version 0x06 and earlier, peer supports version 0x01)
 vconn|DBG|unix: received: NXT_SET_FLOW_FORMAT: format=nxm
 vconn|DBG|unix: received: OFPT_BARRIER_REQUEST:
 vconn|DBG|unix: sent (Success): OFPT_BARRIER_REPLY:
@@ -5362,11 +5592,11 @@ vconn|DBG|unix: received: NXST_FLOW request:
 vconn|DBG|unix: sent (Success): NXST_FLOW reply:
  idle_timeout=50, in_port=2,dl_src=00:66:77:88:99:aa actions=drop
  idle_timeout=60, in_port=2,dl_src=00:77:88:99:aa:bb actions=output:7
-vconn|DBG|unix: sent (Success): OFPT_HELLO (OF1.6):
- version bitmap: 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07
+vconn|DBG|unix: sent (Success): OFPT_HELLO (OF1.5):
+ version bitmap: 0x01, 0x02, 0x03, 0x04, 0x05, 0x06
 vconn|DBG|unix: received: OFPT_HELLO (OF1.4):
  version bitmap: 0x05
-vconn|DBG|unix: negotiated OpenFlow version 0x05 (we support version 0x07 and earlier, peer supports version 0x05)
+vconn|DBG|unix: negotiated OpenFlow version 0x05 (we support version 0x06 and earlier, peer supports version 0x05)
 vconn|DBG|unix: received: OFPT_BUNDLE_CONTROL (OF1.4):
  bundle_id=0 type=OPEN_REQUEST flags=atomic ordered
 vconn|DBG|unix: sent (Success): OFPT_BUNDLE_CONTROL (OF1.4):
@@ -5386,11 +5616,11 @@ vconn|DBG|unix: received: OFPT_BUNDLE_CONTROL (OF1.4):
  bundle_id=0 type=COMMIT_REQUEST flags=atomic ordered
 vconn|DBG|unix: sent (Success): OFPT_BUNDLE_CONTROL (OF1.4):
  bundle_id=0 type=COMMIT_REPLY flags=0
-vconn|DBG|unix: sent (Success): OFPT_HELLO (OF1.6):
- version bitmap: 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07
+vconn|DBG|unix: sent (Success): OFPT_HELLO (OF1.5):
+ version bitmap: 0x01, 0x02, 0x03, 0x04, 0x05, 0x06
 vconn|DBG|unix: received: OFPT_HELLO:
  version bitmap: 0x01
-vconn|DBG|unix: negotiated OpenFlow version 0x01 (we support version 0x07 and earlier, peer supports version 0x01)
+vconn|DBG|unix: negotiated OpenFlow version 0x01 (we support version 0x06 and earlier, peer supports version 0x01)
 vconn|DBG|unix: received: NXT_SET_FLOW_FORMAT: format=nxm
 vconn|DBG|unix: received: OFPT_BARRIER_REQUEST:
 vconn|DBG|unix: sent (Success): OFPT_BARRIER_REPLY:
@@ -5949,19 +6179,19 @@ dnl Check logs for OpenFlow trace
 # Prevent race.
 OVS_WAIT_UNTIL([vconn_sub < ovs-vswitchd.log | test `grep -- "|vconn|DBG|unix: sent (Success): NXST_FLOW reply" | wc -l` -ge 3])
 AT_CHECK([print_vconn_debug | vconn_sub | ofctl_strip], [0], [dnl
-vconn|DBG|unix: sent (Success): OFPT_HELLO (OF1.6):
- version bitmap: 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07
+vconn|DBG|unix: sent (Success): OFPT_HELLO (OF1.5):
+ version bitmap: 0x01, 0x02, 0x03, 0x04, 0x05, 0x06
 vconn|DBG|unix: received: OFPT_HELLO:
  version bitmap: 0x01
-vconn|DBG|unix: negotiated OpenFlow version 0x01 (we support version 0x07 and earlier, peer supports version 0x01)
+vconn|DBG|unix: negotiated OpenFlow version 0x01 (we support version 0x06 and earlier, peer supports version 0x01)
 vconn|DBG|unix: received: OFPT_FLOW_MOD: DEL actions=drop
 vconn|DBG|unix: received: OFPT_BARRIER_REQUEST:
 vconn|DBG|unix: sent (Success): OFPT_BARRIER_REPLY:
-vconn|DBG|unix: sent (Success): OFPT_HELLO (OF1.6):
- version bitmap: 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07
+vconn|DBG|unix: sent (Success): OFPT_HELLO (OF1.5):
+ version bitmap: 0x01, 0x02, 0x03, 0x04, 0x05, 0x06
 vconn|DBG|unix: received: OFPT_HELLO (OF1.3):
  version bitmap: 0x04
-vconn|DBG|unix: negotiated OpenFlow version 0x04 (we support version 0x07 and earlier, peer supports version 0x04)
+vconn|DBG|unix: negotiated OpenFlow version 0x04 (we support version 0x06 and earlier, peer supports version 0x04)
 vconn|DBG|unix: received: ONFT_BUNDLE_CONTROL (OF1.3):
  bundle_id=0 type=OPEN_REQUEST flags=atomic ordered
 vconn|DBG|unix: sent (Success): ONFT_BUNDLE_CONTROL (OF1.3):
@@ -5999,11 +6229,11 @@ vconn|DBG|unix: received: ONFT_BUNDLE_CONTROL (OF1.3):
  bundle_id=0 type=COMMIT_REQUEST flags=atomic ordered
 vconn|DBG|unix: sent (Success): ONFT_BUNDLE_CONTROL (OF1.3):
  bundle_id=0 type=COMMIT_REPLY flags=0
-vconn|DBG|unix: sent (Success): OFPT_HELLO (OF1.6):
- version bitmap: 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07
+vconn|DBG|unix: sent (Success): OFPT_HELLO (OF1.5):
+ version bitmap: 0x01, 0x02, 0x03, 0x04, 0x05, 0x06
 vconn|DBG|unix: received: OFPT_HELLO:
  version bitmap: 0x01
-vconn|DBG|unix: negotiated OpenFlow version 0x01 (we support version 0x07 and earlier, peer supports version 0x01)
+vconn|DBG|unix: negotiated OpenFlow version 0x01 (we support version 0x06 and earlier, peer supports version 0x01)
 vconn|DBG|unix: received: NXT_SET_FLOW_FORMAT: format=nxm
 vconn|DBG|unix: received: OFPT_BARRIER_REQUEST:
 vconn|DBG|unix: sent (Success): OFPT_BARRIER_REPLY:
@@ -6011,11 +6241,11 @@ vconn|DBG|unix: received: NXST_FLOW request:
 vconn|DBG|unix: sent (Success): NXST_FLOW reply:
  idle_timeout=50, in_port=2,dl_src=00:66:77:88:99:aa actions=output:5
  idle_timeout=60, in_port=2,dl_src=00:77:88:99:aa:bb actions=output:6
-vconn|DBG|unix: sent (Success): OFPT_HELLO (OF1.6):
- version bitmap: 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07
+vconn|DBG|unix: sent (Success): OFPT_HELLO (OF1.5):
+ version bitmap: 0x01, 0x02, 0x03, 0x04, 0x05, 0x06
 vconn|DBG|unix: received: OFPT_HELLO (OF1.3):
  version bitmap: 0x04
-vconn|DBG|unix: negotiated OpenFlow version 0x04 (we support version 0x07 and earlier, peer supports version 0x04)
+vconn|DBG|unix: negotiated OpenFlow version 0x04 (we support version 0x06 and earlier, peer supports version 0x04)
 vconn|DBG|unix: received: ONFT_BUNDLE_CONTROL (OF1.3):
  bundle_id=0 type=OPEN_REQUEST flags=atomic ordered
 vconn|DBG|unix: sent (Success): ONFT_BUNDLE_CONTROL (OF1.3):
@@ -6032,11 +6262,11 @@ vconn|DBG|unix: received: ONFT_BUNDLE_CONTROL (OF1.3):
  bundle_id=0 type=COMMIT_REQUEST flags=atomic ordered
 vconn|DBG|unix: sent (Success): ONFT_BUNDLE_CONTROL (OF1.3):
  bundle_id=0 type=COMMIT_REPLY flags=0
-vconn|DBG|unix: sent (Success): OFPT_HELLO (OF1.6):
- version bitmap: 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07
+vconn|DBG|unix: sent (Success): OFPT_HELLO (OF1.5):
+ version bitmap: 0x01, 0x02, 0x03, 0x04, 0x05, 0x06
 vconn|DBG|unix: received: OFPT_HELLO:
  version bitmap: 0x01
-vconn|DBG|unix: negotiated OpenFlow version 0x01 (we support version 0x07 and earlier, peer supports version 0x01)
+vconn|DBG|unix: negotiated OpenFlow version 0x01 (we support version 0x06 and earlier, peer supports version 0x01)
 vconn|DBG|unix: received: NXT_SET_FLOW_FORMAT: format=nxm
 vconn|DBG|unix: received: OFPT_BARRIER_REQUEST:
 vconn|DBG|unix: sent (Success): OFPT_BARRIER_REPLY:
@@ -6044,11 +6274,11 @@ vconn|DBG|unix: received: NXST_FLOW request:
 vconn|DBG|unix: sent (Success): NXST_FLOW reply:
  idle_timeout=50, in_port=2,dl_src=00:66:77:88:99:aa actions=drop
  idle_timeout=60, in_port=2,dl_src=00:77:88:99:aa:bb actions=output:7
-vconn|DBG|unix: sent (Success): OFPT_HELLO (OF1.6):
- version bitmap: 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07
+vconn|DBG|unix: sent (Success): OFPT_HELLO (OF1.5):
+ version bitmap: 0x01, 0x02, 0x03, 0x04, 0x05, 0x06
 vconn|DBG|unix: received: OFPT_HELLO (OF1.3):
  version bitmap: 0x04
-vconn|DBG|unix: negotiated OpenFlow version 0x04 (we support version 0x07 and earlier, peer supports version 0x04)
+vconn|DBG|unix: negotiated OpenFlow version 0x04 (we support version 0x06 and earlier, peer supports version 0x04)
 vconn|DBG|unix: received: ONFT_BUNDLE_CONTROL (OF1.3):
  bundle_id=0 type=OPEN_REQUEST flags=atomic ordered
 vconn|DBG|unix: sent (Success): ONFT_BUNDLE_CONTROL (OF1.3):
@@ -6068,11 +6298,11 @@ vconn|DBG|unix: received: ONFT_BUNDLE_CONTROL (OF1.3):
  bundle_id=0 type=COMMIT_REQUEST flags=atomic ordered
 vconn|DBG|unix: sent (Success): ONFT_BUNDLE_CONTROL (OF1.3):
  bundle_id=0 type=COMMIT_REPLY flags=0
-vconn|DBG|unix: sent (Success): OFPT_HELLO (OF1.6):
- version bitmap: 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07
+vconn|DBG|unix: sent (Success): OFPT_HELLO (OF1.5):
+ version bitmap: 0x01, 0x02, 0x03, 0x04, 0x05, 0x06
 vconn|DBG|unix: received: OFPT_HELLO:
  version bitmap: 0x01
-vconn|DBG|unix: negotiated OpenFlow version 0x01 (we support version 0x07 and earlier, peer supports version 0x01)
+vconn|DBG|unix: negotiated OpenFlow version 0x01 (we support version 0x06 and earlier, peer supports version 0x01)
 vconn|DBG|unix: received: NXT_SET_FLOW_FORMAT: format=nxm
 vconn|DBG|unix: received: OFPT_BARRIER_REQUEST:
 vconn|DBG|unix: sent (Success): OFPT_BARRIER_REPLY:

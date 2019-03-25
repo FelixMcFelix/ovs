@@ -1,7 +1,7 @@
 {
     "name": "OVN_Northbound",
-    "version": "5.11.0",
-    "cksum": "1149260021 18713",
+    "version": "5.14.1",
+    "cksum": "3758097843 20509",
     "tables": {
         "NB_Global": {
             "columns": {
@@ -19,7 +19,11 @@
                 "ssl": {
                     "type": {"key": {"type": "uuid",
                                      "refTable": "SSL"},
-                                     "min": 0, "max": 1}}},
+                                     "min": 0, "max": 1}},
+                "options": {
+                    "type": {"key": "string", "value": "string",
+                             "min": 0, "max": "unlimited"}},
+                "ipsec": {"type": "boolean"}},
             "maxRows": 1,
             "isRoot": true},
         "Logical_Switch": {
@@ -42,7 +46,7 @@
                                   "max": "unlimited"}},
                 "load_balancer": {"type": {"key": {"type": "uuid",
                                                   "refTable": "Load_Balancer",
-                                                  "refType": "strong"},
+                                                  "refType": "weak"},
                                            "min": 0,
                                            "max": "unlimited"}},
                 "dns_records": {"type": {"key": {"type": "uuid",
@@ -166,6 +170,7 @@
                                                         "notice", "info",
                                                         "debug"]]},
                                       "min": 0, "max": 1}},
+                "meter": {"type": {"key": "string", "min": 0, "max": 1}},
                 "external_ids": {
                     "type": {"key": "string", "value": "string",
                              "min": 0, "max": "unlimited"}}},
@@ -195,6 +200,35 @@
                     "type": {"key": "string", "value": "string",
                              "min": 0, "max": "unlimited"}}},
             "isRoot": false},
+        "Meter": {
+            "columns": {
+                "name": {"type": "string"},
+                "unit": {"type": {"key": {"type": "string",
+                                          "enum": ["set", ["kbps", "pktps"]]}}},
+                "bands": {"type": {"key": {"type": "uuid",
+                                           "refTable": "Meter_Band",
+                                           "refType": "strong"},
+                                   "min": 1,
+                                   "max": "unlimited"}},
+                "external_ids": {
+                    "type": {"key": "string", "value": "string",
+                             "min": 0, "max": "unlimited"}}},
+            "indexes": [["name"]],
+            "isRoot": true},
+        "Meter_Band": {
+            "columns": {
+                "action": {"type": {"key": {"type": "string",
+                                            "enum": ["set", ["drop"]]}}},
+                "rate": {"type": {"key": {"type": "integer",
+                                          "minInteger": 1,
+                                          "maxInteger": 4294967295}}},
+                "burst_size": {"type": {"key": {"type": "integer",
+                                                "minInteger": 0,
+                                                "maxInteger": 4294967295}}},
+                "external_ids": {
+                    "type": {"key": "string", "value": "string",
+                             "min": 0, "max": "unlimited"}}},
+            "isRoot": false},
         "Logical_Router": {
             "columns": {
                 "name": {"type": "string"},
@@ -216,7 +250,7 @@
                                  "max": "unlimited"}},
                 "load_balancer": {"type": {"key": {"type": "uuid",
                                                   "refTable": "Load_Balancer",
-                                                  "refType": "strong"},
+                                                  "refType": "weak"},
                                            "min": 0,
                                            "max": "unlimited"}},
                 "options": {

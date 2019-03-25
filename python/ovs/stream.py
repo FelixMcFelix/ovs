@@ -174,7 +174,7 @@ class Stream(object):
                     try:
                         winutils.set_pipe_mode(npipe,
                                                win32pipe.PIPE_READMODE_BYTE)
-                    except pywintypes.error as e:
+                    except pywintypes.error:
                         return errno.ENOENT, None
                 except pywintypes.error as e:
                     if e.winerror == winutils.winerror.ERROR_PIPE_BUSY:
@@ -191,18 +191,27 @@ class Stream(object):
         if error:
             return error, None
         else:
-            status = ovs.socket_util.check_connection_completion(sock)
-            return 0, cls(sock, name, status)
+            err = ovs.socket_util.check_connection_completion(sock)
+            if err == errno.EAGAIN or err == errno.EINPROGRESS:
+                status = errno.EAGAIN
+                err = 0
+            elif err == 0:
+                status = 0
+            else:
+                status = err
+            return err, cls(sock, name, status)
 
     @staticmethod
     def _open(suffix, dscp):
         raise NotImplementedError("This method must be overrided by subclass")
 
     @staticmethod
-    def open_block(error_stream):
+    def open_block(error_stream, timeout=None):
         """Blocks until a Stream completes its connection attempt, either
-        succeeding or failing.  (error, stream) should be the tuple returned by
-        Stream.open().  Returns a tuple of the same form.
+        succeeding or failing, but no more than 'timeout' milliseconds.
+        (error, stream) should be the tuple returned by Stream.open().
+        Negative value of 'timeout' means infinite waiting.
+        Returns a tuple of the same form.
 
         Typical usage:
         error, stream = Stream.open_block(Stream.open("unix:/tmp/socket"))"""
@@ -210,6 +219,9 @@ class Stream(object):
         # Py3 doesn't support tuple parameter unpacking - PEP 3113
         error, stream = error_stream
         if not error:
+            deadline = None
+            if timeout is not None and timeout >= 0:
+                deadline = ovs.timeval.msec() + timeout
             while True:
                 error = stream.connect()
                 if sys.platform == 'win32' and error == errno.WSAEWOULDBLOCK:
@@ -218,10 +230,15 @@ class Stream(object):
                     error = errno.EAGAIN
                 if error != errno.EAGAIN:
                     break
+                if deadline is not None and ovs.timeval.msec() > deadline:
+                    error = errno.ETIMEDOUT
+                    break
                 stream.run()
                 poller = ovs.poller.Poller()
                 stream.run_wait(poller)
                 stream.connect_wait(poller)
+                if deadline is not None:
+                    poller.timer_wait_until(deadline)
                 poller.block()
             if stream.socket is not None:
                 assert error != errno.EINPROGRESS
@@ -702,8 +719,8 @@ def usage(name):
     return """
 Active %s connection methods:
   unix:FILE               Unix domain socket named FILE
-  tcp:IP:PORT             TCP socket to IP with port no of PORT
-  ssl:IP:PORT             SSL socket to IP with port no of PORT
+  tcp:HOST:PORT           TCP socket to HOST with port no of PORT
+  ssl:HOST:PORT           SSL socket to HOST with port no of PORT
 
 Passive %s connection methods:
   punix:FILE              Listen on Unix domain socket FILE""" % (name, name)
@@ -734,7 +751,11 @@ class TCPStream(Stream):
         error, sock = ovs.socket_util.inet_open_active(socket.SOCK_STREAM,
                                                        suffix, 0, dscp)
         if not error:
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            try:
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except socket.error as e:
+                sock.close()
+                return ovs.socket_util.get_exception_errno(e), None
         return error, sock
 
 

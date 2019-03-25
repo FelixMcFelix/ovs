@@ -69,6 +69,46 @@
         See <em>External IDs</em> at the beginning of this document.
       </column>
     </group>
+
+    <group title="Common options">
+      <column name="options">
+        This column provides general key/value settings. The supported
+        options are described individually below.
+      </column>
+
+      <group title="Options for configuring BFD">
+        <p>
+          These options apply when <code>ovn-controller</code> configures
+          BFD on tunnels interfaces.
+        </p>
+
+        <column name="options" key="bfd-min-rx">
+          BFD option <code>min-rx</code> value to use when configuring BFD on
+          tunnel interfaces.
+        </column>
+
+        <column name="options" key="bfd-decay-min-rx">
+          BFD option <code>decay-min-rx</code> value to use when configuring
+          BFD on tunnel interfaces.
+        </column>
+
+        <column name="options" key="bfd-min-tx">
+          BFD option <code>min-tx</code> value to use when configuring BFD on
+          tunnel interfaces.
+        </column>
+
+        <column name="options" key="bfd-mult">
+          BFD option <code>mult</code> value to use when configuring BFD on
+          tunnel interfaces.
+        </column>
+      </group>
+
+      <column name="options" key="mac_prefix">
+        Configure a given OUI to be used as prefix when L2 address is
+        dynamically assigned, e.g. <code>00:11:22</code>
+      </column>
+    </group>
+
     <group title="Connection Options">
       <column name="connections">
         Database clients to which the Open vSwitch database server should
@@ -78,6 +118,12 @@
       </column>
       <column name="ssl">
         Global SSL configuration.
+      </column>
+    </group>
+    <group title="Security Configurations">
+      <column name="ipsec">
+        Tunnel encryption configuration. If this column is set to be true, all
+        OVN tunnels will be encrypted with IPsec.
       </column>
     </group>
   </table>
@@ -122,7 +168,8 @@
     </column>
 
     <column name="qos_rules">
-      QOS marking rules that apply to packets within the logical switch.
+      QoS marking and metering rules that apply to packets within the
+      logical switch.
     </column>
 
     <column name="dns_records">
@@ -219,6 +266,11 @@
           <li><code>bef0:1234:a890:5678::</code></li>
           <li><code>8230:5678::</code></li>
         </ul>
+      </column>
+
+      <column name="other_config" key="mac_only" type='{"type": "boolean"}'>
+        Value used to request to assign L2 address only if neither subnet
+        nor ipv6_prefix are specified
       </column>
     </group>
 
@@ -1041,7 +1093,7 @@
       highest-<ref column="priority"/> matching row in this table determines a
       packet's treatment.  If no row matches, packets are allowed by default.
       (Default-deny treatment is possible: add a rule with
-      <ref column="priority"/> 0, <code>0</code> as <ref column="match"/>,
+      <ref column="priority"/> 0, <code>1</code> as <ref column="match"/>,
       and <code>deny</code> as <ref column="action"/>.)
     </p>
 
@@ -1158,6 +1210,15 @@
           <code>info</code>.
         </p>
       </column>
+
+      <column name="meter">
+        <p>
+            The name of a meter to rate-limit log messages for the ACL.
+            The string must match the <ref column="name" table="meter"/>
+            column of a row in the <ref table="Meter"/> table.  By
+            default, log messages are not rate-limited.
+        </p>
+      </column>
     </group>
 
     <group title="Common Columns">
@@ -1177,7 +1238,7 @@
     </column>
 
     <column name="static_routes">
-      One or more static routes for the router.
+      Zero or more static routes for the router.
     </column>
 
     <column name="enabled">
@@ -1280,19 +1341,25 @@
     </group>
   </table>
 
-  <table name="QoS" title="QOS table">
+  <table name="QoS" title="QoS rule">
     <p>
-      Each row in this table represents one QOS rule for a logical switch
-      that points to it through its <ref column="qos_rules"/> column.  The <ref
-      column="action"/> column for the highest-<ref column="priority"/>
-      matching row in this table determines a packet's qos marking.  If no row
-      matches, packets will not have any qos marking.
+      Each row in this table represents one QoS rule for a logical switch
+      that points to it through its <ref column="qos_rules"/> column.
+      Two types of QoS are supported: DSCP marking and metering.  A
+      <ref column="match"/> with the highest-<ref column="priority"/>
+      will have QoS applied to it.  If the <ref column="action"/> column is
+      specified, then matching packets will have DSCP marking applied.
+      If the <ref column="bandwdith"/> column is specified, then matching
+      packets will have metering applied.  <ref column="action"/> and
+      <ref column="bandwdith"/> are not exclusive, so both marking and
+      metering by defined for the same QoS entry. If no row matches,
+      packets will not have any QoS applied.
     </p>
 
     <column name="priority">
       <p>
-        The QOS rule's priority.  Rules with numerically higher priority
-        take precedence over those with lower.  If two QOS rules with
+        The QoS rule's priority.  Rules with numerically higher priority
+        take precedence over those with lower.  If two QoS rules with
         the same priority both match, then the one actually applied to a
         packet is undefined.
       </p>
@@ -1308,7 +1375,7 @@
 
     <column name="match">
       <p>
-        The packets that the QOS rules should match, in the same expression
+        The packets that the QoS rules should match, in the same expression
         language used for the <ref column="match" table="Logical_Flow"
         db="OVN_Southbound"/> column in the OVN Southbound database's
         <ref table="Logical_Flow" db="OVN_Southbound"/> table.  The
@@ -1319,7 +1386,7 @@
     </column>
 
     <column name="action">
-      <p>The action to be performed on the matched packet</p>
+      <p>When specified, matching flows will have DSCP marking applied.</p>
       <ul>
         <li>
           <code>dscp</code>: The value of this action should be in the
@@ -1330,18 +1397,100 @@
 
     <column name="bandwidth">
       <p>
-         The bandwidth limit to be performed on the matched packet.
-         Currently only supported in the userspace by dpdk.
+         When specified, matching packets will have bandwidth metering
+         applied.  Traffic over the limit will be dropped.
       </p>
       <ul>
         <li>
           <code>rate</code>: The value of rate limit in kbps.
         </li>
         <li>
-          <code>burst</code>: The value of burst rate limit in kbps.
-          This is optional and needs to specify the <code>rate</code> first.
+          <code>burst</code>: The value of burst rate limit in kilobits.
+          This is optional and needs to specify the <code>rate</code>.
         </li>
       </ul>
+    </column>
+
+    <column name="external_ids">
+      See <em>External IDs</em> at the beginning of this document.
+    </column>
+  </table>
+
+  <table name="Meter" title="Meter entry">
+    <p>
+      Each row in this table represents a meter that can be used for QoS or
+      rate-limiting.
+    </p>
+
+    <column name="name">
+      <p>
+        A name for this meter.
+      </p>
+
+      <p>
+        Names that begin with "__" (two underscores) are reserved for
+        OVN internal use and should not be added manually.
+      </p>
+    </column>
+
+    <column name="unit">
+      <p>
+        The unit for <ref column="rate" table="Meter_Band"/> and
+        <ref column="burst_rate" table="Meter_Band"/> parameters in
+        the <ref column="bands"/> entry.  <code>kbps</code> specifies
+        kilobits per second, and <code>pktps</code> specifies packets
+        per second.
+      </p>
+    </column>
+
+    <column name="bands">
+      <p>
+        The bands associated with this meter.  Each band specifies a
+        rate above which the band is to take the action
+        <code>action</code>.  If multiple bands' rates are exceeded,
+        then the band with the highest rate among the exceeded bands is
+        selected.
+      </p>
+    </column>
+
+    <column name="external_ids">
+      See <em>External IDs</em> at the beginning of this document.
+    </column>
+  </table>
+
+  <table name="Meter_Band" title="Band for meter entries">
+    <p>
+      Each row in this table represents a meter band which specifies the
+      rate above which the configured action should be applied.  These bands
+      are referenced by the <ref column="bands" table="Meter"/> column in
+      the <ref table="Meter"/> table.
+    </p>
+
+    <column name="action">
+      <p>
+        The action to execute when this band matches.  The only supported
+        action is <code>drop</code>.
+      </p>
+    </column>
+
+    <column name="rate">
+      <p>
+        The rate limit for this band, in kilobits per second or bits per
+        second, depending on whether the parent <ref table="Meter"/>
+        entry's <ref column="unit" table="Meter"/> column specified
+        <code>kbps</code> or <code>pktps</code>.
+      </p>
+    </column>
+
+    <column name="burst_size">
+      <p>
+        The maximum burst allowed for the band in kilobits or packets,
+        depending on whether <code>kbps</code> or <code>pktps</code> was
+        selected in the parent <ref table="Meter"/> entry's
+        <ref column="unit" table="Meter"/> column.  If the size is zero,
+        the switch is free to select some reasonable value depending on
+        its configuration.
+      </p>
     </column>
 
     <column name="external_ids">
@@ -1535,6 +1684,49 @@
           specify one or more <ref column="gateway_chassis"/> instead.
           It is functionally equivalent, but allows you to specify multiple
           chassis to enable high availability.
+        </p>
+      </column>
+
+      <column name="options" key="reside-on-redirect-chassis">
+        <p>
+          Generally routing is distributed in <code>OVN</code>. The packet
+          from a logical port which needs to be routed hits the router pipeline
+          in the source chassis. For the East-West traffic, the packet is
+          sent directly to the destination chassis. For the outside traffic
+          the packet is sent to the gateway chassis.
+        </p>
+
+        <p>
+          When this option is set, <code>OVN</code> considers this only if
+        </p>
+
+        <ul>
+          <li>
+            The logical router to which this logical router port belongs to
+            has a distributed gateway port.
+          </li>
+
+          <li>
+            The peer's logical switch has a localnet port (representing
+            a VLAN tagged network)
+          </li>
+        </ul>
+
+        <p>
+          When this option is set to <code>true</code>, then the packet
+          which needs to be routed hits the router pipeline in the chassis
+          hosting the distributed gateway router port. The source chassis
+          pushes out this traffic via the localnet port. With this the
+          East-West traffic is no more distributed and will always go through
+          the gateway chassis.
+        </p>
+
+        <p>
+          Without this option set, for any traffic destined to outside from a
+          logical port which belongs to a logical switch with localnet port,
+          the source chassis will send the traffic to the gateway chassis via
+          the tunnel port instead of the localnet port and this could cause MTU
+          issues.
         </p>
       </column>
     </group>
@@ -1893,6 +2085,7 @@
             Microsoft Windows DHCPv4 clients.
           </p>
         </column>
+
       </group>
 
       <group title="Boolean DHCP Options">
@@ -1955,6 +2148,44 @@
           This specifies the time interval from address assignment until the
           client begins trying to rebind its address.  The DHCPv4 option code
           for this option is 59.
+        </column>
+      </group>
+
+      <group title="String DHCP Options">
+        <p>
+          These options accept a string value.
+        </p>
+
+        <column name="options" key="wpad">
+          <p>
+            The DHCPv4 option code for this option is 252. This option is used
+            as part of web proxy auto discovery to provide a URL for a web
+            proxy.
+          </p>
+        </column>
+
+        <column name="options" key="bootfile_name">
+          <p>
+            The DHCPv4 option code for this option is 67. This option is used
+            to identify a bootfile.
+          </p>
+        </column>
+
+        <column name="options" key="path_prefix">
+          <p>
+            The DHCPv4 option code for this option is 210. In PXELINUX'
+            case this option is used to set a common path prefix,
+            instead of deriving it from the bootfile name.
+          </p>
+        </column>
+
+        <column name="options" key="tftp_server_address">
+          <p>
+            The DHCPv4 option code for this option is 150. The option
+            contains one or more IPv4 addresses that the client MAY
+            use. This option is Cisco proprietary, the IEEE standard
+            that matches with this requirement is option 66 (tftp_server).
+          </p>
         </column>
       </group>
     </group>
@@ -2062,14 +2293,14 @@
           The following connection methods are currently supported:
         </p>
         <dl>
-          <dt><code>ssl:<var>ip</var></code>[<code>:<var>port</var></code>]</dt>
+          <dt><code>ssl:<var>host</var></code>[<code>:<var>port</var></code>]</dt>
           <dd>
             <p>
               The specified SSL <var>port</var> on the host at the given
-              <var>ip</var>, which must be expressed as an IP address
-              (not a DNS name). A valid SSL configuration must be provided
-              when this form is used, this configuration can be specified
-              via command-line options or the <ref table="SSL"/> table.
+              <var>host</var>, which can either be a DNS name (if built with
+              unbound library) or an IP address. A valid SSL configuration must
+              be provided when this form is used, this configuration can be
+              specified via command-line options or the <ref table="SSL"/> table.
             </p>
             <p>
               If <var>port</var> is not specified, it defaults to 6640.
@@ -2080,30 +2311,29 @@
             </p>
           </dd>
 
-          <dt><code>tcp:<var>ip</var></code>[<code>:<var>port</var></code>]</dt>
+          <dt><code>tcp:<var>host</var></code>[<code>:<var>port</var></code>]</dt>
           <dd>
             <p>
               The specified TCP <var>port</var> on the host at the given
-              <var>ip</var>, which must be expressed as an IP address (not a
-              DNS name), where <var>ip</var> can be IPv4 or IPv6 address.  If
-              <var>ip</var> is an IPv6 address, wrap it in square brackets,
-              e.g. <code>tcp:[::1]:6640</code>.
+              <var>host</var>, which can either be a DNS name (if built with
+              unbound library) or an IP address.  If <var>host</var> is an IPv6
+              address, wrap it in square brackets, e.g. <code>tcp:[::1]:6640</code>.
             </p>
             <p>
               If <var>port</var> is not specified, it defaults to 6640.
             </p>
           </dd>
-          <dt><code>pssl:</code>[<var>port</var>][<code>:<var>ip</var></code>]</dt>
+          <dt><code>pssl:</code>[<var>port</var>][<code>:<var>host</var></code>]</dt>
           <dd>
             <p>
               Listens for SSL connections on the specified TCP <var>port</var>.
               Specify 0 for <var>port</var> to have the kernel automatically
-              choose an available port.  If <var>ip</var>, which must be
-              expressed as an IP address (not a DNS name), is specified, then
-              connections are restricted to the specified local IP address
-              (either IPv4 or IPv6 address).  If <var>ip</var> is an IPv6
-              address, wrap in square brackets,
-              e.g. <code>pssl:6640:[::1]</code>.  If <var>ip</var> is not
+              choose an available port.  If <var>host</var>, which can either
+              be a DNS name (if built with unbound library) or an IP address,
+              is specified, then connections are restricted to the resolved or
+              specified local IPaddress (either IPv4 or IPv6 address).  If
+              <var>host</var> is an IPv6 address, wrap in square brackets,
+              e.g. <code>pssl:6640:[::1]</code>.  If <var>host</var> is not
               specified then it listens only on IPv4 (but not IPv6) addresses.
               A valid SSL configuration must be provided when this form is used,
              this can be specified either via command-line options or the
@@ -2117,17 +2347,17 @@
               part of Open vSwitch.
             </p>
           </dd>
-          <dt><code>ptcp:</code>[<var>port</var>][<code>:<var>ip</var></code>]</dt>
+          <dt><code>ptcp:</code>[<var>port</var>][<code>:<var>host</var></code>]</dt>
           <dd>
             <p>
               Listens for connections on the specified TCP <var>port</var>.
               Specify 0 for <var>port</var> to have the kernel automatically
-              choose an available port.  If <var>ip</var>, which must be
-              expressed as an IP address (not a DNS name), is specified, then
-              connections are restricted to the specified local IP address
-              (either IPv4 or IPv6 address).  If <var>ip</var> is an IPv6
-              address, wrap it in square brackets,
-              e.g. <code>ptcp:6640:[::1]</code>.  If <var>ip</var> is not
+              choose an available port.  If <var>host</var>, which can either
+              be a DNS name (if built with unbound library) or an IP address,
+              is specified, then connections are restricted to the resolved or
+              specified local IP address (either IPv4 or IPv6 address).  If
+              <var>host</var> is an IPv6 address, wrap it in square brackets,
+              e.g. <code>ptcp:6640:[::1]</code>.  If <var>host</var> is not
               specified then it listens only on IPv4 addresses.
             </p>
             <p>

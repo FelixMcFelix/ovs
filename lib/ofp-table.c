@@ -74,6 +74,33 @@ ofputil_table_vacancy_to_string(enum ofputil_table_vacancy vacancy)
     default: return "***error***";
     }
 }
+
+static bool
+ofp15_table_features_command_is_valid(enum ofp15_table_features_command cmd)
+{
+    switch (cmd) {
+    case OFPTFC15_REPLACE:
+    case OFPTFC15_MODIFY:
+    case OFPTFC15_ENABLE:
+    case OFPTFC15_DISABLE:
+        return true;
+
+    default:
+        return false;
+    }
+}
+
+static const char *
+ofp15_table_features_command_to_string(enum ofp15_table_features_command cmd)
+{
+    switch (cmd) {
+    case OFPTFC15_REPLACE: return "replace";
+    case OFPTFC15_MODIFY: return "modify";
+    case OFPTFC15_ENABLE: return "enable";
+    case OFPTFC15_DISABLE: return "disable";
+    default: return "***bad command***";
+    }
+}
 
 /* ofputil_table_map.  */
 
@@ -323,11 +350,16 @@ parse_oxms(struct ofpbuf *payload, bool loose,
 /* Converts an OFPMP_TABLE_FEATURES request or reply in 'msg' into an abstract
  * ofputil_table_features in 'tf'.
  *
- * If 'loose' is true, this function ignores properties and values that it does
- * not understand, as a controller would want to do when interpreting
- * capabilities provided by a switch.  If 'loose' is false, this function
- * treats unknown properties and values as an error, as a switch would want to
- * do when interpreting a configuration request made by a controller.
+ * If 'raw_properties' is nonnull, this function ignores properties and values
+ * that it does not understand, as a controller would want to do when
+ * interpreting capabilities provided by a switch.  In this mode, on success,
+ * it initializes 'raw_properties' to contain the properties that were parsed;
+ * this allows the caller to later re-serialize the same properties without
+ * change.
+ *
+ * If 'raw_properties' is null, this function treats unknown properties and
+ * values as an error, as a switch would want to do when interpreting a
+ * configuration request made by a controller.
  *
  * A single OpenFlow message can specify features for multiple tables.  Calling
  * this function multiple times for a single 'msg' iterates through the tables
@@ -338,8 +370,11 @@ parse_oxms(struct ofpbuf *payload, bool loose,
  * a positive "enum ofperr" value. */
 int
 ofputil_decode_table_features(struct ofpbuf *msg,
-                              struct ofputil_table_features *tf, bool loose)
+                              struct ofputil_table_features *tf,
+                              struct ofpbuf *raw_properties)
 {
+    bool loose = raw_properties != NULL;
+
     memset(tf, 0, sizeof *tf);
 
     if (!msg->header) {
@@ -359,6 +394,15 @@ ofputil_decode_table_features(struct ofpbuf *msg,
     unsigned int len = ntohs(otf->length);
     if (len < sizeof *otf || len % 8 || len > msg->size) {
         return OFPERR_OFPBPC_BAD_LEN;
+    }
+
+    if (oh->version >= OFP15_VERSION) {
+        if (!ofp15_table_features_command_is_valid(otf->command)) {
+            return OFPERR_OFPTFFC_BAD_COMMAND;
+        }
+        tf->command = otf->command;
+    } else {
+        tf->command = OFPTFC15_REPLACE;
     }
 
     tf->table_id = otf->table_id;
@@ -383,6 +427,11 @@ ofputil_decode_table_features(struct ofpbuf *msg,
     struct ofpbuf properties = ofpbuf_const_initializer(ofpbuf_pull(msg, len),
                                                         len);
     ofpbuf_pull(&properties, sizeof *otf);
+    tf->any_properties = properties.size > 0;
+    if (raw_properties) {
+        *raw_properties = properties;
+    }
+    uint32_t seen = 0;
     while (properties.size > 0) {
         struct ofpbuf payload;
         enum ofperr error;
@@ -391,6 +440,14 @@ ofputil_decode_table_features(struct ofpbuf *msg,
         error = pull_table_feature_property(&properties, &payload, &type);
         if (error) {
             return error;
+        }
+
+        if (type < 32) {
+            uint32_t bit = 1u << type;
+            if (seen & bit) {
+                return OFPERR_OFPTFFC_BAD_FEATURES;
+            }
+            seen |= bit;
         }
 
         switch ((enum ofp13_table_feature_prop_type) type) {
@@ -464,6 +521,36 @@ ofputil_decode_table_features(struct ofpbuf *msg,
         }
     }
 
+    /* OpenFlow 1.3 and 1.4 always require all of the required properties.
+     * OpenFlow 1.5 requires all of them if any property is present. */
+    if ((seen & OFPTFPT13_REQUIRED) != OFPTFPT13_REQUIRED
+        && (tf->any_properties || oh->version < OFP15_VERSION)) {
+        VLOG_WARN_RL(&rl, "table features message missing required property");
+        return OFPERR_OFPTFFC_BAD_FEATURES;
+    }
+
+    /* Copy nonmiss to miss when appropriate. */
+    if (tf->any_properties) {
+        if (!(seen & (1u << OFPTFPT13_INSTRUCTIONS_MISS))) {
+            tf->miss.instructions = tf->nonmiss.instructions;
+        }
+        if (!(seen & (1u << OFPTFPT13_NEXT_TABLES_MISS))) {
+            memcpy(tf->miss.next, tf->nonmiss.next, sizeof tf->miss.next);
+        }
+        if (!(seen & (1u << OFPTFPT13_WRITE_ACTIONS_MISS))) {
+            tf->miss.write.ofpacts = tf->nonmiss.write.ofpacts;
+        }
+        if (!(seen & (1u << OFPTFPT13_APPLY_ACTIONS_MISS))) {
+            tf->miss.apply.ofpacts = tf->nonmiss.apply.ofpacts;
+        }
+        if (!(seen & (1u << OFPTFPT13_WRITE_SETFIELD_MISS))) {
+            tf->miss.write.set_fields = tf->nonmiss.write.set_fields;
+        }
+        if (!(seen & (1u << OFPTFPT13_APPLY_SETFIELD_MISS))) {
+            tf->miss.apply.set_fields = tf->nonmiss.apply.set_fields;
+        }
+    }
+
     /* Fix inconsistencies:
      *
      *     - Turn on 'match' bits that are set in 'mask', because maskable
@@ -497,7 +584,6 @@ ofputil_encode_table_features_request(enum ofp_version ofp_version)
     case OFP13_VERSION:
     case OFP14_VERSION:
     case OFP15_VERSION:
-    case OFP16_VERSION:
         request = ofpraw_alloc(OFPRAW_OFPST13_TABLE_FEATURES_REQUEST,
                                ofp_version, 0);
         break;
@@ -566,17 +652,23 @@ put_table_instruction_features(
                               OFPTFPT13_APPLY_SETFIELD, miss_offset, version);
 }
 
+/* Appends a table features record to 'msgs', which must be a
+ * OFPT_TABLE_FEATURES request or reply.  If 'raw_properties' is nonnull, then
+ * it uses its contents verbatim as the table features properties, ignoring the
+ * corresponding members of 'tf'. */
 void
-ofputil_append_table_features_reply(const struct ofputil_table_features *tf,
-                                    struct ovs_list *replies)
+ofputil_append_table_features(const struct ofputil_table_features *tf,
+                              const struct ofpbuf *raw_properties,
+                              struct ovs_list *msgs)
 {
-    struct ofpbuf *reply = ofpbuf_from_list(ovs_list_back(replies));
-    enum ofp_version version = ofpmp_version(replies);
-    size_t start_ofs = reply->size;
+    struct ofpbuf *msg = ofpbuf_from_list(ovs_list_back(msgs));
+    enum ofp_version version = ofpmp_version(msgs);
+    size_t start_ofs = msg->size;
     struct ofp13_table_features *otf;
 
-    otf = ofpbuf_put_zeros(reply, sizeof *otf);
+    otf = ofpbuf_put_zeros(msg, sizeof *otf);
     otf->table_id = tf->table_id;
+    otf->command = version >= OFP15_VERSION ? tf->command : 0;
     ovs_strlcpy_arrays(otf->name, tf->name);
     otf->metadata_match = tf->metadata_match;
     otf->metadata_write = tf->metadata_write;
@@ -590,17 +682,21 @@ ofputil_append_table_features_reply(const struct ofputil_table_features *tf,
     }
     otf->max_entries = htonl(tf->max_entries);
 
-    put_table_instruction_features(reply, &tf->nonmiss, 0, version);
-    put_table_instruction_features(reply, &tf->miss, 1, version);
+    if (raw_properties) {
+        ofpbuf_put(msg, raw_properties->data, raw_properties->size);
+    } else if (tf->any_properties) {
+        put_table_instruction_features(msg, &tf->nonmiss, 0, version);
+        put_table_instruction_features(msg, &tf->miss, 1, version);
 
-    put_fields_property(reply, &tf->match, &tf->mask,
-                        OFPTFPT13_MATCH, version);
-    put_fields_property(reply, &tf->wildcard, NULL,
-                        OFPTFPT13_WILDCARDS, version);
+        put_fields_property(msg, &tf->match, &tf->mask,
+                            OFPTFPT13_MATCH, version);
+        put_fields_property(msg, &tf->wildcard, NULL,
+                            OFPTFPT13_WILDCARDS, version);
+    }
 
-    otf = ofpbuf_at_assert(reply, start_ofs, sizeof *otf);
-    otf->length = htons(reply->size - start_ofs);
-    ofpmp_postappend(replies, start_ofs);
+    otf = ofpbuf_at_assert(msg, start_ofs, sizeof *otf);
+    otf->length = htons(msg->size - start_ofs);
+    ofpmp_postappend(msgs, start_ofs);
 }
 
 static enum ofperr
@@ -902,7 +998,6 @@ ofputil_encode_table_config(enum ofputil_table_miss miss,
 
     case OFP14_VERSION:
     case OFP15_VERSION:
-    case OFP16_VERSION:
         /* OpenFlow 1.4 introduced OFPTC14_EVICTION and
          * OFPTC14_VACANCY_EVENTS. */
         if (eviction == OFPUTIL_TABLE_EVICTION_ON) {
@@ -1039,8 +1134,7 @@ ofputil_encode_table_mod(const struct ofputil_table_mod *tm,
         break;
     }
     case OFP14_VERSION:
-    case OFP15_VERSION:
-    case OFP16_VERSION: {
+    case OFP15_VERSION: {
         struct ofp14_table_mod *otm;
 
         b = ofpraw_alloc(OFPRAW_OFPT14_TABLE_MOD, ofp_version, 0);
@@ -1159,7 +1253,8 @@ exit:
 
 /* Convert 'table_id' and 'setting' (as described for the "mod-table" command
  * in the ovs-ofctl man page) into 'tm' for sending a table_mod command to a
- * switch.
+ * switch.  If 'setting' sets the name of the table, puts the new name in
+ * '*namep' (a suffix of 'setting'), otherwise stores NULL.
  *
  * Stores a bitmap of the OpenFlow versions that are usable for 'tm' into
  * '*usable_versions'.
@@ -1167,12 +1262,13 @@ exit:
  * Returns NULL if successful, otherwise a malloc()'d string describing the
  * error.  The caller is responsible for freeing the returned string. */
 char * OVS_WARN_UNUSED_RESULT
-parse_ofp_table_mod(struct ofputil_table_mod *tm, const char *table_id,
-                    const char *setting,
+parse_ofp_table_mod(struct ofputil_table_mod *tm, const char **namep,
+                    const char *table_id, const char *setting,
                     const struct ofputil_table_map *table_map,
                     uint32_t *usable_versions)
 {
     *usable_versions = 0;
+    *namep = NULL;
     if (!strcasecmp(table_id, "all")) {
         tm->table_id = OFPTT_ALL;
     } else if (!ofputil_table_from_string(table_id, table_map,
@@ -1216,6 +1312,10 @@ parse_ofp_table_mod(struct ofputil_table_mod *tm, const char *table_id,
     } else if (!strcmp(setting, "novacancy")) {
         tm->vacancy = OFPUTIL_TABLE_VACANCY_OFF;
         *usable_versions = (1 << OFP14_VERSION) | (1u << OFP15_VERSION);
+    } else if (tm->table_id != OFPTT_ALL && !strncmp(setting, "name:", 5)) {
+        *namep = setting + 5;
+        *usable_versions = ((1 << OFP13_VERSION) | (1u << OFP14_VERSION)
+                            | (1u << OFP15_VERSION));
     } else {
         return xasprintf("invalid table_mod setting %s", setting);
     }
@@ -1329,12 +1429,47 @@ print_table_instruction_features(
     }
 }
 
+/* Compares bitmaps of next tables 'a' and 'b', for tables 'a_table_id' and
+ * 'b_table_id', respectively.  Returns true if the bitmaps are equal.
+ *
+ * The bitmaps are considered equal if b_table_id == a_table_id + 1 and the bit
+ * for 'b_table_id' is set in 'a' but not in 'b'.  This is because OpenFlow
+ * requires that a table not be able to do a goto_table back to its own table
+ * or an earlier one.  Without considering these equivalent, every table will
+ * be different from every one in some way, which just isn't useful in printing
+ * table features. */
+static bool
+table_instruction_features_next_equal(const unsigned long *a, int a_table_id,
+                                      const unsigned long *b, int b_table_id)
+{
+    if (b_table_id == a_table_id + 1
+        && bitmap_is_set(a, b_table_id)
+        && !bitmap_is_set(b, b_table_id)) {
+        for (size_t i = 0; i < BITMAP_N_LONGS(255); i++) {
+            unsigned long diff = a[i] ^ b[i];
+            if (i == b_table_id / BITMAP_ULONG_BITS) {
+                diff &= ~bitmap_bit__(b_table_id);
+            }
+            if (diff) {
+                return false;
+            }
+        }
+        return true;
+    } else if (a_table_id == b_table_id + 1) {
+        return table_instruction_features_next_equal(b, b_table_id,
+                                                     a, a_table_id);
+    } else {
+        return bitmap_equal(a, b, 255);
+    }
+}
+
 static bool
 table_instruction_features_equal(
-    const struct ofputil_table_instruction_features *a,
-    const struct ofputil_table_instruction_features *b)
+    const struct ofputil_table_instruction_features *a, int a_table_id,
+    const struct ofputil_table_instruction_features *b, int b_table_id)
 {
-    return (bitmap_equal(a->next, b->next, 255)
+    return (table_instruction_features_next_equal(a->next, a_table_id,
+                                                  b->next, b_table_id)
             && a->instructions == b->instructions
             && table_action_features_equal(&a->write, &b->write)
             && table_action_features_equal(&a->apply, &b->apply));
@@ -1360,8 +1495,10 @@ table_features_equal(const struct ofputil_table_features *a,
             && a->supports_eviction == b->supports_eviction
             && a->supports_vacancy_events == b->supports_vacancy_events
             && a->max_entries == b->max_entries
-            && table_instruction_features_equal(&a->nonmiss, &b->nonmiss)
-            && table_instruction_features_equal(&a->miss, &b->miss)
+            && table_instruction_features_equal(&a->nonmiss, a->table_id,
+                                                &b->nonmiss, b->table_id)
+            && table_instruction_features_equal(&a->miss, a->table_id,
+                                                &b->miss, b->table_id)
             && bitmap_equal(a->match.bm, b->match.bm, MFF_N_IDS));
 }
 
@@ -1395,21 +1532,38 @@ ofputil_table_features_format(
     const struct ofputil_table_features *prev_features,
     const struct ofputil_table_stats *stats,
     const struct ofputil_table_stats *prev_stats,
-    const struct ofputil_table_map *table_map)
+    int *first_ditto, int *last_ditto)
 {
-    int i;
+    if (!prev_features && features->command != OFPTFC15_REPLACE) {
+        ds_put_format(s, "\n  command: %s",
+                      ofp15_table_features_command_to_string(
+                          features->command));
+    }
 
-    ds_put_format(s, "  table ");
-    ofputil_format_table(features->table_id, table_map, s);
+    int table = features->table_id;
+    int prev_table = prev_features ? prev_features->table_id : 0;
+
+    bool same_stats = !stats || (prev_stats
+                                 && table_stats_equal(stats, prev_stats));
+    bool same_features = prev_features && table_features_equal(features,
+                                                               prev_features);
+    if (same_stats && same_features && !features->name[0]) {
+        if (*first_ditto < 0) {
+            *first_ditto = table;
+        }
+        *last_ditto = table;
+        return;
+    }
+    ofputil_table_features_format_finish(s, *first_ditto, *last_ditto);
+    *first_ditto = -1;
+
+    ds_put_format(s, "\n  table %d", table);
     if (features->name[0]) {
         ds_put_format(s, " (\"%s\")", features->name);
     }
     ds_put_char(s, ':');
 
-    bool same_stats = prev_stats && table_stats_equal(stats, prev_stats);
-    bool same_features = prev_features && table_features_equal(features,
-                                                               prev_features);
-    if ((!stats || same_stats) && same_features) {
+    if (same_stats && same_features) {
         ds_put_cstr(s, " ditto");
         return;
     }
@@ -1456,13 +1610,15 @@ ofputil_table_features_format(
     const struct ofputil_table_instruction_features *prev_miss
         = prev_features ? &prev_features->miss : NULL;
     if (prev_features
-        && table_instruction_features_equal(&features->nonmiss, prev_nonmiss)
-        && table_instruction_features_equal(&features->miss, prev_miss)) {
+        && table_instruction_features_equal(&features->nonmiss, table,
+                                            prev_nonmiss, prev_table)
+        && table_instruction_features_equal(&features->miss, table,
+                                            prev_miss, prev_table)) {
         if (!table_instruction_features_empty(&features->nonmiss)) {
             ds_put_cstr(s, "    (same instructions)\n");
         }
-    } else if (!table_instruction_features_equal(&features->nonmiss,
-                                                 &features->miss)) {
+    } else if (!table_instruction_features_equal(&features->nonmiss, table,
+                                                 &features->miss, table)) {
         ds_put_cstr(s, "    instructions (other than table miss):\n");
         print_table_instruction_features(s, &features->nonmiss, prev_nonmiss);
         ds_put_cstr(s, "    instructions (table miss):\n");
@@ -1479,6 +1635,8 @@ ofputil_table_features_format(
             ds_put_cstr(s, "    (same matching)\n");
         } else {
             ds_put_cstr(s, "    matching:\n");
+
+            int i;
             BITMAP_FOR_EACH_1 (i, MFF_N_IDS, features->match.bm) {
                 const struct mf_field *f = mf_from_id(i);
                 bool mask = bitmap_is_set(features->mask.bm, i);
@@ -1492,6 +1650,66 @@ ofputil_table_features_format(
             }
         }
     }
+}
+
+void
+ofputil_table_features_format_finish(struct ds *s,
+                                     int first_ditto, int last_ditto)
+{
+    if (first_ditto < 0) {
+        return;
+    }
+
+    ds_put_char(s, '\n');
+    if (first_ditto == last_ditto) {
+        ds_put_format(s, "  table %d: ditto\n", first_ditto);
+    } else {
+        ds_put_format(s, "  tables %d...%d: ditto\n", first_ditto, last_ditto);
+    }
+}
+
+/* Returns true if 'super' is a superset of 'sub', false otherwise. */
+static bool
+ofputil_table_action_features_is_superset(
+    const struct ofputil_table_action_features *super,
+    const struct ofputil_table_action_features *sub)
+{
+    return (uint_is_superset(super->ofpacts, sub->ofpacts)
+            && mf_bitmap_is_superset(&super->set_fields, &sub->set_fields));
+}
+
+/* Returns true if 'super' is a superset of 'sub', false otherwise. */
+static bool
+ofputil_table_instruction_features_is_superset(
+    const struct ofputil_table_instruction_features *super,
+    const struct ofputil_table_instruction_features *sub)
+{
+    return (bitmap_is_superset(super->next, sub->next, 255)
+            && uint_is_superset(super->instructions, sub->instructions)
+            && ofputil_table_action_features_is_superset(&super->write,
+                                                         &sub->write)
+            && ofputil_table_action_features_is_superset(&super->apply,
+                                                         &sub->apply));
+}
+
+/* Returns true if 'super' is a superset of 'sub', false otherwise. */
+bool
+ofputil_table_features_are_superset(
+    const struct ofputil_table_features *super,
+    const struct ofputil_table_features *sub)
+{
+    return (be64_is_superset(super->metadata_match, sub->metadata_match)
+            && be64_is_superset(super->metadata_write, sub->metadata_write)
+            && super->max_entries >= sub->max_entries
+            && super->supports_eviction >= sub->supports_eviction
+            && super->supports_vacancy_events >= sub->supports_vacancy_events
+            && ofputil_table_instruction_features_is_superset(&super->nonmiss,
+                                                              &sub->nonmiss)
+            && ofputil_table_instruction_features_is_superset(&super->miss,
+                                                              &sub->miss)
+            && mf_bitmap_is_superset(&super->match, &sub->match)
+            && mf_bitmap_is_superset(&super->mask, &sub->mask)
+            && mf_bitmap_is_superset(&super->wildcard, &sub->wildcard));
 }
 
 /* Table stats. */
@@ -1733,7 +1951,6 @@ ofputil_append_table_stats_reply(struct ofpbuf *reply,
     case OFP13_VERSION:
     case OFP14_VERSION:
     case OFP15_VERSION:
-    case OFP16_VERSION:
         ofputil_put_ofp13_table_stats(stats, reply);
         break;
 
@@ -1904,7 +2121,6 @@ ofputil_decode_table_stats_reply(struct ofpbuf *msg,
     case OFP13_VERSION:
     case OFP14_VERSION:
     case OFP15_VERSION:
-    case OFP16_VERSION:
         return ofputil_decode_ofp13_table_stats(msg, stats, features);
 
     default:

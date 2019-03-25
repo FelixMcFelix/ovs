@@ -630,9 +630,11 @@ ofctrl_recv(const struct ofp_header *oh, enum ofptype type)
  *
  * The caller should initialize its own hmap to hold the flows. */
 void
-ofctrl_add_flow(struct hmap *desired_flows,
-                uint8_t table_id, uint16_t priority, uint64_t cookie,
-                const struct match *match, const struct ofpbuf *actions)
+ofctrl_check_and_add_flow(struct hmap *desired_flows,
+                          uint8_t table_id, uint16_t priority, uint64_t cookie,
+                          const struct match *match,
+                          const struct ofpbuf *actions,
+                          bool log_duplicate_flow)
 {
     struct ovn_flow *f = xmalloc(sizeof *f);
     f->table_id = table_id;
@@ -644,13 +646,14 @@ ofctrl_add_flow(struct hmap *desired_flows,
     f->cookie = cookie;
 
     if (ovn_flow_lookup(desired_flows, f)) {
-        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 5);
-        if (!VLOG_DROP_DBG(&rl)) {
-            char *s = ovn_flow_to_string(f);
-            VLOG_DBG("dropping duplicate flow: %s", s);
-            free(s);
+        if (log_duplicate_flow) {
+            static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 5);
+            if (!VLOG_DROP_DBG(&rl)) {
+                char *s = ovn_flow_to_string(f);
+                VLOG_DBG("dropping duplicate flow: %s", s);
+                free(s);
+            }
         }
-
         ovn_flow_destroy(f);
         return;
     }
@@ -658,6 +661,14 @@ ofctrl_add_flow(struct hmap *desired_flows,
     hmap_insert(desired_flows, &f->hmap_node, f->hmap_node.hash);
 }
 
+void
+ofctrl_add_flow(struct hmap *desired_flows,
+                uint8_t table_id, uint16_t priority, uint64_t cookie,
+                const struct match *match, const struct ofpbuf *actions)
+{
+    ofctrl_check_and_add_flow(desired_flows, table_id, priority, cookie,
+                              match, actions, true);
+}
 
 /* ovn_flow. */
 
@@ -777,7 +788,7 @@ add_flow_mod(struct ofputil_flow_mod *fm, struct ovs_list *msgs)
 static struct ofpbuf *
 encode_group_mod(const struct ofputil_group_mod *gm)
 {
-    return ofputil_encode_group_mod(OFP13_VERSION, gm);
+    return ofputil_encode_group_mod(OFP13_VERSION, gm, NULL, -1);
 }
 
 static void
@@ -812,6 +823,81 @@ add_ct_flush_zone(uint16_t zone_id, struct ovs_list *msgs)
     ovs_list_push_back(msgs, &msg->list_node);
 }
 
+static void
+add_meter_string(struct ovn_extend_table_info *m_desired,
+                 struct ovs_list *msgs)
+{
+    /* Create and install new meter. */
+    struct ofputil_meter_mod mm;
+    enum ofputil_protocol usable_protocols;
+    char *meter_string = xasprintf("meter=%"PRIu32",%s",
+                                   m_desired->table_id,
+                                   &m_desired->name[9]);
+    char *error = parse_ofp_meter_mod_str(&mm, meter_string, OFPMC13_ADD,
+                                          &usable_protocols);
+    if (!error) {
+        add_meter_mod(&mm, msgs);
+    } else {
+        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
+        VLOG_ERR_RL(&rl, "new meter %s %s", error, meter_string);
+        free(error);
+    }
+    free(meter_string);
+}
+
+static void
+add_meter(struct ovn_extend_table_info *m_desired,
+          const struct sbrec_meter_table *meter_table,
+          struct ovs_list *msgs)
+{
+    const struct sbrec_meter *sb_meter;
+    SBREC_METER_TABLE_FOR_EACH (sb_meter, meter_table) {
+        if (!strcmp(m_desired->name, sb_meter->name)) {
+            break;
+        }
+    }
+
+    if (!sb_meter) {
+        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
+        VLOG_ERR_RL(&rl, "could not find meter named \"%s\"", m_desired->name);
+        return;
+    }
+
+    struct ofputil_meter_mod mm;
+    mm.command = OFPMC13_ADD;
+    mm.meter.meter_id = m_desired->table_id;
+    mm.meter.flags = OFPMF13_STATS;
+
+    if (!strcmp(sb_meter->unit, "pktps")) {
+        mm.meter.flags |= OFPMF13_PKTPS;
+    } else {
+        mm.meter.flags |= OFPMF13_KBPS;
+    }
+
+    mm.meter.n_bands = sb_meter->n_bands;
+    mm.meter.bands = xcalloc(mm.meter.n_bands, sizeof *mm.meter.bands);
+
+    for (size_t i = 0; i < sb_meter->n_bands; i++) {
+        struct sbrec_meter_band *sb_band = sb_meter->bands[i];
+        struct ofputil_meter_band *mm_band = &mm.meter.bands[i];
+
+        if (!strcmp(sb_band->action, "drop")) {
+            mm_band->type = OFPMBT13_DROP;
+        }
+
+        mm_band->prec_level = 0;
+        mm_band->rate = sb_band->rate;
+        mm_band->burst_size = sb_band->burst_size;
+
+        if (mm_band->burst_size) {
+            mm.meter.flags |= OFPMF13_BURST;
+        }
+    }
+
+    add_meter_mod(&mm, msgs);
+    free(mm.meter.bands);
+}
+
 /* The flow table can be updated if the connection to the switch is up and
  * in the correct state and not backlogged with existing flow_mods.  (Our
  * criteria for being backlogged appear very conservative, but the socket
@@ -830,10 +916,10 @@ ofctrl_can_put(void)
 /* Replaces the flow table on the switch, if possible, by the flows added
  * with ofctrl_add_flow().
  *
- * Replaces the group table and meter table on the switch, if possible, by the
- *  contents of 'groups->desired'.  Regardless of whether the group table
- * is updated, this deletes all the groups from the 'groups->desired' and frees
- * them. (The hmap itself isn't destroyed.)
+ * Replaces the group table and meter table on the switch, if possible,
+ * by the contents of '->desired'.  Regardless of whether the table is
+ * updated, this deletes all the groups or meters from the '->desired'
+ * and frees them. (The hmap itself isn't destroyed.)
  *
  * Sends conntrack flush messages to each zone in 'pending_ct_zones' that
  * is in the CT_ZONE_OF_QUEUED state and then moves the zone into the
@@ -842,7 +928,7 @@ ofctrl_can_put(void)
  * This should be called after ofctrl_run() within the main loop. */
 void
 ofctrl_put(struct hmap *flow_table, struct shash *pending_ct_zones,
-           int64_t nb_cfg)
+           const struct sbrec_meter_table *meter_table, int64_t nb_cfg)
 {
     if (!ofctrl_can_put()) {
         ovn_flow_table_clear(flow_table);
@@ -874,7 +960,7 @@ ofctrl_put(struct hmap *flow_table, struct shash *pending_ct_zones,
         enum ofputil_protocol usable_protocols;
         char *group_string = xasprintf("group_id=%"PRIu32",%s",
                                        desired->table_id,
-                                       ds_cstr(&desired->info));
+                                       desired->name);
         char *error = parse_ofp_group_mod_str(&gm, OFPGC11_ADD, group_string,
                                               NULL, NULL, &usable_protocols);
         if (!error) {
@@ -892,22 +978,13 @@ ofctrl_put(struct hmap *flow_table, struct shash *pending_ct_zones,
      * add them to the switch. */
     struct ovn_extend_table_info *m_desired;
     EXTEND_TABLE_FOR_EACH_UNINSTALLED (m_desired, meters) {
-        /* Create and install new meter. */
-        struct ofputil_meter_mod mm;
-        enum ofputil_protocol usable_protocols;
-        char *meter_string = xasprintf("meter=%"PRIu32",%s",
-                                       m_desired->table_id,
-                                       ds_cstr(&m_desired->info));
-        char *error = parse_ofp_meter_mod_str(&mm, meter_string, OFPMC13_ADD,
-                                              &usable_protocols);
-        if (!error) {
-            add_meter_mod(&mm, &msgs);
+        if (!strncmp(m_desired->name, "__string: ", 10)) {
+            /* The "set-meter" action creates a meter entry name that
+             * describes the meter itself. */
+            add_meter_string(m_desired, &msgs);
         } else {
-            static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
-            VLOG_ERR_RL(&rl, "new meter %s %s", error, meter_string);
-            free(error);
+            add_meter(m_desired, meter_table, &msgs);
         }
-        free(meter_string);
     }
 
     /* Iterate through all of the installed flows.  If any of them are no
@@ -1014,22 +1091,12 @@ ofctrl_put(struct hmap *flow_table, struct shash *pending_ct_zones,
     struct ovn_extend_table_info *m_installed, *next_meter;
     EXTEND_TABLE_FOR_EACH_INSTALLED (m_installed, next_meter, meters) {
         /* Delete the meter. */
-        struct ofputil_meter_mod mm;
-        enum ofputil_protocol usable_protocols;
-        char *meter_string = xasprintf("meter=%"PRIu32"",
-                                       m_installed->table_id);
-        char *error = parse_ofp_meter_mod_str(&mm, meter_string,
-                                              OFPMC13_DELETE,
-                                              &usable_protocols);
-        if (!error) {
-            add_meter_mod(&mm, &msgs);
-        } else {
-            static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
-            VLOG_ERR_RL(&rl,  "Error deleting meter %"PRIu32": %s",
-                        m_installed->table_id, error);
-            free(error);
-        }
-        free(meter_string);
+        struct ofputil_meter_mod mm = {
+            .command = OFPMC13_DELETE,
+            .meter = { .meter_id = m_installed->table_id },
+        };
+        add_meter_mod(&mm, &msgs);
+
         ovn_extend_table_remove(meters, m_installed);
     }
 
@@ -1197,4 +1264,10 @@ ofctrl_inject_pkt(const struct ovsrec_bridge *br_int, const char *flow_s,
     ofpbuf_uninit(&ofpacts);
 
     return NULL;
+}
+
+bool
+ofctrl_is_connected(void)
+{
+    return rconn_is_connected(swconn);
 }

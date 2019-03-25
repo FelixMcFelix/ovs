@@ -74,16 +74,41 @@ struct chassis_tunnel {
     enum chassis_tunnel_type type;
 };
 
+/*
+ * This function looks up the list of tunnel ports (provided by
+ * ovn-chassis-id ports) and returns the tunnel for the given chassid-id and
+ * encap-ip. The ovn-chassis-id is formed using the chassis-id and encap-ip as
+ * <chassis-id>OVN_MVTEP_CHASSISID_DELIM<encap-ip>. The list is hashed using
+ * the chassis-id. If the encap-ip is not specified, it means we'll just
+ * return a tunnel for that chassis-id, i.e. we just check for chassis-id and
+ * if there is a match, we'll return the tunnel. If encap-ip is also provided we
+ * use <chassis-id>OVN_MVTEP_CHASSISID_DELIM<encap-ip> to do a more specific
+ * lookup.
+ */
 static struct chassis_tunnel *
-chassis_tunnel_find(const char *chassis_id)
+chassis_tunnel_find(const char *chassis_id, char *encap_ip)
 {
-    struct chassis_tunnel *tun;
+    char *chassis_tunnel_entry;
+
+    /*
+     * If the specific encap_ip is given, look for the chassisid_ip entry,
+     * else return the 1st found entry for the chassis.
+     */
+    if (encap_ip != NULL) {
+        chassis_tunnel_entry = xasprintf("%s%s%s", chassis_id,
+            OVN_MVTEP_CHASSISID_DELIM, encap_ip);
+    } else {
+        chassis_tunnel_entry = xasprintf("%s", chassis_id);
+    }
+    struct chassis_tunnel *tun = NULL;
     HMAP_FOR_EACH_WITH_HASH (tun, hmap_node, hash_string(chassis_id, 0),
                              &tunnels) {
-        if (!strcmp(tun->chassis_id, chassis_id)) {
+        if (strstr(tun->chassis_id, chassis_tunnel_entry) != NULL) {
+            free (chassis_tunnel_entry);
             return tun;
         }
     }
+    free (chassis_tunnel_entry);
     return NULL;
 }
 
@@ -120,6 +145,26 @@ put_resubmit(uint8_t table_id, struct ofpbuf *ofpacts)
     struct ofpact_resubmit *resubmit = ofpact_put_RESUBMIT(ofpacts);
     resubmit->in_port = OFPP_IN_PORT;
     resubmit->table_id = table_id;
+}
+
+/*
+ * For a port binding, get the corresponding ovn-chassis-id tunnel port
+ * from the associated encap.
+ */
+static struct chassis_tunnel *
+get_port_binding_tun(const struct sbrec_port_binding *binding)
+{
+    struct sbrec_encap *encap = binding->encap;
+    struct sbrec_chassis *chassis = binding->chassis;
+    struct chassis_tunnel *tun = NULL;
+
+    if (encap) {
+        tun = chassis_tunnel_find(chassis->name, encap->ip);
+    }
+    if (!tun) {
+        tun = chassis_tunnel_find(chassis->name, NULL);
+    }
+    return tun;
 }
 
 static void
@@ -189,7 +234,8 @@ get_zone_ids(const struct sbrec_port_binding *binding,
 
 static void
 put_local_common_flows(uint32_t dp_key, uint32_t port_key,
-                       bool nested_container, const struct zone_ids *zone_ids,
+                       uint32_t parent_port_key,
+                       const struct zone_ids *zone_ids,
                        struct ofpbuf *ofpacts_p, struct hmap *flow_table)
 {
     struct match match;
@@ -244,11 +290,19 @@ put_local_common_flows(uint32_t dp_key, uint32_t port_key,
     /* Table 64, Priority 100.
      * =======================
      *
-     * If the packet is supposed to hair-pin because the "loopback"
-     * flag is set (or if the destination is a nested container),
+     * If the packet is supposed to hair-pin because the
+     *   - "loopback" flag is set
+     *   - or if the destination is a nested container
+     *   - or if "nested_container" flag is set and the destination is the
+     *     parent port,
      * temporarily set the in_port to zero, resubmit to
      * table 65 for logical-to-physical translation, then restore
-     * the port number. */
+     * the port number.
+     *
+     * If 'parent_port_key' is set, then the 'port_key' represents a nested
+     * container. */
+
+    bool nested_container = parent_port_key ? true: false;
     match_init_catchall(&match);
     ofpbuf_clear(ofpacts_p);
     match_set_metadata(&match, htonll(dp_key));
@@ -264,6 +318,38 @@ put_local_common_flows(uint32_t dp_key, uint32_t port_key,
     put_stack(MFF_IN_PORT, ofpact_put_STACK_POP(ofpacts_p));
     ofctrl_add_flow(flow_table, OFTABLE_SAVE_INPORT, 100, 0,
                     &match, ofpacts_p);
+
+    if (nested_container) {
+        /* It's a nested container and when the packet from the nested
+         * container is to be sent to the parent port, "nested_container"
+         * flag will be set. We need to temporarily set the in_port to zero
+         * as mentioned in the comment above.
+         *
+         * If a parent port has multiple child ports, then this if condition
+         * will be hit multiple times, but we want to add only one flow.
+         * ofctrl_add_flow() logs a warning message for duplicate flows.
+         * So use the function 'ofctrl_check_and_add_flow' which doesn't
+         * log a warning.
+         *
+         * Other option is to add this flow for all the ports which are not
+         * nested containers. In which case we will add this flow for all the
+         * ports even if they don't have any child ports which is
+         * unnecessary.
+         */
+        match_init_catchall(&match);
+        ofpbuf_clear(ofpacts_p);
+        match_set_metadata(&match, htonll(dp_key));
+        match_set_reg(&match, MFF_LOG_OUTPORT - MFF_REG0, parent_port_key);
+        match_set_reg_masked(&match, MFF_LOG_FLAGS - MFF_REG0,
+                             MLF_NESTED_CONTAINER, MLF_NESTED_CONTAINER);
+
+        put_stack(MFF_IN_PORT, ofpact_put_STACK_PUSH(ofpacts_p));
+        put_load(0, MFF_IN_PORT, 0, 16, ofpacts_p);
+        put_resubmit(OFTABLE_LOG_TO_PHY, ofpacts_p);
+        put_stack(MFF_IN_PORT, ofpact_put_STACK_POP(ofpacts_p));
+        ofctrl_check_and_add_flow(flow_table, OFTABLE_SAVE_INPORT, 100, 0,
+                                  &match, ofpacts_p, false);
+    }
 }
 
 static void
@@ -328,7 +414,7 @@ consider_port_binding(struct ovsdb_idl_index *sbrec_chassis_by_name,
         }
 
         struct zone_ids binding_zones = get_zone_ids(binding, ct_zones);
-        put_local_common_flows(dp_key, port_key, false, &binding_zones,
+        put_local_common_flows(dp_key, port_key, 0, &binding_zones,
                                ofpacts_p, flow_table);
 
         match_init_catchall(&match);
@@ -452,6 +538,7 @@ consider_port_binding(struct ovsdb_idl_index *sbrec_chassis_by_name,
 
     int tag = 0;
     bool nested_container = false;
+    const struct sbrec_port_binding *parent_port = NULL;
     ofp_port_t ofport;
     bool is_remote = false;
     if (binding->parent_port && *binding->parent_port) {
@@ -463,6 +550,8 @@ consider_port_binding(struct ovsdb_idl_index *sbrec_chassis_by_name,
         if (ofport) {
             tag = *binding->tag;
             nested_container = true;
+            parent_port = lport_lookup_by_name(
+                sbrec_port_binding_by_name, binding->parent_port);
         }
     } else {
         ofport = u16_to_ofp(simap_get(&localvif_to_ofport,
@@ -504,7 +593,7 @@ consider_port_binding(struct ovsdb_idl_index *sbrec_chassis_by_name,
                 if (!binding->chassis) {
                     goto out;
                 }
-                tun = chassis_tunnel_find(binding->chassis->name);
+                tun = chassis_tunnel_find(binding->chassis->name, NULL);
                 if (!tun) {
                     goto out;
                 }
@@ -523,7 +612,10 @@ consider_port_binding(struct ovsdb_idl_index *sbrec_chassis_by_name,
          */
 
         struct zone_ids zone_ids = get_zone_ids(binding, ct_zones);
-        put_local_common_flows(dp_key, port_key, nested_container, &zone_ids,
+        uint32_t parent_port_key = parent_port ? parent_port->tunnel_key : 0;
+        /* Pass the parent port tunnel key if the port is a nested
+         * container. */
+        put_local_common_flows(dp_key, port_key, parent_port_key, &zone_ids,
                                ofpacts_p, flow_table);
 
         /* Table 0, Priority 150 and 100.
@@ -549,12 +641,14 @@ consider_port_binding(struct ovsdb_idl_index *sbrec_chassis_by_name,
          * for frames that lack any 802.1Q header later. */
         if (tag || !strcmp(binding->type, "localnet")
             || !strcmp(binding->type, "l2gateway")) {
-            match_set_dl_vlan(&match, htons(tag));
+            match_set_dl_vlan(&match, htons(tag), 0);
             if (nested_container) {
                 /* When a packet comes from a container sitting behind a
                  * parent_port, we should let it loopback to other containers
-                 * or the parent_port itself. */
-                put_load(MLF_ALLOW_LOOPBACK, MFF_LOG_FLAGS, 0, 1, ofpacts_p);
+                 * or the parent_port itself. Indicate this by setting the
+                 * MLF_NESTED_CONTAINER_BIT in MFF_LOG_FLAGS.*/
+                put_load(1, MFF_LOG_FLAGS, MLF_NESTED_CONTAINER_BIT, 1,
+                         ofpacts_p);
             }
             ofpact_put_STRIP_VLAN(ofpacts_p);
         }
@@ -649,10 +743,15 @@ consider_port_binding(struct ovsdb_idl_index *sbrec_chassis_by_name,
 
         if (!is_ha_remote) {
             /* Setup encapsulation */
+            const struct chassis_tunnel *rem_tun =
+                get_port_binding_tun(binding);
+            if (!rem_tun) {
+                goto out;
+            }
             put_encapsulation(mff_ovn_geneve, tun, binding->datapath,
                               port_key, ofpacts_p);
             /* Output to tunnel. */
-            ofpact_put_OUTPUT(ofpacts_p)->port = ofport;
+            ofpact_put_OUTPUT(ofpacts_p)->port = rem_tun->ofport;
         } else {
             struct gateway_chassis *gwc;
             /* Make sure all tunnel endpoints use the same encapsulation,
@@ -660,10 +759,10 @@ consider_port_binding(struct ovsdb_idl_index *sbrec_chassis_by_name,
             LIST_FOR_EACH (gwc, node, gateway_chassis) {
                 if (gwc->db->chassis) {
                     if (!tun) {
-                        tun = chassis_tunnel_find(gwc->db->chassis->name);
+                        tun = chassis_tunnel_find(gwc->db->chassis->name, NULL);
                     } else {
                         struct chassis_tunnel *chassis_tunnel =
-                            chassis_tunnel_find(gwc->db->chassis->name);
+                            chassis_tunnel_find(gwc->db->chassis->name, NULL);
                         if (chassis_tunnel &&
                             tun->type != chassis_tunnel->type) {
                             static struct vlog_rate_limit rl =
@@ -694,7 +793,7 @@ consider_port_binding(struct ovsdb_idl_index *sbrec_chassis_by_name,
 
             LIST_FOR_EACH (gwc, node, gateway_chassis) {
                 if (gwc->db->chassis) {
-                    tun = chassis_tunnel_find(gwc->db->chassis->name);
+                    tun = chassis_tunnel_find(gwc->db->chassis->name, NULL);
                     if (!tun) {
                         continue;
                     }
@@ -832,7 +931,7 @@ consider_mc_group(enum mf_field_id mff_ovn_geneve,
         const struct chassis_tunnel *prev = NULL;
         SSET_FOR_EACH (chassis_name, &remote_chassis) {
             const struct chassis_tunnel *tun
-                = chassis_tunnel_find(chassis_name);
+                = chassis_tunnel_find(chassis_name, NULL);
             if (!tun) {
                 continue;
             }
@@ -894,9 +993,9 @@ physical_run(struct ovsdb_idl_index *sbrec_chassis_by_name,
             continue;
         }
 
-        const char *chassis_id = smap_get(&port_rec->external_ids,
+        const char *tunnel_id = smap_get(&port_rec->external_ids,
                                           "ovn-chassis-id");
-        if (chassis_id && !strcmp(chassis_id, chassis->name)) {
+        if (tunnel_id && strstr(tunnel_id, chassis->name)) {
             continue;
         }
 
@@ -928,7 +1027,7 @@ physical_run(struct ovsdb_idl_index *sbrec_chassis_by_name,
                 /* L2 gateway patch ports can be handled just like VIFs. */
                 simap_put(&new_localvif_to_ofport, l2gateway, ofport);
                 break;
-            } else if (chassis_id) {
+            } else if (tunnel_id) {
                 enum chassis_tunnel_type tunnel_type;
                 if (!strcmp(iface_rec->type, "geneve")) {
                     tunnel_type = GENEVE;
@@ -943,8 +1042,28 @@ physical_run(struct ovsdb_idl_index *sbrec_chassis_by_name,
                     continue;
                 }
 
-                simap_put(&new_tunnel_to_ofport, chassis_id, ofport);
-                struct chassis_tunnel *tun = chassis_tunnel_find(chassis_id);
+                simap_put(&new_tunnel_to_ofport, tunnel_id, ofport);
+                /*
+                 * We split the tunnel_id to get the chassis-id
+                 * and hash the tunnel list on the chassis-id. The
+                 * reason to use the chassis-id alone is because 
+                 * there might be cases (multicast, gateway chassis)
+                 * where we need to tunnel to the chassis, but won't
+                 * have the encap-ip specifically.
+                 */
+                char *tokstr = xstrdup(tunnel_id);
+                char *save_ptr = NULL;
+                char *hash_id = strtok_r(tokstr, OVN_MVTEP_CHASSISID_DELIM,
+                                &save_ptr);
+                char *ip = strtok_r(NULL, "", &save_ptr);
+                /*
+                 * If the value has morphed into something other than
+                 * chassis-id>delim>encap-ip, ignore.
+                 */
+                if (!hash_id || !ip) {
+                    continue;
+                }
+                struct chassis_tunnel *tun = chassis_tunnel_find(hash_id, ip);
                 if (tun) {
                     /* If the tunnel's ofport has changed, update. */
                     if (tun->ofport != u16_to_ofp(ofport) ||
@@ -956,12 +1075,13 @@ physical_run(struct ovsdb_idl_index *sbrec_chassis_by_name,
                 } else {
                     tun = xmalloc(sizeof *tun);
                     hmap_insert(&tunnels, &tun->hmap_node,
-                                hash_string(chassis_id, 0));
-                    tun->chassis_id = xstrdup(chassis_id);
+                                hash_string(hash_id, 0));
+                    tun->chassis_id = xstrdup(tunnel_id);
                     tun->ofport = u16_to_ofp(ofport);
                     tun->type = tunnel_type;
                     physical_map_changed = true;
                 }
+                free(tokstr);
                 break;
             } else {
                 const char *iface_id = smap_get(&iface_rec->external_ids,
@@ -1071,7 +1191,7 @@ physical_run(struct ovsdb_idl_index *sbrec_chassis_by_name,
             struct match match = MATCH_CATCHALL_INITIALIZER;
 
             if (!binding->chassis ||
-                strcmp(tun->chassis_id, binding->chassis->name)) {
+                strstr(tun->chassis_id, binding->chassis->name) == NULL) {
                 continue;
             }
 

@@ -300,6 +300,7 @@ OVS_TRAFFIC_VSWITCHD_STOP
 AT_CLEANUP
 
 AT_SETUP([datapath - ping over gre tunnel])
+OVS_CHECK_KERNEL_EXCL(3, 10, 4, 15)
 OVS_CHECK_GRE()
 
 OVS_TRAFFIC_VSWITCHD_START()
@@ -340,6 +341,7 @@ OVS_TRAFFIC_VSWITCHD_STOP
 AT_CLEANUP
 
 AT_SETUP([datapath - ping over erspan v1 tunnel])
+OVS_CHECK_KERNEL_EXCL(3, 10, 4, 15)
 OVS_CHECK_GRE()
 OVS_CHECK_ERSPAN()
 
@@ -375,6 +377,7 @@ OVS_TRAFFIC_VSWITCHD_STOP
 AT_CLEANUP
 
 AT_SETUP([datapath - ping over erspan v2 tunnel])
+OVS_CHECK_KERNEL_EXCL(3, 10, 4, 15)
 OVS_CHECK_GRE()
 OVS_CHECK_ERSPAN()
 
@@ -410,6 +413,7 @@ OVS_TRAFFIC_VSWITCHD_STOP
 AT_CLEANUP
 
 AT_SETUP([datapath - ping over ip6erspan v1 tunnel])
+OVS_CHECK_KERNEL_EXCL(3, 10, 4, 15)
 OVS_CHECK_GRE()
 OVS_CHECK_ERSPAN()
 
@@ -448,6 +452,7 @@ OVS_TRAFFIC_VSWITCHD_STOP
 AT_CLEANUP
 
 AT_SETUP([datapath - ping over ip6erspan v2 tunnel])
+OVS_CHECK_KERNEL_EXCL(3, 10, 4, 15)
 OVS_CHECK_GRE()
 OVS_CHECK_ERSPAN()
 
@@ -527,6 +532,47 @@ NS_CHECK_EXEC([at_ns0], [ping -s 3200 -q -c 3 -i 0.3 -w 2 10.1.1.100 | FORMAT_PI
 OVS_TRAFFIC_VSWITCHD_STOP
 AT_CLEANUP
 
+AT_SETUP([datapath - flow resume with geneve tun_metadata])
+OVS_CHECK_GENEVE()
+
+OVS_TRAFFIC_VSWITCHD_START()
+ADD_BR([br-underlay])
+
+AT_CHECK([ovs-ofctl monitor br0 resume --detach --no-chdir --pidfile 2> /dev/null])
+
+ADD_NAMESPACES(at_ns0)
+
+dnl Set up underlay link from host into the namespace using veth pair.
+ADD_VETH(p0, at_ns0, br-underlay, "172.31.1.1/24")
+AT_CHECK([ip addr add dev br-underlay "172.31.1.100/24"])
+AT_CHECK([ip link set dev br-underlay up])
+
+dnl Set up tunnel endpoints on OVS outside the namespace and with a native
+dnl linux device inside the namespace.
+ADD_OVS_TUNNEL([geneve], [br0], [at_gnv0], [172.31.1.1], [10.1.1.100/24])
+ADD_NATIVE_TUNNEL([geneve], [ns_gnv0], [at_ns0], [172.31.1.100], [10.1.1.1/24],
+                  [vni 0])
+
+dnl Set up flows
+AT_DATA([flows.txt], [dnl
+table=0, arp action=NORMAL
+table=0, in_port=LOCAL icmp action=output:at_gnv0
+table=0, in_port=at_gnv0 icmp action=set_field:0xa->tun_metadata0,resubmit(,1)
+table=1, icmp action=controller(pause), resubmit(,2)
+table=2, tun_metadata0=0xa, icmp action=output:LOCAL
+])
+AT_CHECK([ovs-ofctl add-tlv-map br0 "{class=0xffff,type=0,len=4}->tun_metadata0"])
+AT_CHECK([ovs-ofctl add-flows br0 flows.txt])
+AT_CHECK([ovs-ofctl add-flow br-underlay "actions=normal"])
+
+NS_CHECK_EXEC([at_ns0], [ping -q -c 3 10.1.1.100 | FORMAT_PING], [0], [dnl
+3 packets transmitted, 3 received, 0% packet loss, time 0ms
+])
+
+OVS_APP_EXIT_AND_WAIT([ovs-ofctl])
+OVS_TRAFFIC_VSWITCHD_STOP
+AT_CLEANUP
+
 AT_SETUP([datapath - ping over geneve6 tunnel])
 OVS_CHECK_GENEVE_UDP6ZEROCSUM()
 
@@ -570,6 +616,270 @@ NS_CHECK_EXEC([at_ns0], [ping -s 3200 -q -c 3 -i 0.3 -w 2 10.1.1.100 | FORMAT_PI
 OVS_TRAFFIC_VSWITCHD_STOP
 AT_CLEANUP
 
+AT_SETUP([datapath - ping over gre tunnel by simulated packets])
+OVS_CHECK_KERNEL(3, 10, 4, 18)
+
+OVS_TRAFFIC_VSWITCHD_START()
+AT_CHECK([ovs-vsctl -- set bridge br0 other-config:hwaddr=\"f2:ff:00:00:00:01\"])
+ADD_BR([br-underlay], [set bridge br-underlay other-config:hwaddr=\"f2:ff:00:00:00:02\"])
+
+AT_CHECK([ovs-ofctl add-flow br0 "actions=normal"])
+AT_CHECK([ovs-ofctl add-flow br-underlay "actions=normal"])
+
+ADD_NAMESPACES(at_ns0)
+
+dnl Set up underlay link from host into the namespace using veth pair.
+ADD_VETH(p0, at_ns0, br-underlay, "172.31.1.1/24", f2:ff:00:00:00:03)
+AT_CHECK([ip addr add dev br-underlay "172.31.1.100/24"])
+AT_CHECK([ip link set dev br-underlay up])
+
+dnl Set up tunnel endpoints on OVS outside the namespace.
+ADD_OVS_TUNNEL([gre], [br0], [at_gre0], [172.31.1.1], [10.1.1.100/24])
+
+dnl Certain Linux distributions, like CentOS, have default iptable rules
+dnl to reject input traffic from br-underlay. Here we add a rule to walk
+dnl around it.
+iptables -I INPUT 1 -i br-underlay -j ACCEPT
+on_exit 'iptables -D INPUT 1'
+
+ip netns exec at_ns0 tcpdump -n -i p0 dst host 172.31.1.1 -l > p0.pcap &
+sleep 1
+
+dnl First, check the underlay.
+NS_CHECK_EXEC([at_ns0], [ping -q -c 3 -i 0.3 -w 2 172.31.1.100 | FORMAT_PING], [0], [dnl
+3 packets transmitted, 3 received, 0% packet loss, time 0ms
+])
+
+dnl We don't actually add gretap port as below, instead, we will
+dnl emulate one that sends packets. Suppose its mac address is f2:ff:00:00:00:04.
+dnl ADD_NATIVE_TUNNEL([gretap], [ns_gre0], [at_ns0], [172.31.1.100], [10.1.1.1/24])
+
+dnl Now, check the overlay by sending out raw arp and icmp packets.
+ovs-ofctl -O OpenFlow13 packet-out br-underlay "in_port=1 packet=f2ff00000002f2ff00000003080045000042ec2c4000402ff3bcac1f0101ac1f016400006558fffffffffffff2ff0000000408060001080006040001f2ff000000040a0101010000000000000a010164 actions=NORMAL"
+
+OVS_WAIT_UNTIL([cat p0.pcap | egrep "IP 172.31.1.100 > 172.31.1.1: GREv0, length 46: ARP, Reply 10.1.1.100 is-at f2:ff:00:00:00:01.* length 28" 2>&1 1>/dev/null])
+
+ovs-ofctl -O OpenFlow13 packet-out br-underlay "in_port=1 packet=f2ff00000002f2ff0000000308004500007aec8e4000402ff322ac1f0101ac1f016400006558f2ff00000001f2ff00000004080045000054548f40004001cfb30a0101010a0101640800e6e829270003e1a3435b00000000ff1a050000000000101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f3031323334353637 actions=NORMAL"
+
+OVS_WAIT_UNTIL([cat p0.pcap | egrep "IP 172.31.1.100 > 172.31.1.1: GREv0, length 102: IP 10.1.1.100 > 10.1.1.1: ICMP echo reply,.* length 64$" 2>&1 1>/dev/null])
+
+OVS_TRAFFIC_VSWITCHD_STOP
+AT_CLEANUP
+
+AT_SETUP([datapath - ping over erspan v1 tunnel by simulated packets])
+OVS_CHECK_KERNEL(3, 10, 4, 18)
+
+OVS_TRAFFIC_VSWITCHD_START()
+AT_CHECK([ovs-vsctl -- set bridge br0 other-config:hwaddr=\"f2:ff:00:00:00:01\"])
+ADD_BR([br-underlay], [set bridge br-underlay other-config:hwaddr=\"f2:ff:00:00:00:02\"])
+
+AT_CHECK([ovs-ofctl add-flow br0 "actions=normal"])
+AT_CHECK([ovs-ofctl add-flow br-underlay "actions=normal"])
+
+ADD_NAMESPACES(at_ns0)
+
+dnl Set up underlay link from host into the namespace using veth pair.
+ADD_VETH(p0, at_ns0, br-underlay, "172.31.1.1/24", f2:ff:00:00:00:03)
+AT_CHECK([ip addr add dev br-underlay "172.31.1.100/24"])
+AT_CHECK([ip link set dev br-underlay up])
+
+dnl Set up tunnel endpoints on OVS outside the namespace and emulate a native
+dnl linux device inside the namespace.
+ADD_OVS_TUNNEL([erspan], [br0], [at_erspan0], [172.31.1.1], [10.1.1.100/24], [options:key=1 options:erspan_ver=1 options:erspan_idx=7])
+
+dnl Certain Linux distributions, like CentOS, have default iptable rules
+dnl to reject input traffic from br-underlay. Here we add a rule to walk
+dnl around it.
+iptables -I INPUT 1 -i br-underlay -j ACCEPT
+on_exit 'iptables -D INPUT 1'
+
+ip netns exec at_ns0 tcpdump -n -x -i p0 dst host 172.31.1.1 -l > p0.pcap &
+sleep 1
+
+dnl First, check the underlay
+NS_CHECK_EXEC([at_ns0], [ping -q -c 3 -i 0.3 -w 2 172.31.1.100 | FORMAT_PING], [0], [dnl
+3 packets transmitted, 3 received, 0% packet loss, time 0ms
+])
+
+dnl Okay, now send out an arp request from 10.1.1.1 for 10.1.1.100 in erspan.
+ovs-ofctl -O OpenFlow13 packet-out br-underlay "in_port=1 packet=f2ff00000002f2ff0000000308004500004e151d4000402fcac0ac1f0101ac1f0164100088be000000061000000100000007fffffffffffff2ff0000000408060001080006040001f2ff000000040a0101010000000000000a010164 actions=normal"
+
+dnl 0002 is arp reply, followed by mac address of 10.1.1.100.
+OVS_WAIT_UNTIL([cat p0.pcap | egrep "0x0030:  0806 0001 0800 0604 0002 f2ff 0000 0001" 2>&1 1>/dev/null])
+OVS_WAIT_UNTIL([cat p0.pcap | egrep "0x0040:  0a01 0164 f2ff 0000 0004 0a01 0101" 2>&1 1>/dev/null])
+
+dnl Okay, now check the overlay with raw icmp packets.
+AT_FAIL_IF([cat p0.pcap | egrep "IP 172.31.1.100 > 172.31.1.1: GREv0,.* length 122" 2>&1 1>/dev/null])
+
+ovs-ofctl -O OpenFlow13 packet-out br-underlay "in_port=1 packet=f2ff00000002f2ff0000000308004500008e70cb4000402f6ed2ac1f0101ac1f0164100088be000000051000000100000007f2ff00000001f2ff0000000408004500005c4a3340004001da070a0101010a010164080084f238fb0001f36a6b5b0000000021870e0000000000101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f actions=normal"
+
+OVS_WAIT_UNTIL([cat p0.pcap | egrep "IP 172.31.1.100 > 172.31.1.1: GREv0,.* length 122" 2>&1 1>/dev/null])
+
+OVS_TRAFFIC_VSWITCHD_STOP
+AT_CLEANUP
+
+AT_SETUP([datapath - ping over erspan v2 tunnel by simulated packets])
+OVS_CHECK_KERNEL(3, 10, 4, 18)
+
+OVS_TRAFFIC_VSWITCHD_START()
+AT_CHECK([ovs-vsctl -- set bridge br0 other-config:hwaddr=\"f2:ff:00:00:00:01\"])
+ADD_BR([br-underlay], [set bridge br-underlay other-config:hwaddr=\"f2:ff:00:00:00:02\"])
+
+AT_CHECK([ovs-ofctl add-flow br0 "actions=normal"])
+AT_CHECK([ovs-ofctl add-flow br-underlay "actions=normal"])
+
+ADD_NAMESPACES(at_ns0)
+
+dnl Set up underlay link from host into the namespace using veth pair.
+ADD_VETH(p0, at_ns0, br-underlay, "172.31.1.1/24", f2:ff:00:00:00:03)
+AT_CHECK([ip addr add dev br-underlay "172.31.1.100/24"])
+AT_CHECK([ip link set dev br-underlay up])
+
+dnl Set up tunnel endpoints on OVS outside the namespace and simulate a native
+dnl linux device inside the namespace.
+ADD_OVS_TUNNEL([erspan], [br0], [at_erspan0], [172.31.1.1], [10.1.1.100/24], [options:key=1 options:erspan_ver=2 options:erspan_dir=1 options:erspan_hwid=0x7])
+
+dnl Certain Linux distributions, like CentOS, have default iptable rules
+dnl to reject input traffic from br-underlay. Here we add a rule to walk
+dnl around it.
+iptables -I INPUT 1 -i br-underlay -j ACCEPT
+on_exit 'iptables -D INPUT 1'
+
+ip netns exec at_ns0 tcpdump -n -x -i p0 dst host 172.31.1.1 -l > p0.pcap &
+sleep 1
+
+dnl First, check the underlay.
+NS_CHECK_EXEC([at_ns0], [ping -q -c 3 -i 0.3 -w 2 172.31.1.100 | FORMAT_PING], [0], [dnl
+3 packets transmitted, 3 received, 0% packet loss, time 0ms
+])
+
+dnl Okay, send raw arp request and icmp echo request.
+ovs-ofctl -O OpenFlow13 packet-out br-underlay "in_port=1 packet=f2ff00000002f2ff00000003080045000052373d4000402fa89cac1f0101ac1f0164100088be00000006200000016f54b41700008078fffffffffffff2ff0000000408060001080006040001f2ff000000040a0101010000000000000a010164 actions=normal"
+
+OVS_WAIT_UNTIL([cat p0.pcap | egrep "0x0030:  0000 0001 0806 0001 0800 0604 0002 f2ff" 2>&1 1>/dev/null])
+OVS_WAIT_UNTIL([cat p0.pcap | egrep "0x0040:  0000 0001 0a01 0164 f2ff 0000 0004 0a01" 2>&1 1>/dev/null])
+OVS_WAIT_UNTIL([cat p0.pcap | egrep "0x0050:  0101" 2>&1 1>/dev/null])
+
+dnl Because tcpdump might not be able to parse erspan headers, we check icmp echo reply
+dnl by packet length.
+AT_FAIL_IF([cat p0.pcap | egrep "IP 172.31.1.100 > 172.31.1.1: GREv0,.* length 126" 2>&1 1>/dev/null])
+
+ovs-ofctl -O OpenFlow13 packet-out br-underlay "in_port=1 packet=f2ff00000002f2ff0000000308004500009287e14000402f57b8ac1f0101ac1f0164100088be0000000520000001144cd5a400008078f2ff00000001f2ff0000000408004500005c38d640004001eb640a0101010a01016408005e57585f0001df6c6b5b0000000045bc050000000000101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f actions=normal"
+
+OVS_WAIT_UNTIL([cat p0.pcap | egrep "IP 172.31.1.100 > 172.31.1.1: GREv0,.* length 126" 2>&1 1>/dev/null])
+
+OVS_TRAFFIC_VSWITCHD_STOP
+AT_CLEANUP
+
+AT_SETUP([datapath - ping over ip6erspan v1 tunnel by simulated packets])
+OVS_CHECK_KERNEL(3, 10, 4, 18)
+
+OVS_TRAFFIC_VSWITCHD_START()
+AT_CHECK([ovs-vsctl -- set bridge br0 other-config:hwaddr=\"f2:ff:00:00:00:01\"])
+ADD_BR([br-underlay], [set bridge br-underlay other-config:hwaddr=\"f2:ff:00:00:00:02\"])
+
+AT_CHECK([ovs-ofctl add-flow br0 "actions=normal"])
+AT_CHECK([ovs-ofctl add-flow br-underlay "actions=normal"])
+
+ADD_NAMESPACES(at_ns0)
+
+dnl Set up underlay link from host into the namespace using veth pair.
+ADD_VETH(p0, at_ns0, br-underlay, "fc00:100::1/96", f2:ff:00:00:00:03, [], nodad)
+AT_CHECK([ip addr add dev br-underlay "fc00:100::100/96" nodad])
+AT_CHECK([ip link set dev br-underlay up])
+
+dnl Set up tunnel endpoints on OVS outside the namespace and simulate a native
+dnl linux device inside the namespace.
+ADD_OVS_TUNNEL6([ip6erspan], [br0], [at_erspan0], [fc00:100::1], [10.1.1.100/24],
+                [options:key=123 options:erspan_ver=1 options:erspan_idx=0x7])
+
+OVS_WAIT_UNTIL([ip netns exec at_ns0 ping6 -c 2 fc00:100::100])
+
+dnl Certain Linux distributions, like CentOS, have default iptable rules
+dnl to reject input traffic from br-underlay. Here we add a rule to walk
+dnl around it.
+ip6tables -I INPUT 1 -i br-underlay -j ACCEPT
+on_exit 'ip6tables -D INPUT 1'
+
+ip netns exec at_ns0 tcpdump -n -x -i p0 dst host fc00:100::1 -l > p0.pcap &
+sleep 1
+
+dnl First, check the underlay.
+NS_CHECK_EXEC([at_ns0], [ping6 -q -c 3 -i 0.3 -w 2 fc00:100::100 | FORMAT_PING], [0], [dnl
+3 packets transmitted, 3 received, 0% packet loss, time 0ms
+])
+
+dnl Okay, now send raw arp request and icmp echo request.
+ovs-ofctl -O OpenFlow13 packet-out br-underlay "in_port=1 packet=f2ff00000002f2ff0000000386dd60008531003a2f40fc000100000000000000000000000001fc000100000000000000000000000100100088be000000051000007b00000007fffffffffffff2ff0000000408060001080006040001f2ff000000040a0101010000000000000a010164 actions=normal"
+
+dnl Check arp reply.
+OVS_WAIT_UNTIL([cat p0.pcap | egrep "0x0040:  0000 0001 0806 0001 0800 0604 0002 f2ff" 2>&1 1>/dev/null])
+OVS_WAIT_UNTIL([cat p0.pcap | egrep "0x0050:  0000 0001 0a01 0164 f2ff 0000 0004 0a01" 2>&1 1>/dev/null])
+OVS_WAIT_UNTIL([cat p0.pcap | egrep "0x0060:  0101" 2>&1 1>/dev/null])
+
+AT_FAIL_IF([cat p0.pcap | egrep "IP6 fc00:100::100 > fc00:100::1: GREv0,.* length 114" 2>&1 1>/dev/null])
+
+ovs-ofctl -O OpenFlow13 packet-out br-underlay "in_port=1 packet=f2ff00000002f2ff0000000386dd60008531007a3c40fc000100000000000000000000000001fc0001000000000000000000000001002f00040104010100100088be000000061000407b00000007f2ff00000001f2ff0000000408004500005429b640004001fa8c0a0101010a01016408005c2c7526000118d3685b00000000e4aa020000000000101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f3031323334353637 actions=normal"
+
+OVS_WAIT_UNTIL([cat p0.pcap | egrep "IP6 fc00:100::100 > fc00:100::1: GREv0,.* length 114" 2>&1 1>/dev/null])
+
+OVS_TRAFFIC_VSWITCHD_STOP
+AT_CLEANUP
+
+AT_SETUP([datapath - ping over ip6erspan v2 tunnel by simulated packets])
+OVS_CHECK_KERNEL(3, 10, 4, 18)
+
+OVS_TRAFFIC_VSWITCHD_START()
+AT_CHECK([ovs-vsctl -- set bridge br0 other-config:hwaddr=\"f2:ff:00:00:00:01\"])
+ADD_BR([br-underlay], [set bridge br-underlay other-config:hwaddr=\"f2:ff:00:00:00:02\"])
+
+AT_CHECK([ovs-ofctl add-flow br0 "actions=normal"])
+AT_CHECK([ovs-ofctl add-flow br-underlay "actions=normal"])
+
+ADD_NAMESPACES(at_ns0)
+
+dnl Set up underlay link from host into the namespace using veth pair.
+ADD_VETH(p0, at_ns0, br-underlay, "fc00:100::1/96", f2:ff:00:00:00:03, [], nodad)
+AT_CHECK([ip addr add dev br-underlay "fc00:100::100/96" nodad])
+AT_CHECK([ip link set dev br-underlay up])
+
+dnl Set up tunnel endpoints on OVS outside the namespace and simulate a native
+dnl linux device inside the namespace.
+ADD_OVS_TUNNEL6([ip6erspan], [br0], [at_erspan0], [fc00:100::1], [10.1.1.100/24],
+                [options:key=121 options:erspan_ver=2 options:erspan_dir=0 options:erspan_hwid=0x7])
+
+OVS_WAIT_UNTIL([ip netns exec at_ns0 ping6 -c 2 fc00:100::100])
+
+dnl Certain Linux distributions, like CentOS, have default iptable rules
+dnl to reject input traffic from br-underlay. Here we add a rule to walk
+dnl around it.
+ip6tables -I INPUT 1 -i br-underlay -j ACCEPT
+on_exit 'ip6tables -D INPUT 1'
+
+ip netns exec at_ns0 tcpdump -n -x -i p0 dst host fc00:100::1 -l > p0.pcap &
+sleep 1
+
+dnl First, check the underlay.
+NS_CHECK_EXEC([at_ns0], [ping6 -q -c 3 -i 0.3 -w 2 fc00:100::100 | FORMAT_PING], [0], [dnl
+3 packets transmitted, 3 received, 0% packet loss, time 0ms
+])
+
+dnl Okay, now send raw arp request and icmp echo request.
+ovs-ofctl -O OpenFlow13 packet-out br-underlay "in_port=1 packet=f2ff00000002f2ff0000000386dd60008531003e2f40fc000100000000000000000000000001fc000100000000000000000000000100100088be0000000620000079af514f9900008070fffffffffffff2ff0000000408060001080006040001f2ff000000040a0101010000000000000a010164 actions=normal"
+
+OVS_WAIT_UNTIL([cat p0.pcap | egrep "0x0040:  0004 f2ff 0000 0001 0806 0001 0800 0604" 2>&1 1>/dev/null])
+OVS_WAIT_UNTIL([cat p0.pcap | egrep "0x0050:  0002 f2ff 0000 0001 0a01 0164 f2ff 0000" 2>&1 1>/dev/null])
+OVS_WAIT_UNTIL([cat p0.pcap | egrep "0x0060:  0004 0a01 0101" 2>&1 1>/dev/null])
+
+AT_FAIL_IF([cat p0.pcap | egrep "IP6 fc00:100::100 > fc00:100::1: GREv0, .* length 118" 2>&1 1>/dev/null])
+
+ovs-ofctl -O OpenFlow13 packet-out br-underlay "in_port=1 packet=f2ff00000002f2ff0000000386dd60008531007e3c40fc000100000000000000000000000001fc0001000000000000000000000001002f00040104010100100088be0000000720004079af514f9b00008070f2ff00000001f2ff00000004080045000054ffcb4000400124770a0101010a0101640800419e23ac000112d7685b000000004caf0c0000000000101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f3031323334353637 actions=normal"
+
+OVS_WAIT_UNTIL([cat p0.pcap | egrep "IP6 fc00:100::100 > fc00:100::1: GREv0, .* length 118" 2>&1 1>/dev/null])
+
+OVS_TRAFFIC_VSWITCHD_STOP
+AT_CLEANUP
+
 AT_SETUP([datapath - clone action])
 OVS_TRAFFIC_VSWITCHD_START()
 
@@ -592,6 +902,8 @@ AT_CHECK([ovs-ofctl monitor br0 65534 invalid_ttl --detach --no-chdir --pidfile 
 NS_CHECK_EXEC([at_ns0], [ping -q -c 3 -i 0.3 -w 2 10.1.1.2 | FORMAT_PING], [0], [dnl
 3 packets transmitted, 3 received, 0% packet loss, time 0ms
 ])
+
+OVS_APP_EXIT_AND_WAIT([ovs-ofctl])
 
 AT_CHECK([cat ofctl_monitor.log | STRIP_MONITOR_CSUM], [0], [dnl
 icmp,vlan_tci=0x0000,dl_src=ae:c6:7e:54:8d:4d,dl_dst=50:54:00:00:00:0b,nw_src=10.1.1.2,nw_dst=192.168.4.4,nw_tos=0,nw_ecn=0,nw_ttl=64,icmp_type=0,icmp_code=0 icmp_csum: <skip>
@@ -753,8 +1065,141 @@ dnl   br0: overlay bridge
 dnl   ns1: connect to br0, with IP:10.1.1.2
 dnl   br-underlay: with IP: 172.31.1.100
 dnl   ns0: connect to br-underlay, with IP: 10.1.1.1
+AT_SETUP([datapath - truncate and output to gre tunnel by simulated packets])
+OVS_CHECK_KERNEL(3, 10, 4, 18)
+AT_SKIP_IF([test $HAVE_NC = no])
+OVS_TRAFFIC_VSWITCHD_START()
+
+ADD_BR([br-underlay], [set bridge br-underlay other-config:hwaddr=\"02:90:8c:a8:a1:49\"])
+ADD_NAMESPACES(at_ns0)
+ADD_NAMESPACES(at_ns1)
+AT_CHECK([ovs-ofctl add-flow br0 "actions=normal"])
+AT_CHECK([ovs-ofctl add-flow br-underlay "actions=normal"])
+
+dnl Set up underlay link from host into the namespace using veth pair.
+ADD_VETH(p0, at_ns0, br-underlay, "172.31.1.1/24", fa:ad:fa:25:05:60)
+AT_CHECK([ip addr add dev br-underlay "172.31.1.100/24"])
+AT_CHECK([ip link set dev br-underlay up])
+
+dnl Set up tunnel endpoints on OVS outside the namespace and with a native
+dnl linux device inside the namespace.
+ADD_OVS_TUNNEL([gre], [br0], [at_gre0], [172.31.1.1], [10.1.1.100/24])
+
+dnl The below native tunnel isn't actually added. We simulate it to send
+dnl and receive packets.
+dnl ADD_NATIVE_TUNNEL([gretap], [ns_gre0], [at_ns0], [172.31.1.100], [10.1.1.1/24],
+dnl                   [], [address e6:66:c1:11:11:11])
+dnl AT_CHECK([ovs-vsctl -- set interface at_gre0 ofport_request=1])
+dnl NS_CHECK_EXEC([at_ns0], [arp -s 10.1.1.2 e6:66:c1:22:22:22])
+
+dnl Set up (p1 and ovs-p1) at br0
+ADD_VETH(p1, at_ns1, br0, '10.1.1.2/24')
+AT_CHECK([ovs-vsctl -- set interface ovs-p1 ofport_request=2])
+NS_CHECK_EXEC([at_ns1], [ip link set dev p1 address e6:66:c1:22:22:22])
+NS_CHECK_EXEC([at_ns1], [arp -s 10.1.1.1 e6:66:c1:11:11:11])
+
+dnl Set up (p2 and ovs-p2) as loopback for verifying packet size
+AT_CHECK([ip link add p2 type veth peer name ovs-p2])
+on_exit 'ip link del ovs-p2'
+AT_CHECK([ip link set dev ovs-p2 up])
+AT_CHECK([ip link set dev p2 up])
+AT_CHECK([ovs-vsctl add-port br0 ovs-p2 -- set interface ovs-p2 ofport_request=3])
+AT_CHECK([ovs-vsctl add-port br0 p2 -- set interface p2 ofport_request=4])
+
+dnl use this file as payload file for ncat
+AT_CHECK([dd if=/dev/urandom of=payload200.bin bs=200 count=1 2> /dev/null])
+on_exit 'rm -f payload200.bin'
+
+AT_CHECK([ovs-ofctl del-flows br0])
+AT_DATA([flows.txt], [dnl
+priority=99,in_port=1,actions=output(port=2,max_len=100),output(port=3,max_len=100)
+priority=99,in_port=2,udp,actions=output(port=1,max_len=100)
+priority=1,in_port=4,ip,actions=drop
+priority=1,actions=drop
+])
+AT_CHECK([ovs-ofctl add-flows br0 flows.txt])
+
+AT_CHECK([ovs-ofctl del-flows br-underlay])
+AT_DATA([flows-underlay.txt], [dnl
+priority=99,dl_type=0x0800,nw_proto=47,in_port=1,actions=LOCAL
+priority=99,dl_type=0x0800,nw_proto=47,in_port=LOCAL,ip_dst=172.31.1.1/24,actions=1
+priority=1,actions=drop
+])
+
+AT_CHECK([ovs-ofctl add-flows br-underlay flows-underlay.txt])
+
+dnl check tunnel push path, from at_ns1 to at_ns0
+NS_CHECK_EXEC([at_ns1], [nc $NC_EOF_OPT -u 10.1.1.1 1234 < payload200.bin])
+AT_CHECK([ovs-appctl revalidator/purge], [0])
+
+dnl Before truncation = ETH(14) + IP(20) + UDP(8) + 200 = 242B
+AT_CHECK([ovs-ofctl dump-flows br0 | grep "in_port=2" | sed -n 's/.*\(n\_bytes=[[0-9]]*\).*/\1/p'], [0], [dnl
+n_bytes=242
+])
+dnl After truncation = outer ETH(14) + outer IP(20) + GRE(4) + 100 = 138B
+AT_CHECK([ovs-ofctl dump-flows br-underlay | grep "in_port=LOCAL" | sed -n 's/.*\(n\_bytes=[[0-9]]*\).*/\1/p'], [0], [dnl
+n_bytes=138
+])
+
+dnl check tunnel pop path, from at_ns0 to at_ns1
+dnl This 200-byte packet is simulated on behalf of ns_gre0
+ovs-ofctl -O OpenFlow13 packet-out br-underlay "in_port=1 packet=02908ca8a149faadfa25056008004500010a9e9d4000402f4084ac1f0101ac1f016400006558e666c1222222e666c11111110800450000e46f8e40004011b4760a0101010a010102e026162e00d016e6a366ebf904c74132c6fed42a9e9e46240b4d9fd13c9b47d9704a388e70a5e77db16934a6188dc01d86aa20007ace2cf9cdb111f208474b88ffc851c871f0e3fb4fff138c1d288d437efff487e2b86a9c99fbf4229a6485e133bcf3e16f6e345207fda0932d9eeb602740456fd077b4847d25481337bd716155cc245be129ccc11bf82b834767b3760b52fe913c0e24f31c0e1b27f88acf7bba6b985fb64ee2cd6fc6bba1a9c1f021e253e1728b046fd4d023307e3296361a37ea2617ebcb2537e0284a81050dd0ee actions=LOCAL"
+
+dnl After truncation = 100 byte at loopback device p2(4)
+AT_CHECK([ovs-appctl revalidator/purge], [0])
+AT_CHECK([ovs-ofctl dump-flows br0 | grep "in_port=4" | ofctl_strip], [0], [dnl
+ n_packets=1, n_bytes=100, priority=1,ip,in_port=4 actions=drop
+])
+
+dnl SLOW_ACTION: disable datapath truncate support
+dnl Repeat the test above, but exercise the SLOW_ACTION code path
+AT_CHECK([ovs-appctl dpif/set-dp-features br0 trunc false], [0])
+
+dnl SLOW_ACTION test1: check datapatch actions
+AT_CHECK([ovs-ofctl del-flows br0])
+AT_CHECK([ovs-ofctl add-flows br0 flows.txt])
+
+dnl SLOW_ACTION test2: check actual packet truncate
+AT_CHECK([ovs-ofctl del-flows br0])
+AT_CHECK([ovs-ofctl add-flows br0 flows.txt])
+AT_CHECK([ovs-ofctl del-flows br-underlay])
+AT_CHECK([ovs-ofctl add-flows br-underlay flows-underlay.txt])
+
+dnl check tunnel push path, from at_ns1 to at_ns0
+NS_CHECK_EXEC([at_ns1], [nc $NC_EOF_OPT -u 10.1.1.1 1234 < payload200.bin])
+AT_CHECK([ovs-appctl revalidator/purge], [0])
+
+dnl Before truncation = ETH(14) + IP(20) + UDP(8) + 200 = 242B
+AT_CHECK([ovs-ofctl dump-flows br0 | grep "in_port=2" | sed -n 's/.*\(n\_bytes=[[0-9]]*\).*/\1/p'], [0], [dnl
+n_bytes=242
+])
+dnl After truncation = outer ETH(14) + outer IP(20) + GRE(4) + 100 = 138B
+AT_CHECK([ovs-ofctl dump-flows br-underlay | grep "in_port=LOCAL" | sed -n 's/.*\(n\_bytes=[[0-9]]*\).*/\1/p'], [0], [dnl
+n_bytes=138
+])
+
+dnl check tunnel pop path, from at_ns0 to at_ns1
+dnl This 200-byte packet is simulated on behalf of ns_gre0
+ovs-ofctl -O OpenFlow13 packet-out br-underlay "in_port=1 packet=02908ca8a149faadfa25056008004500010a9e9d4000402f4084ac1f0101ac1f016400006558e666c1222222e666c11111110800450000e46f8e40004011b4760a0101010a010102e026162e00d016e6a366ebf904c74132c6fed42a9e9e46240b4d9fd13c9b47d9704a388e70a5e77db16934a6188dc01d86aa20007ace2cf9cdb111f208474b88ffc851c871f0e3fb4fff138c1d288d437efff487e2b86a9c99fbf4229a6485e133bcf3e16f6e345207fda0932d9eeb602740456fd077b4847d25481337bd716155cc245be129ccc11bf82b834767b3760b52fe913c0e24f31c0e1b27f88acf7bba6b985fb64ee2cd6fc6bba1a9c1f021e253e1728b046fd4d023307e3296361a37ea2617ebcb2537e0284a81050dd0ee actions=LOCAL"
+
+dnl After truncation = 100 byte at loopback device p2(4)
+AT_CHECK([ovs-appctl revalidator/purge], [0])
+AT_CHECK([ovs-ofctl dump-flows br0 | grep "in_port=4" | ofctl_strip], [0], [dnl
+ n_packets=1, n_bytes=100, priority=1,ip,in_port=4 actions=drop
+])
+
+OVS_TRAFFIC_VSWITCHD_STOP
+AT_CLEANUP
+
+dnl Create 2 bridges and 2 namespaces to test truncate over
+dnl GRE tunnel:
+dnl   br0: overlay bridge
+dnl   ns1: connect to br0, with IP:10.1.1.2
+dnl   br-underlay: with IP: 172.31.1.100
+dnl   ns0: connect to br-underlay, with IP: 10.1.1.1
 AT_SETUP([datapath - truncate and output to gre tunnel])
 AT_SKIP_IF([test $HAVE_NC = no])
+OVS_CHECK_KERNEL_EXCL(3, 10, 4, 15)
 OVS_CHECK_GRE()
 OVS_TRAFFIC_VSWITCHD_START()
 
@@ -907,6 +1352,8 @@ AT_CHECK([ovs-ofctl -O OpenFlow13 packet-out br0 1 ct\(commit\),controller '5054
 dnl Now try a reply from port 2.
 AT_CHECK([ovs-ofctl -O OpenFlow13 packet-out br0 2 ct\(table=0\) '50540000000a50540000000908004500001c000000000011a4cd0a0101020a0101010002000100080000'])
 
+OVS_APP_EXIT_AND_WAIT([ovs-ofctl])
+
 dnl Check this output. We only see the latter two packets, not the first.
 AT_CHECK([cat ofctl_monitor.log], [0], [dnl
 NXT_PACKET_IN2 (xid=0x0): total_len=42 in_port=1 (via action) data_len=42 (unbuffered)
@@ -952,6 +1399,8 @@ dnl Now try a reply from port 2.
 AT_CHECK([ovs-ofctl -O OpenFlow13 packet-out br0 "in_port=2 packet=50540000000a50540000000908004500001c000000000011a4cd0a0101020a0101010002000100080000 actions=resubmit(,0)"])
 
 AT_CHECK([ovs-appctl revalidator/purge], [0])
+
+OVS_APP_EXIT_AND_WAIT([ovs-ofctl])
 
 dnl Check this output. We only see the latter two packets, not the first.
 AT_CHECK([cat ofctl_monitor.log], [0], [dnl
@@ -1040,7 +1489,7 @@ AT_CHECK([ovs-appctl dpctl/flush-conntrack zone=5 $ICMP_TUPLE])
 AT_CHECK([ovs-appctl dpctl/dump-conntrack | grep "orig=.src=10\.1\.1\.2,"], [1], [dnl
 ])
 
-OVS_TRAFFIC_VSWITCHD_STOP(["/could not create datapath/d"])
+OVS_TRAFFIC_VSWITCHD_STOP
 AT_CLEANUP
 
 AT_SETUP([conntrack - IPv4 ping])
@@ -1124,17 +1573,17 @@ ovs-appctl: ovs-vswitchd: server returned an error
 ])
 
 AT_CHECK([ovs-appctl dpctl/ct-set-maxconns one-bad-dp 10], [2], [], [dnl
-ovs-vswitchd: opening datapath (Address family not supported by protocol)
+ovs-vswitchd: datapath not found (Invalid argument)
 ovs-appctl: ovs-vswitchd: server returned an error
 ])
 
 AT_CHECK([ovs-appctl dpctl/ct-get-maxconns one-bad-dp], [2], [], [dnl
-ovs-vswitchd: opening datapath (Address family not supported by protocol)
+ovs-vswitchd: datapath not found (Invalid argument)
 ovs-appctl: ovs-vswitchd: server returned an error
 ])
 
 AT_CHECK([ovs-appctl dpctl/ct-get-nconns one-bad-dp], [2], [], [dnl
-ovs-vswitchd: opening datapath (Address family not supported by protocol)
+ovs-vswitchd: datapath not found (Invalid argument)
 ovs-appctl: ovs-vswitchd: server returned an error
 ])
 
@@ -1164,7 +1613,7 @@ AT_CHECK([ovs-appctl dpctl/ct-get-maxconns], [], [dnl
 10
 ])
 
-OVS_TRAFFIC_VSWITCHD_STOP(["/could not create datapath one-bad-dp of unknown type system/d"])
+OVS_TRAFFIC_VSWITCHD_STOP
 AT_CLEANUP
 
 AT_SETUP([conntrack - IPv6 ping])
@@ -1883,8 +2332,10 @@ AT_CHECK([ovs-ofctl -O OpenFlow13 packet-out br0 1 resubmit\(,0\) 'c6f94ecb72dbe
 dnl 3. Send an ICMP port unreach reply from a path midpoint for port 5555, related to the first packet
 AT_CHECK([ovs-ofctl -O OpenFlow13 packet-out br0 2 resubmit\(,0\) 'e64c473528c9c6f94ecb72db080045c0003d2e8700004001f354ac100003ac1000010303553f0000000045000021317040004011b138ac100001ac100002a28e15b3000d20966369616f0a'])
 
+OVS_APP_EXIT_AND_WAIT([ovs-ofctl])
+
 dnl Check this output. We only see the latter two packets, not the first.
-AT_CHECK([cat ofctl_monitor.log], [0], [dnl
+AT_CHECK([cat ofctl_monitor.log | grep -v ff02 | grep -v fe80 | grep -v no_match], [0], [dnl
 NXT_PACKET_IN2 (xid=0x0): table_id=1 cookie=0x0 total_len=75 ct_state=inv|trk,ip,in_port=2 (via action) data_len=75 (unbuffered)
 icmp,vlan_tci=0x0000,dl_src=c6:f5:4e:cb:72:db,dl_dst=f6:4c:47:35:28:c9,nw_src=172.16.0.4,nw_dst=172.16.0.3,nw_tos=192,nw_ecn=0,nw_ttl=64,icmp_type=3,icmp_code=3 icmp_csum:da49
 NXT_PACKET_IN2 (xid=0x0): table_id=1 cookie=0x0 total_len=47 ct_state=new|trk,ct_nw_src=172.16.0.1,ct_nw_dst=172.16.0.2,ct_nw_proto=17,ct_tp_src=41614,ct_tp_dst=5555,ip,in_port=1 (via action) data_len=47 (unbuffered)
@@ -1905,7 +2356,6 @@ AT_CLEANUP
 
 AT_SETUP([conntrack - IPv4 fragmentation])
 CHECK_CONNTRACK()
-CHECK_CONNTRACK_FRAG()
 OVS_TRAFFIC_VSWITCHD_START()
 
 ADD_NAMESPACES(at_ns0, at_ns1)
@@ -1924,6 +2374,9 @@ priority=100,in_port=2,ct_state=+trk+est-new,icmp,action=1
 
 AT_CHECK([ovs-ofctl --bundle add-flows br0 flows.txt])
 
+dnl Modify userspace conntrack fragmentation handling.
+DPCTL_MODIFY_FRAGMENTATION()
+
 dnl Ipv4 fragmentation connectivity check.
 NS_CHECK_EXEC([at_ns0], [ping -s 1600 -q -c 3 -i 0.3 -w 2 10.1.1.2 | FORMAT_PING], [0], [dnl
 3 packets transmitted, 3 received, 0% packet loss, time 0ms
@@ -1934,12 +2387,14 @@ NS_CHECK_EXEC([at_ns0], [ping -s 3200 -q -c 3 -i 0.3 -w 2 10.1.1.2 | FORMAT_PING
 3 packets transmitted, 3 received, 0% packet loss, time 0ms
 ])
 
+dnl Check userspace conntrack fragmentation counters.
+DPCTL_CHECK_FRAGMENTATION_PASS()
+
 OVS_TRAFFIC_VSWITCHD_STOP
 AT_CLEANUP
 
 AT_SETUP([conntrack - IPv4 fragmentation expiry])
 CHECK_CONNTRACK()
-CHECK_CONNTRACK_FRAG()
 OVS_TRAFFIC_VSWITCHD_START()
 
 ADD_NAMESPACES(at_ns0, at_ns1)
@@ -1960,17 +2415,22 @@ priority=100,in_port=2,ct_state=+trk+est-new,icmp,action=1
 
 AT_CHECK([ovs-ofctl --bundle add-flows br0 flows.txt])
 
+dnl Modify userspace conntrack fragmentation handling.
+DPCTL_MODIFY_FRAGMENTATION()
+
 dnl Ipv4 fragmentation connectivity check.
 NS_CHECK_EXEC([at_ns0], [ping -s 1600 -q -c 1 -i 0.3 -w 2 10.1.1.2 | FORMAT_PING], [0], [dnl
 7 packets transmitted, 0 received, 100% packet loss, time 0ms
 ])
+
+dnl Check userspace conntrack fragmentation counters.
+DPCTL_CHECK_FRAGMENTATION_FAIL()
 
 OVS_TRAFFIC_VSWITCHD_STOP
 AT_CLEANUP
 
 AT_SETUP([conntrack - IPv4 fragmentation + vlan])
 CHECK_CONNTRACK()
-CHECK_CONNTRACK_FRAG()
 OVS_TRAFFIC_VSWITCHD_START()
 
 ADD_NAMESPACES(at_ns0, at_ns1)
@@ -1991,6 +2451,9 @@ priority=100,in_port=2,ct_state=+trk+est-new,icmp,action=1
 
 AT_CHECK([ovs-ofctl --bundle add-flows br0 flows.txt])
 
+dnl Modify userspace conntrack fragmentation handling.
+DPCTL_MODIFY_FRAGMENTATION()
+
 dnl Ipv4 fragmentation connectivity check.
 NS_CHECK_EXEC([at_ns0], [ping -s 1600 -q -c 3 -i 0.3 -w 2 10.2.2.2 | FORMAT_PING], [0], [dnl
 3 packets transmitted, 3 received, 0% packet loss, time 0ms
@@ -2001,12 +2464,14 @@ NS_CHECK_EXEC([at_ns0], [ping -s 3200 -q -c 3 -i 0.3 -w 2 10.2.2.2 | FORMAT_PING
 3 packets transmitted, 3 received, 0% packet loss, time 0ms
 ])
 
+dnl Check userspace conntrack fragmentation counters.
+DPCTL_CHECK_FRAGMENTATION_PASS()
+
 OVS_TRAFFIC_VSWITCHD_STOP
 AT_CLEANUP
 
 AT_SETUP([conntrack - IPv4 fragmentation + cvlan])
 CHECK_CONNTRACK()
-CHECK_CONNTRACK_FRAG()
 OVS_TRAFFIC_VSWITCHD_START([set Open_vSwitch . other_config:vlan-limit=0])
 OVS_CHECK_8021AD()
 
@@ -2057,9 +2522,128 @@ NS_CHECK_EXEC([at_ns0], [ping -s 3200 -q -c 3 -i 0.3 -w 2 10.255.2.2 | FORMAT_PI
 OVS_TRAFFIC_VSWITCHD_STOP
 AT_CLEANUP
 
+AT_SETUP([conntrack - IPv4 fragmentation incomplete reassembled packet])
+CHECK_CONNTRACK()
+OVS_TRAFFIC_VSWITCHD_START()
+DPCTL_SET_MIN_FRAG_SIZE()
+
+
+ADD_NAMESPACES(at_ns0, at_ns1)
+
+ADD_VETH(p0, at_ns0, br0, "10.1.1.1/24")
+ADD_VETH(p1, at_ns1, br0, "10.1.1.2/24")
+
+AT_DATA([bundle.txt], [dnl
+packet-out in_port=1, packet=50540000000a5054000000090800450001a400012000001183440a0101010a01010200010002000800000304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809,  actions=ct(commit)
+])
+
+AT_CHECK([ovs-ofctl bundle br0 bundle.txt])
+
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(10.1.1.2)], [0], [dnl
+])
+
+OVS_TRAFFIC_VSWITCHD_STOP
+AT_CLEANUP
+
+dnl Uses same first fragment as above 'incomplete reassembled packet' test.
+AT_SETUP([conntrack - IPv4 fragmentation with fragments specified])
+CHECK_CONNTRACK()
+OVS_TRAFFIC_VSWITCHD_START()
+DPCTL_SET_MIN_FRAG_SIZE()
+
+ADD_NAMESPACES(at_ns0, at_ns1)
+
+ADD_VETH(p0, at_ns0, br0, "10.1.1.1/24")
+ADD_VETH(p1, at_ns1, br0, "10.1.1.2/24")
+
+AT_DATA([bundle.txt], [dnl
+packet-out in_port=1, packet=50540000000a5054000000090800450001a400012000001183440a0101010a01010200010002000800000304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809,  actions=ct(commit)
+packet-out in_port=1, packet=50540000000a505400000009080045000030000100320011a4860a0101010a01010200010002000800000010203040506070809000010203040506070809, actions=ct(commit)
+])
+
+AT_CHECK([ovs-ofctl bundle br0 bundle.txt])
+
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(10.1.1.2)], [0], [dnl
+udp,orig=(src=10.1.1.1,dst=10.1.1.2,sport=<cleared>,dport=<cleared>),reply=(src=10.1.1.2,dst=10.1.1.1,sport=<cleared>,dport=<cleared>)
+])
+
+OVS_TRAFFIC_VSWITCHD_STOP
+AT_CLEANUP
+
+AT_SETUP([conntrack - IPv4 fragmentation out of order])
+CHECK_CONNTRACK()
+OVS_TRAFFIC_VSWITCHD_START()
+DPCTL_SET_MIN_FRAG_SIZE()
+
+ADD_NAMESPACES(at_ns0, at_ns1)
+
+ADD_VETH(p0, at_ns0, br0, "10.1.1.1/24")
+ADD_VETH(p1, at_ns1, br0, "10.1.1.2/24")
+
+AT_DATA([bundle.txt], [dnl
+packet-out in_port=1, packet=50540000000a505400000009080045000030000100320011a4860a0101010a01010200010002000800000010203040506070809000010203040506070809, actions=ct(commit)
+packet-out in_port=1, packet=50540000000a5054000000090800450001a400012000001183440a0101010a01010200010002000800000304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809,  actions=ct(commit)
+])
+
+AT_CHECK([ovs-ofctl bundle br0 bundle.txt])
+
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(10.1.1.2)], [0], [dnl
+udp,orig=(src=10.1.1.1,dst=10.1.1.2,sport=<cleared>,dport=<cleared>),reply=(src=10.1.1.2,dst=10.1.1.1,sport=<cleared>,dport=<cleared>)
+])
+
+OVS_TRAFFIC_VSWITCHD_STOP
+AT_CLEANUP
+
+AT_SETUP([conntrack - IPv4 fragmentation overlapping fragments by 1 octet])
+CHECK_CONNTRACK()
+CHECK_CONNTRACK_FRAG_OVERLAP()
+OVS_TRAFFIC_VSWITCHD_START()
+DPCTL_SET_MIN_FRAG_SIZE()
+
+ADD_NAMESPACES(at_ns0, at_ns1)
+
+ADD_VETH(p0, at_ns0, br0, "10.1.1.1/24")
+ADD_VETH(p1, at_ns1, br0, "10.1.1.2/24")
+
+AT_DATA([bundle.txt], [dnl
+packet-out in_port=1, packet=50540000000a5054000000090800450001a400012000001183440a0101010a01010200010002000800000304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809,  actions=ct(commit)
+packet-out in_port=1, packet=50540000000a505400000009080045000030000100310011a4870a0101010a01010200010002000800000010203040506070809000010203040506070809, actions=ct(commit)
+])
+
+AT_CHECK([ovs-ofctl bundle br0 bundle.txt])
+# There is one byte of overlap, hence the no packet gets thru. conntrack.
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(10.1.1.2)], [0], [dnl
+])
+
+OVS_TRAFFIC_VSWITCHD_STOP
+AT_CLEANUP
+
+AT_SETUP([conntrack - IPv4 fragmentation overlapping fragments by 1 octet out of order])
+CHECK_CONNTRACK()
+CHECK_CONNTRACK_FRAG_OVERLAP()
+OVS_TRAFFIC_VSWITCHD_START()
+DPCTL_SET_MIN_FRAG_SIZE()
+
+ADD_NAMESPACES(at_ns0, at_ns1)
+
+ADD_VETH(p0, at_ns0, br0, "10.1.1.1/24")
+ADD_VETH(p1, at_ns1, br0, "10.1.1.2/24")
+
+AT_DATA([bundle.txt], [dnl
+packet-out in_port=1, packet=50540000000a505400000009080045000030000100310011a4870a0101010a01010200010002000800000010203040506070809000010203040506070809, actions=ct(commit)
+packet-out in_port=1, packet=50540000000a5054000000090800450001a400012000001183440a0101010a01010200010002000800000304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809,  actions=ct(commit)
+])
+
+AT_CHECK([ovs-ofctl bundle br0 bundle.txt])
+# There is one byte of overlap, hence the no packet gets thru. conntrack.
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(10.1.1.2)], [0], [dnl
+])
+
+OVS_TRAFFIC_VSWITCHD_STOP
+AT_CLEANUP
+
 AT_SETUP([conntrack - IPv6 fragmentation])
 CHECK_CONNTRACK()
-CHECK_CONNTRACK_FRAG()
 OVS_TRAFFIC_VSWITCHD_START()
 
 ADD_NAMESPACES(at_ns0, at_ns1)
@@ -2099,7 +2683,6 @@ AT_CLEANUP
 
 AT_SETUP([conntrack - IPv6 fragmentation expiry])
 CHECK_CONNTRACK()
-CHECK_CONNTRACK_FRAG()
 OVS_TRAFFIC_VSWITCHD_START()
 
 ADD_NAMESPACES(at_ns0, at_ns1)
@@ -2140,7 +2723,6 @@ AT_CLEANUP
 
 AT_SETUP([conntrack - IPv6 fragmentation + vlan])
 CHECK_CONNTRACK()
-CHECK_CONNTRACK_FRAG()
 OVS_TRAFFIC_VSWITCHD_START()
 
 ADD_NAMESPACES(at_ns0, at_ns1)
@@ -2183,7 +2765,6 @@ AT_CLEANUP
 
 AT_SETUP([conntrack - IPv6 fragmentation + cvlan])
 CHECK_CONNTRACK()
-CHECK_CONNTRACK_FRAG()
 OVS_TRAFFIC_VSWITCHD_START([set Open_vSwitch . other_config:vlan-limit=0])
 OVS_CHECK_8021AD()
 
@@ -2235,10 +2816,180 @@ NS_CHECK_EXEC([at_ns0], [ping6 -s 3200 -q -c 3 -i 0.3 -w 2 fc00:ffff::4 | FORMAT
 OVS_TRAFFIC_VSWITCHD_STOP
 AT_CLEANUP
 
+AT_SETUP([conntrack - IPv6 fragmentation incomplete reassembled packet])
+CHECK_CONNTRACK()
+OVS_TRAFFIC_VSWITCHD_START()
+DPCTL_SET_MIN_FRAG_SIZE()
+
+ADD_NAMESPACES(at_ns0, at_ns1)
+
+ADD_VETH(p0, at_ns0, br0, "fc00::1/96")
+ADD_VETH(p1, at_ns1, br0, "fc00::2/96")
+
+AT_DATA([bundle.txt], [dnl
+packet-out in_port=1, packet=50540000000a50540000000986dd6000000001a02cfffc000000000000000000000000000001fc0000000000000000000000000000021100000100000001000100020008f62900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809,  actions=ct(commit)
+])
+
+AT_CHECK([ovs-ofctl bundle br0 bundle.txt])
+
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(fc00::2)], [0], [dnl
+])
+
+OVS_TRAFFIC_VSWITCHD_STOP
+AT_CLEANUP
+
+AT_SETUP([conntrack - IPv6 fragmentation with fragments specified])
+CHECK_CONNTRACK()
+OVS_TRAFFIC_VSWITCHD_START()
+DPCTL_SET_MIN_FRAG_SIZE()
+
+ADD_NAMESPACES(at_ns0, at_ns1)
+
+ADD_VETH(p0, at_ns0, br0, "fc00::1/96")
+ADD_VETH(p1, at_ns1, br0, "fc00::2/96")
+
+AT_DATA([bundle.txt], [dnl
+packet-out in_port=1, packet=50540000000a50540000000986dd6000000001a02cfffc000000000000000000000000000001fc0000000000000000000000000000021100000100000001000100020008ba0200010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809,  actions=ct(commit)
+packet-out in_port=1, packet=50540000000a50540000000986dd6000000000242cfffc000000000000000000000000000001fc000000000000000000000000000002110001980000000100010002000800000001020304050607080900010203040506070809, actions=ct(commit)
+])
+
+AT_CHECK([ovs-ofctl bundle br0 bundle.txt])
+
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(fc00::2)], [0], [dnl
+udp,orig=(src=fc00::1,dst=fc00::2,sport=<cleared>,dport=<cleared>),reply=(src=fc00::2,dst=fc00::1,sport=<cleared>,dport=<cleared>)
+])
+
+OVS_TRAFFIC_VSWITCHD_STOP
+AT_CLEANUP
+
+AT_SETUP([conntrack - IPv6 fragmentation out of order])
+CHECK_CONNTRACK()
+OVS_TRAFFIC_VSWITCHD_START()
+DPCTL_SET_MIN_FRAG_SIZE()
+
+ADD_NAMESPACES(at_ns0, at_ns1)
+
+ADD_VETH(p0, at_ns0, br0, "fc00::1/96")
+ADD_VETH(p1, at_ns1, br0, "fc00::2/96")
+
+AT_DATA([bundle.txt], [dnl
+packet-out in_port=1, packet=50540000000a50540000000986dd6000000000242cfffc000000000000000000000000000001fc000000000000000000000000000002110001980000000100010002000800000001020304050607080900010203040506070809, actions=ct(commit)
+packet-out in_port=1, packet=50540000000a50540000000986dd6000000001a02cfffc000000000000000000000000000001fc0000000000000000000000000000021100000100000001000100020008ba0200010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809,  actions=ct(commit)
+])
+
+AT_CHECK([ovs-ofctl bundle br0 bundle.txt])
+
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(fc00::2)], [0], [dnl
+udp,orig=(src=fc00::1,dst=fc00::2,sport=<cleared>,dport=<cleared>),reply=(src=fc00::2,dst=fc00::1,sport=<cleared>,dport=<cleared>)
+])
+
+OVS_TRAFFIC_VSWITCHD_STOP
+AT_CLEANUP
+
+AT_SETUP([conntrack - IPv6 fragmentation, multiple extension headers])
+CHECK_CONNTRACK()
+OVS_TRAFFIC_VSWITCHD_START()
+DPCTL_SET_MIN_FRAG_SIZE()
+
+ADD_NAMESPACES(at_ns0, at_ns1)
+
+ADD_VETH(p0, at_ns0, br0, "fc00::1/96")
+ADD_VETH(p1, at_ns1, br0, "fc00::2/96")
+
+# Add different extension headers
+AT_DATA([bundle.txt], [dnl
+packet-out in_port=1, packet=50540000000a50540000000986dd60000000019800fffc000000000000000000000000000001fc0000000000000000000000000000022c000000000000001100000100000001000100020008e04000010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607,  actions=ct(commit)
+packet-out in_port=1, packet=50540000000a50540000000986dd60000000002c00fffc000000000000000000000000000001fc0000000000000000000000000000022c00000000000000110001880000000100010002000800000001020304050607080900010203040506070809, actions=ct(commit)
+])
+
+AT_CHECK([ovs-ofctl bundle br0 bundle.txt])
+
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(fc00::2)], [0], [dnl
+udp,orig=(src=fc00::1,dst=fc00::2,sport=<cleared>,dport=<cleared>),reply=(src=fc00::2,dst=fc00::1,sport=<cleared>,dport=<cleared>)
+])
+
+OVS_TRAFFIC_VSWITCHD_STOP
+AT_CLEANUP
+
+AT_SETUP([conntrack - IPv6 fragmentation, multiple extension headers + out of order])
+CHECK_CONNTRACK()
+OVS_TRAFFIC_VSWITCHD_START()
+DPCTL_SET_MIN_FRAG_SIZE()
+
+ADD_NAMESPACES(at_ns0, at_ns1)
+
+ADD_VETH(p0, at_ns0, br0, "fc00::1/96")
+ADD_VETH(p1, at_ns1, br0, "fc00::2/96")
+
+# Add different extension headers
+AT_DATA([bundle.txt], [dnl
+packet-out in_port=1, packet=50540000000a50540000000986dd60000000002c00fffc000000000000000000000000000001fc0000000000000000000000000000022c00000000000000110001880000000100010002000800000001020304050607080900010203040506070809, actions=ct(commit)
+packet-out in_port=1, packet=50540000000a50540000000986dd60000000019800fffc000000000000000000000000000001fc0000000000000000000000000000022c000000000000001100000100000001000100020008e04000010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607,  actions=ct(commit)
+])
+
+AT_CHECK([ovs-ofctl bundle br0 bundle.txt])
+
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(fc00::2)], [0], [dnl
+udp,orig=(src=fc00::1,dst=fc00::2,sport=<cleared>,dport=<cleared>),reply=(src=fc00::2,dst=fc00::1,sport=<cleared>,dport=<cleared>)
+])
+
+OVS_TRAFFIC_VSWITCHD_STOP
+AT_CLEANUP
+
+AT_SETUP([conntrack - IPv6 fragmentation, multiple extension headers 2])
+CHECK_CONNTRACK()
+OVS_TRAFFIC_VSWITCHD_START()
+DPCTL_SET_MIN_FRAG_SIZE()
+
+ADD_NAMESPACES(at_ns0, at_ns1)
+
+ADD_VETH(p0, at_ns0, br0, "fc00::1/96")
+ADD_VETH(p1, at_ns1, br0, "fc00::2/96")
+
+# Add different extension headers
+AT_DATA([bundle.txt], [dnl
+packet-out in_port=1, packet=50540000000a50540000000986dd60000000019800fffc000000000000000000000000000001fc0000000000000000000000000000022c000000050200001100000100000001000100020008e04000010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607,  actions=ct(commit)
+packet-out in_port=1, packet=50540000000a50540000000986dd60000000002c00fffc000000000000000000000000000001fc0000000000000000000000000000022c00000005020000110001880000000100010002000800000001020304050607080900010203040506070809, actions=ct(commit)
+])
+
+AT_CHECK([ovs-ofctl bundle br0 bundle.txt])
+
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(fc00::2)], [0], [dnl
+udp,orig=(src=fc00::1,dst=fc00::2,sport=<cleared>,dport=<cleared>),reply=(src=fc00::2,dst=fc00::1,sport=<cleared>,dport=<cleared>)
+])
+
+OVS_TRAFFIC_VSWITCHD_STOP
+AT_CLEANUP
+
+AT_SETUP([conntrack - IPv6 fragmentation, multiple extension headers 2 + out of order])
+CHECK_CONNTRACK()
+OVS_TRAFFIC_VSWITCHD_START()
+DPCTL_SET_MIN_FRAG_SIZE()
+
+ADD_NAMESPACES(at_ns0, at_ns1)
+
+ADD_VETH(p0, at_ns0, br0, "fc00::1/96")
+ADD_VETH(p1, at_ns1, br0, "fc00::2/96")
+
+# Add different extension headers
+AT_DATA([bundle.txt], [dnl
+packet-out in_port=1, packet=50540000000a50540000000986dd60000000002c00fffc000000000000000000000000000001fc0000000000000000000000000000022c00000005020000110001880000000100010002000800000001020304050607080900010203040506070809, actions=ct(commit)
+packet-out in_port=1, packet=50540000000a50540000000986dd60000000019800fffc000000000000000000000000000001fc0000000000000000000000000000022c000000050200001100000100000001000100020008e04000010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607080900010203040506070809000102030405060708090001020304050607,  actions=ct(commit)
+])
+
+AT_CHECK([ovs-ofctl bundle br0 bundle.txt])
+
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(fc00::2)], [0], [dnl
+udp,orig=(src=fc00::1,dst=fc00::2,sport=<cleared>,dport=<cleared>),reply=(src=fc00::2,dst=fc00::1,sport=<cleared>,dport=<cleared>)
+])
+
+OVS_TRAFFIC_VSWITCHD_STOP
+AT_CLEANUP
+
 AT_SETUP([conntrack - Fragmentation over vxlan])
 OVS_CHECK_VXLAN()
 CHECK_CONNTRACK()
-CHECK_CONNTRACK_FRAG()
+CHECK_CONNTRACK_LOCAL_STACK()
 
 OVS_TRAFFIC_VSWITCHD_START()
 ADD_BR([br-underlay])
@@ -2290,7 +3041,7 @@ AT_CLEANUP
 AT_SETUP([conntrack - IPv6 Fragmentation over vxlan])
 OVS_CHECK_VXLAN()
 CHECK_CONNTRACK()
-CHECK_CONNTRACK_FRAG()
+CHECK_CONNTRACK_LOCAL_STACK()
 
 OVS_TRAFFIC_VSWITCHD_START()
 ADD_BR([br-underlay])
@@ -2625,6 +3376,95 @@ tcp,orig=(src=10.1.1.1,dst=10.1.1.2,sport=<cleared>,dport=<cleared>),reply=(src=
 ])
 
 OVS_TRAFFIC_VSWITCHD_STOP
+AT_CLEANUP
+
+AT_SETUP([conntrack - limit by zone])
+CHECK_CONNTRACK()
+CHECK_CT_DPIF_PER_ZONE_LIMIT()
+OVS_TRAFFIC_VSWITCHD_START()
+
+ADD_NAMESPACES(at_ns0, at_ns1)
+
+ADD_VETH(p0, at_ns0, br0, "10.1.1.1/24")
+ADD_VETH(p1, at_ns1, br0, "10.1.1.2/24")
+
+AT_DATA([flows.txt], [dnl
+priority=1,action=drop
+priority=10,arp,action=normal
+priority=100,in_port=1,udp,action=ct(commit),2
+priority=100,in_port=2,udp,action=ct(zone=3,commit),1
+])
+
+AT_CHECK([ovs-ofctl --bundle add-flows br0 flows.txt])
+
+AT_CHECK([ovs-appctl dpctl/ct-set-limits default=10 zone=0,limit=5 zone=1,limit=15 zone=2,limit=3 zone=3,limit=3])
+AT_CHECK([ovs-appctl dpctl/ct-del-limits zone=1,2,4])
+AT_CHECK([ovs-appctl dpctl/ct-get-limits zone=0,1,2,3], [],[dnl
+default limit=10
+zone=0,limit=5,count=0
+zone=1,limit=10,count=0
+zone=2,limit=10,count=0
+zone=3,limit=3,count=0
+])
+
+dnl Test UDP from port 1
+AT_CHECK([ovs-ofctl -O OpenFlow13 packet-out br0 "in_port=1 packet=50540000000a50540000000908004500001c000000000011a4cd0a0101010a0101020001000200080000 actions=resubmit(,0)"])
+AT_CHECK([ovs-ofctl -O OpenFlow13 packet-out br0 "in_port=1 packet=50540000000a50540000000908004500001c000000000011a4cd0a0101010a0101020001000300080000 actions=resubmit(,0)"])
+AT_CHECK([ovs-ofctl -O OpenFlow13 packet-out br0 "in_port=1 packet=50540000000a50540000000908004500001c000000000011a4cd0a0101010a0101020001000400080000 actions=resubmit(,0)"])
+AT_CHECK([ovs-ofctl -O OpenFlow13 packet-out br0 "in_port=1 packet=50540000000a50540000000908004500001c000000000011a4cd0a0101010a0101020001000500080000 actions=resubmit(,0)"])
+AT_CHECK([ovs-ofctl -O OpenFlow13 packet-out br0 "in_port=1 packet=50540000000a50540000000908004500001c000000000011a4cd0a0101010a0101020001000600080000 actions=resubmit(,0)"])
+AT_CHECK([ovs-ofctl -O OpenFlow13 packet-out br0 "in_port=1 packet=50540000000a50540000000908004500001c000000000011a4cd0a0101010a0101020001000700080000 actions=resubmit(,0)"])
+AT_CHECK([ovs-ofctl -O OpenFlow13 packet-out br0 "in_port=1 packet=50540000000a50540000000908004500001c000000000011a4cd0a0101010a0101020001000800080000 actions=resubmit(,0)"])
+AT_CHECK([ovs-ofctl -O OpenFlow13 packet-out br0 "in_port=1 packet=50540000000a50540000000908004500001c000000000011a4cd0a0101010a0101020001000900080000 actions=resubmit(,0)"])
+AT_CHECK([ovs-ofctl -O OpenFlow13 packet-out br0 "in_port=1 packet=50540000000a50540000000908004500001c000000000011a4cd0a0101010a0101020001000a00080000 actions=resubmit(,0)"])
+
+AT_CHECK([ovs-appctl dpctl/ct-get-limits zone=0,1,2,3,4,5], [0], [dnl
+default limit=10
+zone=0,limit=5,count=5
+zone=1,limit=10,count=0
+zone=2,limit=10,count=0
+zone=3,limit=3,count=0
+zone=4,limit=10,count=0
+zone=5,limit=10,count=0
+])
+
+dnl Test ct-get-limits for all zoens
+AT_CHECK([ovs-appctl dpctl/ct-get-limits], [0], [dnl
+default limit=10
+zone=0,limit=5,count=5
+zone=3,limit=3,count=0
+])
+
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | grep "orig=.src=10\.1\.1\.1," | sort ], [0], [dnl
+udp,orig=(src=10.1.1.1,dst=10.1.1.2,sport=1,dport=2),reply=(src=10.1.1.2,dst=10.1.1.1,sport=2,dport=1)
+udp,orig=(src=10.1.1.1,dst=10.1.1.2,sport=1,dport=3),reply=(src=10.1.1.2,dst=10.1.1.1,sport=3,dport=1)
+udp,orig=(src=10.1.1.1,dst=10.1.1.2,sport=1,dport=4),reply=(src=10.1.1.2,dst=10.1.1.1,sport=4,dport=1)
+udp,orig=(src=10.1.1.1,dst=10.1.1.2,sport=1,dport=5),reply=(src=10.1.1.2,dst=10.1.1.1,sport=5,dport=1)
+udp,orig=(src=10.1.1.1,dst=10.1.1.2,sport=1,dport=6),reply=(src=10.1.1.2,dst=10.1.1.1,sport=6,dport=1)
+])
+
+dnl Test UDP from port 2
+AT_CHECK([ovs-ofctl -O OpenFlow13 packet-out br0 "in_port=2 packet=50540000000a50540000000908004500001c000000000011a4cd0a0101030a0101040001000200080000 actions=resubmit(,0)"])
+AT_CHECK([ovs-ofctl -O OpenFlow13 packet-out br0 "in_port=2 packet=50540000000a50540000000908004500001c000000000011a4cd0a0101030a0101040001000300080000 actions=resubmit(,0)"])
+AT_CHECK([ovs-ofctl -O OpenFlow13 packet-out br0 "in_port=2 packet=50540000000a50540000000908004500001c000000000011a4cd0a0101030a0101040001000400080000 actions=resubmit(,0)"])
+AT_CHECK([ovs-ofctl -O OpenFlow13 packet-out br0 "in_port=2 packet=50540000000a50540000000908004500001c000000000011a4cd0a0101030a0101040001000500080000 actions=resubmit(,0)"])
+AT_CHECK([ovs-ofctl -O OpenFlow13 packet-out br0 "in_port=2 packet=50540000000a50540000000908004500001c000000000011a4cd0a0101030a0101040001000600080000 actions=resubmit(,0)"])
+
+AT_CHECK([ovs-appctl dpctl/ct-get-limits zone=0,3], [0], [dnl
+default limit=10
+zone=0,limit=5,count=5
+zone=3,limit=3,count=3
+])
+
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | grep "orig=.src=10\.1\.1\.3," | sort ], [0], [dnl
+udp,orig=(src=10.1.1.3,dst=10.1.1.4,sport=1,dport=2),reply=(src=10.1.1.4,dst=10.1.1.3,sport=2,dport=1),zone=3
+udp,orig=(src=10.1.1.3,dst=10.1.1.4,sport=1,dport=3),reply=(src=10.1.1.4,dst=10.1.1.3,sport=3,dport=1),zone=3
+udp,orig=(src=10.1.1.3,dst=10.1.1.4,sport=1,dport=4),reply=(src=10.1.1.4,dst=10.1.1.3,sport=4,dport=1),zone=3
+])
+
+OVS_TRAFFIC_VSWITCHD_STOP(["dnl
+/could not create datapath/d
+/(Cannot allocate memory) on packet/d"])
 AT_CLEANUP
 
 AT_SETUP([FTP - no conntrack])
@@ -3154,6 +3994,56 @@ tcp,orig=(src=10.1.1.1,dst=10.1.1.2,sport=<cleared>,dport=<cleared>),reply=(src=
 OVS_TRAFFIC_VSWITCHD_STOP
 AT_CLEANUP
 
+AT_SETUP([conntrack - SNAT with port range with exhaustion])
+CHECK_CONNTRACK()
+CHECK_CONNTRACK_NAT()
+OVS_TRAFFIC_VSWITCHD_START()
+
+ADD_NAMESPACES(at_ns0, at_ns1)
+
+ADD_VETH(p0, at_ns0, br0, "10.1.1.1/24")
+NS_CHECK_EXEC([at_ns0], [ip link set dev p0 address 80:88:88:88:88:88])
+ADD_VETH(p1, at_ns1, br0, "10.1.1.2/24")
+
+dnl Allow any traffic from ns0->ns1. Only allow nd, return traffic from ns1->ns0.
+AT_DATA([flows.txt], [dnl
+in_port=1,tcp,action=ct(commit,zone=1,nat(src=10.1.1.240:34568,random)),2
+in_port=2,ct_state=-trk,tcp,tp_dst=34567,action=ct(table=0,zone=1,nat)
+in_port=2,ct_state=-trk,tcp,tp_dst=34568,action=ct(table=0,zone=1,nat)
+in_port=2,ct_state=+trk,ct_zone=1,tcp,action=1
+dnl
+dnl ARP
+priority=100 arp arp_op=1 action=move:OXM_OF_ARP_TPA[[]]->NXM_NX_REG2[[]],resubmit(,8),goto_table:10
+priority=10 arp action=normal
+priority=0,action=drop
+dnl
+dnl MAC resolution table for IP in reg2, stores mac in OXM_OF_PKT_REG0
+table=8,reg2=0x0a0101f0/0xfffffff0,action=load:0x808888888888->OXM_OF_PKT_REG0[[]]
+table=8,priority=0,action=load:0->OXM_OF_PKT_REG0[[]]
+dnl ARP responder mac filled in at OXM_OF_PKT_REG0, or 0 for normal action.
+dnl TPA IP in reg2.
+dnl Swaps the fields of the ARP message to turn a query to a response.
+table=10 priority=100 arp xreg0=0 action=normal
+table=10 priority=10,arp,arp_op=1,action=load:2->OXM_OF_ARP_OP[[]],move:OXM_OF_ARP_SHA[[]]->OXM_OF_ARP_THA[[]],move:OXM_OF_PKT_REG0[[0..47]]->OXM_OF_ARP_SHA[[]],move:OXM_OF_ARP_SPA[[]]->OXM_OF_ARP_TPA[[]],move:NXM_NX_REG2[[]]->OXM_OF_ARP_SPA[[]],move:NXM_OF_ETH_SRC[[]]->NXM_OF_ETH_DST[[]],move:OXM_OF_PKT_REG0[[0..47]]->NXM_OF_ETH_SRC[[]],move:NXM_OF_IN_PORT[[]]->NXM_NX_REG3[[0..15]],load:0->NXM_OF_IN_PORT[[]],output:NXM_NX_REG3[[0..15]]
+table=10 priority=0 action=drop
+])
+
+AT_CHECK([ovs-ofctl --bundle add-flows br0 flows.txt])
+
+dnl HTTP requests from p0->p1 should work fine.
+OVS_START_L7([at_ns1], [http])
+NS_CHECK_EXEC([at_ns0], [wget 10.1.1.2 -t 1 -T 1 --retry-connrefused -v -o wget0.log])
+
+NS_CHECK_EXEC([at_ns0], [wget 10.1.1.2 -t 1 -T 1 --retry-connrefused -v -o wget0.log], [4])
+
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(10.1.1.2) | sed -e 's/dst=10.1.1.2[[45]][[0-9]]/dst=10.1.1.2XX/' | uniq], [0], [dnl
+tcp,orig=(src=10.1.1.1,dst=10.1.1.2,sport=<cleared>,dport=<cleared>),reply=(src=10.1.1.2,dst=10.1.1.2XX,sport=<cleared>,dport=<cleared>),zone=1,protoinfo=(state=<cleared>)
+])
+
+OVS_TRAFFIC_VSWITCHD_STOP(["dnl
+/Unable to NAT due to tuple space exhaustion - if DoS attack, use firewalling and\/or zone partitioning./d
+/Dropped .* log messages in last .* seconds \(most recently, .* seconds ago\) due to excessive rate/d"])
+AT_CLEANUP
 
 AT_SETUP([conntrack - more complex SNAT])
 CHECK_CONNTRACK()
@@ -3396,8 +4286,9 @@ dnl
 dnl Checks the implementation of conntrack with FTP ALGs in combination with
 dnl NAT, using the provided flow table.
 m4_define([CHECK_FTP_NAT],
-   [AT_SETUP([conntrack - FTP NAT $1])
+   [AT_SETUP([conntrack - FTP $1])
     AT_SKIP_IF([test $HAVE_FTP = no])
+    AT_SKIP_IF([test $HAVE_LFTP = no])
     CHECK_CONNTRACK()
     CHECK_CONNTRACK_NAT()
     CHECK_CONNTRACK_ALG()
@@ -3418,7 +4309,18 @@ m4_define([CHECK_FTP_NAT],
     OVS_START_L7([at_ns1], [ftp])
 
     dnl FTP requests from p0->p1 should work fine.
-    NS_CHECK_EXEC([at_ns0], [wget ftp://10.1.1.2 -4 --no-passive-ftp -t 3 -T 1 --retry-connrefused -v --server-response --no-remove-listing -o wget0.log -d])
+    AT_DATA([ftp.cmd], [dnl
+set net:max-retries 1
+set net:timeout 1
+set ftp:passive-mode off
+cache off
+connect ftp://anonymous:@10.1.1.2
+ls
+ls
+ls
+ls
+])
+    NS_CHECK_EXEC([at_ns0], [lftp -f ftp.cmd > lftp.log])
 
     dnl Discards CLOSE_WAIT and CLOSING
     AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(10.1.1.2)], [0], [$4])
@@ -3426,7 +4328,7 @@ m4_define([CHECK_FTP_NAT],
     OVS_TRAFFIC_VSWITCHD_STOP
     AT_CLEANUP])
 
-dnl CHECK_FTP_NAT_PRE_RECIRC(TITLE, IP_ADDR, IP_ADDR_AS_HEX)
+dnl CHECK_FTP_SNAT_PRE_RECIRC(TITLE, IP_ADDR, IP_ADDR_AS_HEX)
 dnl
 dnl Checks the implementation of conntrack with FTP ALGs in combination with
 dnl NAT, with flow tables that implement the NATing as part of handling of
@@ -3434,8 +4336,8 @@ dnl initial incoming packets - ie, the first flow is ct(nat,table=foo).
 dnl
 dnl IP_ADDR must specify the NAT address in standard "10.1.1.x" format,
 dnl and IP_ADDR_AS_HEX must specify the same address as hex, eg 0x0a0101xx.
-m4_define([CHECK_FTP_NAT_PRE_RECIRC], [dnl
-   CHECK_FTP_NAT([prerecirc $1], [$2], [dnl
+m4_define([CHECK_FTP_SNAT_PRE_RECIRC], [dnl
+    CHECK_FTP_NAT([SNAT prerecirc $1], [$2], [dnl
 dnl track all IP traffic, de-mangle non-NEW connections
 table=0 in_port=1, ip, action=ct(table=1,nat)
 table=0 in_port=2, ip, action=ct(table=2,nat)
@@ -3489,7 +4391,7 @@ tcp,orig=(src=10.1.1.2,dst=$2,sport=<cleared>,dport=<cleared>),reply=(src=10.1.1
 ])
 
 dnl Check that ct(nat,table=foo) works without TCP sequence adjustment.
-CHECK_FTP_NAT_PRE_RECIRC([], [10.1.1.9], [0x0a010109])
+CHECK_FTP_SNAT_PRE_RECIRC([], [10.1.1.9], [0x0a010109])
 
 dnl Check that ct(nat,table=foo) works with TCP sequence adjustment.
 dnl
@@ -3500,9 +4402,9 @@ dnl of 10.1.1.1 used in the test and 10.1.1.240 here), the FTP NAT ALG must
 dnl resize the packet and adjust TCP sequence numbers. This test is kept
 dnl separate from the above to easier identify issues in this code on different
 dnl kernels.
-CHECK_FTP_NAT_PRE_RECIRC([seqadj], [10.1.1.240], [0x0a0101f0])
+CHECK_FTP_SNAT_PRE_RECIRC([seqadj], [10.1.1.240], [0x0a0101f0])
 
-dnl CHECK_FTP_NAT_POST_RECIRC(TITLE, IP_ADDR, IP_ADDR_AS_HEX)
+dnl CHECK_FTP_SNAT_POST_RECIRC(TITLE, IP_ADDR, IP_ADDR_AS_HEX)
 dnl
 dnl Checks the implementation of conntrack with FTP ALGs in combination with
 dnl NAT, with flow tables that implement the NATing after the first round
@@ -3511,8 +4413,8 @@ dnl flow will implement the NATing with ct(nat..),output:foo.
 dnl
 dnl IP_ADDR must specify the NAT address in standard "10.1.1.x" format,
 dnl and IP_ADDR_AS_HEX must specify the same address as hex, eg 0x0a0101xx.
-m4_define([CHECK_FTP_NAT_POST_RECIRC], [dnl
-    CHECK_FTP_NAT([postrecirc $1], [$2], [dnl
+m4_define([CHECK_FTP_SNAT_POST_RECIRC], [dnl
+    CHECK_FTP_NAT([SNAT postrecirc $1], [$2], [dnl
 dnl track all IP traffic (this includes a helper call to non-NEW packets.)
 table=0 ip, action=ct(table=1)
 dnl
@@ -3555,7 +4457,7 @@ tcp,orig=(src=10.1.1.2,dst=$2,sport=<cleared>,dport=<cleared>),reply=(src=10.1.1
 ])
 
 dnl Check that ct(nat,table=foo) works without TCP sequence adjustment.
-CHECK_FTP_NAT_POST_RECIRC([], [10.1.1.9], [0x0a010109])
+CHECK_FTP_SNAT_POST_RECIRC([], [10.1.1.9], [0x0a010109])
 
 dnl Check that ct(nat,table=foo) works with TCP sequence adjustment.
 dnl
@@ -3566,10 +4468,10 @@ dnl of 10.1.1.1 used in the test and 10.1.1.240 here), the FTP NAT ALG must
 dnl resize the packet and adjust TCP sequence numbers. This test is kept
 dnl separate from the above to easier identify issues in this code on different
 dnl kernels.
-CHECK_FTP_NAT_POST_RECIRC([seqadj], [10.1.1.240], [0x0a0101f0])
+CHECK_FTP_SNAT_POST_RECIRC([seqadj], [10.1.1.240], [0x0a0101f0])
 
 
-dnl CHECK_FTP_NAT_ORIG_TUPLE(TITLE, IP_ADDR, IP_ADDR_AS_HEX)
+dnl CHECK_FTP_SNAT_ORIG_TUPLE(TITLE, IP_ADDR, IP_ADDR_AS_HEX)
 dnl
 dnl Checks the implementation of conntrack original direction tuple matching
 dnl with FTP ALGs in combination with NAT, with flow tables that implement
@@ -3579,8 +4481,8 @@ dnl commiting of NATed and other connections with ct(nat..),output:foo.
 dnl
 dnl IP_ADDR must specify the NAT address in standard "10.1.1.x" format,
 dnl and IP_ADDR_AS_HEX must specify the same address as hex, eg 0x0a0101xx.
-m4_define([CHECK_FTP_NAT_ORIG_TUPLE], [dnl
-    CHECK_FTP_NAT([orig tuple $1], [$2], [dnl
+m4_define([CHECK_FTP_SNAT_ORIG_TUPLE], [dnl
+    CHECK_FTP_NAT([SNAT orig tuple $1], [$2], [dnl
 dnl Store zone in reg4 and packet direction in reg3 (IN=1, OUT=2).
 dnl NAT is only applied to OUT-direction packets, so that ACL
 dnl processing can be done with non-NATted headers.
@@ -3686,13 +4588,13 @@ tcp,orig=(src=10.1.1.2,dst=$2,sport=<cleared>,dport=<cleared>),reply=(src=10.1.1
 
 dnl Check that ct(nat,table=foo) works without TCP sequence adjustment with
 dnl an ACL table based on matching on conntrack original direction tuple only.
-CHECK_FTP_NAT_ORIG_TUPLE([], [10.1.1.9], [0x0a010109])
+CHECK_FTP_SNAT_ORIG_TUPLE([], [10.1.1.9], [0x0a010109])
 
 dnl Check that ct(nat,table=foo) works with TCP sequence adjustment with
 dnl an ACL table based on matching on conntrack original direction tuple only.
-CHECK_FTP_NAT_ORIG_TUPLE([seqadj], [10.1.1.240], [0x0a0101f0])
+CHECK_FTP_SNAT_ORIG_TUPLE([seqadj], [10.1.1.240], [0x0a0101f0])
 
-AT_SETUP([conntrack - IPv4 FTP Passive with NAT])
+AT_SETUP([conntrack - IPv4 FTP Passive with SNAT])
 AT_SKIP_IF([test $HAVE_FTP = no])
 CHECK_CONNTRACK()
 CHECK_CONNTRACK_NAT()
@@ -3747,6 +4649,246 @@ dnl Discards CLOSE_WAIT and CLOSING
 AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(10.1.1.2)], [0], [dnl
 tcp,orig=(src=10.1.1.1,dst=10.1.1.2,sport=<cleared>,dport=<cleared>),reply=(src=10.1.1.2,dst=10.1.1.240,sport=<cleared>,dport=<cleared>),protoinfo=(state=<cleared>)
 tcp,orig=(src=10.1.1.1,dst=10.1.1.2,sport=<cleared>,dport=<cleared>),reply=(src=10.1.1.2,dst=10.1.1.240,sport=<cleared>,dport=<cleared>),protoinfo=(state=<cleared>),helper=ftp
+])
+
+OVS_TRAFFIC_VSWITCHD_STOP
+AT_CLEANUP
+
+AT_SETUP([conntrack - IPv4 FTP Passive with DNAT])
+AT_SKIP_IF([test $HAVE_FTP = no])
+CHECK_CONNTRACK()
+CHECK_CONNTRACK_NAT()
+CHECK_CONNTRACK_ALG()
+
+OVS_TRAFFIC_VSWITCHD_START()
+
+ADD_NAMESPACES(at_ns0, at_ns1)
+
+ADD_VETH(p0, at_ns0, br0, "10.1.1.1/24")
+NS_CHECK_EXEC([at_ns0], [ip link set dev p0 address e6:66:c1:11:11:11])
+NS_CHECK_EXEC([at_ns0], [arp -s 10.1.1.2 e6:66:c1:22:22:22])
+NS_CHECK_EXEC([at_ns0], [arp -s 10.1.1.240 e6:66:c1:22:22:22])
+
+ADD_VETH(p1, at_ns1, br0, "10.1.1.240/24")
+NS_CHECK_EXEC([at_ns1], [ip link set dev p1 address e6:66:c1:22:22:22])
+NS_CHECK_EXEC([at_ns1], [arp -s 10.1.1.1 e6:66:c1:11:11:11])
+
+dnl Allow any traffic from ns0->ns1.
+AT_DATA([flows.txt], [dnl
+dnl track all IPv4 traffic and NAT any established traffic.
+table=0 priority=10 ip, action=ct(nat,table=1)
+table=0 priority=0 action=drop
+dnl
+dnl Table 1
+dnl
+dnl Allow new FTP control connections.
+table=1 in_port=1 ct_state=+new tcp nw_src=10.1.1.1 tp_dst=21 action=ct(alg=ftp,commit,nat(dst=10.1.1.240)),2
+dnl Allow related TCP connections from port 1.
+table=1 in_port=1 ct_state=+new+rel tcp nw_src=10.1.1.1 action=ct(commit,nat),2
+dnl Allow established TCP connections both ways, post-NAT match.
+table=1 in_port=1 ct_state=+est tcp nw_dst=10.1.1.240 action=2
+table=1 in_port=2 ct_state=+est tcp nw_dst=10.1.1.1 action=1
+
+dnl Allow ICMP both ways.
+table=1 priority=100 in_port=1 icmp, action=2
+table=1 priority=100 in_port=2 icmp, action=1
+table=1 priority=0, action=drop
+])
+
+AT_CHECK([ovs-ofctl --bundle add-flows br0 flows.txt])
+
+dnl Check that the stacks working to avoid races.
+OVS_WAIT_UNTIL([ip netns exec at_ns0 ping -c 1 10.1.1.240 >/dev/null])
+
+OVS_START_L7([at_ns1], [ftp])
+
+dnl FTP requests from p0->p1 should work fine.
+NS_CHECK_EXEC([at_ns0], [wget ftp://10.1.1.2 -t 3 -T 1 --retry-connrefused -v -o wget0.log])
+
+dnl Discards CLOSE_WAIT and CLOSING
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(10.1.1.2)], [0], [dnl
+tcp,orig=(src=10.1.1.1,dst=10.1.1.2,sport=<cleared>,dport=<cleared>),reply=(src=10.1.1.240,dst=10.1.1.1,sport=<cleared>,dport=<cleared>),protoinfo=(state=<cleared>)
+tcp,orig=(src=10.1.1.1,dst=10.1.1.2,sport=<cleared>,dport=<cleared>),reply=(src=10.1.1.240,dst=10.1.1.1,sport=<cleared>,dport=<cleared>),protoinfo=(state=<cleared>),helper=ftp
+])
+
+OVS_TRAFFIC_VSWITCHD_STOP
+AT_CLEANUP
+
+AT_SETUP([conntrack - IPv4 FTP Passive with DNAT 2])
+AT_SKIP_IF([test $HAVE_FTP = no])
+CHECK_CONNTRACK()
+CHECK_CONNTRACK_NAT()
+CHECK_CONNTRACK_ALG()
+
+OVS_TRAFFIC_VSWITCHD_START()
+
+ADD_NAMESPACES(at_ns0, at_ns1)
+
+ADD_VETH(p0, at_ns0, br0, "10.1.1.1/16")
+NS_CHECK_EXEC([at_ns0], [ip link set dev p0 address e6:66:c1:11:11:11])
+NS_CHECK_EXEC([at_ns0], [arp -s 10.1.1.200 e6:66:c1:22:22:22])
+NS_CHECK_EXEC([at_ns0], [arp -s 10.1.100.1 e6:66:c1:22:22:22])
+
+ADD_VETH(p1, at_ns1, br0, "10.1.100.1/16")
+NS_CHECK_EXEC([at_ns1], [ip link set dev p1 address e6:66:c1:22:22:22])
+NS_CHECK_EXEC([at_ns1], [arp -s 10.1.1.1 e6:66:c1:11:11:11])
+
+dnl Allow any traffic from ns0->ns1.
+AT_DATA([flows.txt], [dnl
+dnl track all IPv4 traffic and NAT any established traffic.
+table=0 priority=10 ip, action=ct(nat,table=1)
+table=0 priority=0 action=drop
+dnl
+dnl Table 1
+dnl
+dnl Allow new FTP control connections.
+table=1 in_port=1 ct_state=+new tcp nw_src=10.1.1.1 tp_dst=21 action=ct(alg=ftp,commit,nat(dst=10.1.100.1)),2
+dnl Allow related TCP connections from port 1.
+table=1 in_port=1 ct_state=+new+rel tcp nw_src=10.1.1.1 action=ct(commit,nat),2
+dnl Allow established TCP connections both ways, post-NAT match.
+table=1 in_port=1 ct_state=+est tcp nw_dst=10.1.100.1 action=2
+table=1 in_port=2 ct_state=+est tcp nw_dst=10.1.1.1 action=1
+
+dnl Allow ICMP both ways.
+table=1 priority=100 in_port=1 icmp, action=2
+table=1 priority=100 in_port=2 icmp, action=1
+table=1 priority=0, action=drop
+])
+
+AT_CHECK([ovs-ofctl --bundle add-flows br0 flows.txt])
+
+dnl Check that the stacks working to avoid races.
+OVS_WAIT_UNTIL([ip netns exec at_ns0 ping -c 1 10.1.100.1 >/dev/null])
+
+OVS_START_L7([at_ns1], [ftp])
+
+dnl FTP requests from p0->p1 should work fine.
+NS_CHECK_EXEC([at_ns0], [wget ftp://10.1.1.200 -t 3 -T 1 --retry-connrefused -v -o wget0.log])
+
+dnl Discards CLOSE_WAIT and CLOSING
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(10.1.1.200)], [0], [dnl
+tcp,orig=(src=10.1.1.1,dst=10.1.1.200,sport=<cleared>,dport=<cleared>),reply=(src=10.1.100.1,dst=10.1.1.1,sport=<cleared>,dport=<cleared>),protoinfo=(state=<cleared>)
+tcp,orig=(src=10.1.1.1,dst=10.1.1.200,sport=<cleared>,dport=<cleared>),reply=(src=10.1.100.1,dst=10.1.1.1,sport=<cleared>,dport=<cleared>),protoinfo=(state=<cleared>),helper=ftp
+])
+
+OVS_TRAFFIC_VSWITCHD_STOP
+AT_CLEANUP
+
+AT_SETUP([conntrack - IPv4 FTP Active with DNAT])
+AT_SKIP_IF([test $HAVE_FTP = no])
+CHECK_CONNTRACK()
+CHECK_CONNTRACK_NAT()
+CHECK_CONNTRACK_ALG()
+
+OVS_TRAFFIC_VSWITCHD_START()
+
+ADD_NAMESPACES(at_ns0, at_ns1)
+
+ADD_VETH(p0, at_ns0, br0, "10.1.1.1/24")
+NS_CHECK_EXEC([at_ns0], [ip link set dev p0 address e6:66:c1:11:11:11])
+NS_CHECK_EXEC([at_ns0], [arp -s 10.1.1.2 e6:66:c1:22:22:22])
+NS_CHECK_EXEC([at_ns0], [arp -s 10.1.1.240 e6:66:c1:22:22:22])
+
+ADD_VETH(p1, at_ns1, br0, "10.1.1.240/24")
+NS_CHECK_EXEC([at_ns1], [ip link set dev p1 address e6:66:c1:22:22:22])
+NS_CHECK_EXEC([at_ns1], [arp -s 10.1.1.1 e6:66:c1:11:11:11])
+
+dnl Allow any traffic from ns0->ns1.
+AT_DATA([flows.txt], [dnl
+dnl track all IPv4 traffic and NAT any established traffic.
+table=0 priority=10 ip, action=ct(nat,table=1)
+table=0 priority=0 action=drop
+dnl
+dnl Table 1
+dnl
+dnl Allow new FTP control connections.
+table=1 in_port=1 ct_state=+new tcp nw_src=10.1.1.1 tp_dst=21 action=ct(alg=ftp,commit,nat(dst=10.1.1.240)),2
+dnl Allow related TCP connections from port 1.
+table=1 in_port=2 ct_state=+new+rel tcp nw_src=10.1.1.240 action=ct(commit,nat),1
+dnl Allow established TCP connections both ways, post-NAT match.
+table=1 in_port=1 ct_state=+est tcp nw_dst=10.1.1.240 action=2
+table=1 in_port=2 ct_state=+est tcp nw_dst=10.1.1.1 action=1
+
+dnl Allow ICMP both ways.
+table=1 priority=100 in_port=1 icmp, action=2
+table=1 priority=100 in_port=2 icmp, action=1
+table=1 priority=0, action=drop
+])
+
+AT_CHECK([ovs-ofctl --bundle add-flows br0 flows.txt])
+
+dnl Check that the stacks working to avoid races.
+OVS_WAIT_UNTIL([ip netns exec at_ns0 ping -c 1 10.1.1.240 >/dev/null])
+
+OVS_START_L7([at_ns1], [ftp])
+
+dnl FTP requests from p0->p1 should work fine.
+NS_CHECK_EXEC([at_ns0], [wget ftp://10.1.1.2 --no-passive-ftp -t 3 -T 1 --retry-connrefused -v -o wget0.log])
+
+dnl Discards CLOSE_WAIT and CLOSING
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(10.1.1.2)], [0], [dnl
+tcp,orig=(src=10.1.1.1,dst=10.1.1.2,sport=<cleared>,dport=<cleared>),reply=(src=10.1.1.240,dst=10.1.1.1,sport=<cleared>,dport=<cleared>),protoinfo=(state=<cleared>),helper=ftp
+tcp,orig=(src=10.1.1.240,dst=10.1.1.1,sport=<cleared>,dport=<cleared>),reply=(src=10.1.1.1,dst=10.1.1.2,sport=<cleared>,dport=<cleared>),protoinfo=(state=<cleared>)
+])
+
+OVS_TRAFFIC_VSWITCHD_STOP
+AT_CLEANUP
+
+AT_SETUP([conntrack - IPv4 FTP Active with DNAT with reverse skew])
+AT_SKIP_IF([test $HAVE_FTP = no])
+CHECK_CONNTRACK()
+CHECK_CONNTRACK_NAT()
+CHECK_CONNTRACK_ALG()
+
+OVS_TRAFFIC_VSWITCHD_START()
+
+ADD_NAMESPACES(at_ns0, at_ns1)
+
+ADD_VETH(p0, at_ns0, br0, "10.1.1.1/16")
+NS_CHECK_EXEC([at_ns0], [ip link set dev p0 address e6:66:c1:11:11:11])
+NS_CHECK_EXEC([at_ns0], [arp -s 10.1.1.2 e6:66:c1:22:22:22])
+NS_CHECK_EXEC([at_ns0], [arp -s 10.1.120.240 e6:66:c1:22:22:22])
+
+ADD_VETH(p1, at_ns1, br0, "10.1.1.2/16")
+NS_CHECK_EXEC([at_ns1], [ip link set dev p1 address e6:66:c1:22:22:22])
+NS_CHECK_EXEC([at_ns1], [arp -s 10.1.1.1 e6:66:c1:11:11:11])
+
+dnl Allow any traffic from ns0->ns1.
+AT_DATA([flows.txt], [dnl
+dnl track all IPv4 traffic and NAT any established traffic.
+table=0 priority=10 ip, action=ct(nat,table=1)
+table=0 priority=0 action=drop
+dnl
+dnl Table 1
+dnl
+dnl Allow new FTP control connections.
+table=1 in_port=1 ct_state=+new tcp nw_src=10.1.1.1 tp_dst=21 action=ct(alg=ftp,commit,nat(dst=10.1.1.2)),2
+dnl Allow related TCP connections from port 1.
+table=1 in_port=2 ct_state=+new+rel tcp nw_src=10.1.1.2 action=ct(commit,nat),1
+dnl Allow established TCP connections both ways, post-NAT match.
+table=1 in_port=1 ct_state=+est tcp nw_dst=10.1.1.2 action=2
+table=1 in_port=2 ct_state=+est tcp nw_dst=10.1.1.1 action=1
+
+dnl Allow ICMP both ways.
+table=1 priority=100 in_port=1 icmp, action=2
+table=1 priority=100 in_port=2 icmp, action=1
+table=1 priority=0, action=drop
+])
+
+AT_CHECK([ovs-ofctl --bundle add-flows br0 flows.txt])
+
+dnl Check that the stacks working to avoid races.
+OVS_WAIT_UNTIL([ip netns exec at_ns0 ping -c 1 10.1.1.2 >/dev/null])
+
+OVS_START_L7([at_ns1], [ftp])
+
+dnl FTP requests from p0->p1 should work fine.
+NS_CHECK_EXEC([at_ns0], [wget ftp://10.1.120.240 --no-passive-ftp -t 3 -T 1 --retry-connrefused -v -o wget0.log])
+
+dnl Discards CLOSE_WAIT and CLOSING
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(10.1.120.240)], [0], [dnl
+tcp,orig=(src=10.1.1.1,dst=10.1.120.240,sport=<cleared>,dport=<cleared>),reply=(src=10.1.1.2,dst=10.1.1.1,sport=<cleared>,dport=<cleared>),protoinfo=(state=<cleared>),helper=ftp
+tcp,orig=(src=10.1.1.2,dst=10.1.1.1,sport=<cleared>,dport=<cleared>),reply=(src=10.1.1.1,dst=10.1.120.240,sport=<cleared>,dport=<cleared>),protoinfo=(state=<cleared>)
 ])
 
 OVS_TRAFFIC_VSWITCHD_STOP
@@ -3893,7 +5035,7 @@ udp,orig=(src=fc00::1,dst=fc00::2,sport=<cleared>,dport=<cleared>),reply=(src=fc
 OVS_TRAFFIC_VSWITCHD_STOP
 AT_CLEANUP
 
-AT_SETUP([conntrack - IPv6 FTP with NAT])
+AT_SETUP([conntrack - IPv6 FTP with SNAT])
 AT_SKIP_IF([test $HAVE_FTP = no])
 CHECK_CONNTRACK()
 CHECK_CONNTRACK_NAT()
@@ -3953,7 +5095,7 @@ tcp,orig=(src=fc00::2,dst=fc00::240,sport=<cleared>,dport=<cleared>),reply=(src=
 OVS_TRAFFIC_VSWITCHD_STOP
 AT_CLEANUP
 
-AT_SETUP([conntrack - IPv6 FTP Passive with NAT])
+AT_SETUP([conntrack - IPv6 FTP Passive with SNAT])
 AT_SKIP_IF([test $HAVE_FTP = no])
 CHECK_CONNTRACK()
 CHECK_CONNTRACK_NAT()
@@ -4014,7 +5156,7 @@ tcp,orig=(src=fc00::1,dst=fc00::2,sport=<cleared>,dport=<cleared>),reply=(src=fc
 OVS_TRAFFIC_VSWITCHD_STOP
 AT_CLEANUP
 
-AT_SETUP([conntrack - IPv6 FTP with NAT - orig tuple])
+AT_SETUP([conntrack - IPv6 FTP with SNAT - orig tuple])
 AT_SKIP_IF([test $HAVE_FTP = no])
 CHECK_CONNTRACK()
 CHECK_CONNTRACK_NAT()
@@ -4074,7 +5216,7 @@ tcp,orig=(src=fc00::2,dst=fc00::240,sport=<cleared>,dport=<cleared>),reply=(src=
 OVS_TRAFFIC_VSWITCHD_STOP
 AT_CLEANUP
 
-AT_SETUP([conntrack - IPv4 TFTP with NAT])
+AT_SETUP([conntrack - IPv4 TFTP with SNAT])
 AT_SKIP_IF([test $HAVE_TFTP = no])
 CHECK_CONNTRACK()
 CHECK_CONNTRACK_NAT()

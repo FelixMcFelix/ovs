@@ -137,7 +137,6 @@ struct ofport_dpif {
     struct cfm *cfm;            /* Connectivity Fault Management, if any. */
     struct bfd *bfd;            /* BFD, if any. */
     struct lldp *lldp;          /* lldp, if any. */
-    bool may_enable;            /* May be enabled in bonds. */
     bool is_tunnel;             /* This port is a tunnel. */
     long long int carrier_seq;  /* Carrier status changes. */
     struct ofport_dpif *peer;   /* Peer if patch port. */
@@ -479,7 +478,7 @@ type_run(const char *type)
                                  ofport->rstp_port, ofport->qdscp,
                                  ofport->n_qdscp, ofport->up.pp.config,
                                  ofport->up.pp.state, ofport->is_tunnel,
-                                 ofport->may_enable);
+                                 ofport->up.may_enable);
             }
         }
         xlate_txn_commit();
@@ -1520,6 +1519,7 @@ add_internal_flows(struct ofproto_dpif *ofproto)
     controller->max_len = UINT16_MAX;
     controller->controller_id = 0;
     controller->reason = OFPR_IMPLICIT_MISS;
+    controller->meter_id = NX_CTLR_NO_METER;
     ofpact_finish_CONTROLLER(&ofpacts, &controller);
 
     error = add_internal_miss_flow(ofproto, id++, &ofpacts,
@@ -1847,7 +1847,6 @@ port_construct(struct ofport *port_)
     port->cfm = NULL;
     port->bfd = NULL;
     port->lldp = NULL;
-    port->may_enable = false;
     port->stp_port = NULL;
     port->stp_state = STP_DISABLED;
     port->rstp_port = NULL;
@@ -2004,16 +2003,6 @@ port_modified(struct ofport *port_)
         bfd_set_netdev(port->bfd, netdev);
     }
 
-    /* Set liveness, unless the link is administratively or
-     * operationally down or link monitoring false */
-    if (!(port->up.pp.config & OFPUTIL_PC_PORT_DOWN) &&
-        !(port->up.pp.state & OFPUTIL_PS_LINK_DOWN) &&
-        port->may_enable) {
-        port->up.pp.state |= OFPUTIL_PS_LIVE;
-    } else {
-        port->up.pp.state &= ~OFPUTIL_PS_LIVE;
-    }
-
     ofproto_dpif_monitor_port_update(port, port->bfd, port->cfm,
                                      port->lldp, &port->up.pp.hw_addr);
 
@@ -2048,6 +2037,7 @@ port_reconfigured(struct ofport *port_, enum ofputil_port_config old_config)
             bundle_update(port->bundle);
         }
     }
+    port_run(port);
 }
 
 static int
@@ -2791,7 +2781,7 @@ set_rstp_port(struct ofport *ofport_,
                   ofport, netdev_get_name(ofport->up.netdev));
     update_rstp_port_state(ofport);
     /* Synchronize operational status. */
-    rstp_port_set_mac_operational(rp, ofport->may_enable);
+    rstp_port_set_mac_operational(rp, ofport->up.may_enable);
 }
 
 static void
@@ -3340,7 +3330,7 @@ bundle_run(struct ofbundle *bundle)
         struct ofport_dpif *port;
 
         LIST_FOR_EACH (port, bundle_node, &bundle->ports) {
-            bond_slave_set_may_enable(bundle->bond, port, port->may_enable);
+            bond_slave_set_may_enable(bundle->bond, port, port->up.may_enable);
         }
 
         if (bond_run(bundle->bond, lacp_status(bundle->lacp))) {
@@ -3570,66 +3560,55 @@ ofport_update_peer(struct ofport_dpif *ofport)
     free(peer_name);
 }
 
+static bool
+may_enable_port(struct ofport_dpif *ofport)
+{
+    /* Carrier must be up. */
+    if (!netdev_get_carrier(ofport->up.netdev)) {
+        return false;
+    }
+
+    /* If CFM or BFD is enabled, then at least one of them must report that the
+     * port is up. */
+    if ((ofport->bfd || ofport->cfm)
+        && !(ofport->cfm
+             && !cfm_get_fault(ofport->cfm)
+             && cfm_get_opup(ofport->cfm) != 0)
+        && !(ofport->bfd
+             && bfd_forwarding(ofport->bfd))) {
+        return false;
+    }
+
+    /* If LACP is enabled, it must report that the link is enabled. */
+    if (ofport->bundle
+        && !lacp_slave_may_enable(ofport->bundle->lacp, ofport)) {
+        return false;
+    }
+
+    return true;
+}
+
 static void
 port_run(struct ofport_dpif *ofport)
 {
     long long int carrier_seq = netdev_get_carrier_resets(ofport->up.netdev);
     bool carrier_changed = carrier_seq != ofport->carrier_seq;
-    bool enable = netdev_get_carrier(ofport->up.netdev);
-    bool cfm_enable = false;
-    bool bfd_enable = false;
-
     ofport->carrier_seq = carrier_seq;
-
-    if (ofport->cfm) {
-        int cfm_opup = cfm_get_opup(ofport->cfm);
-
-        cfm_enable = !cfm_get_fault(ofport->cfm);
-
-        if (cfm_opup >= 0) {
-            cfm_enable = cfm_enable && cfm_opup;
-        }
+    if (carrier_changed && ofport->bundle) {
+        lacp_slave_carrier_changed(ofport->bundle->lacp, ofport);
     }
 
-    if (ofport->bfd) {
-        bfd_enable = bfd_forwarding(ofport->bfd);
-    }
+    bool enable = may_enable_port(ofport);
+    if (ofport->up.may_enable != enable) {
+        ofproto_port_set_enable(&ofport->up, enable);
 
-    if (ofport->bfd || ofport->cfm) {
-        enable = enable && (cfm_enable || bfd_enable);
-    }
-
-    if (ofport->bundle) {
-        enable = enable && lacp_slave_may_enable(ofport->bundle->lacp, ofport);
-        if (carrier_changed) {
-            lacp_slave_carrier_changed(ofport->bundle->lacp, ofport);
-        }
-    }
-
-    if (ofport->may_enable != enable) {
         struct ofproto_dpif *ofproto = ofproto_dpif_cast(ofport->up.ofproto);
-
         ofproto->backer->need_revalidate = REV_PORT_TOGGLED;
 
         if (ofport->rstp_port) {
             rstp_port_set_mac_operational(ofport->rstp_port, enable);
         }
-
-        /* Propagate liveness, unless the link is administratively or
-         * operationally down. */
-        if (!(ofport->up.pp.config & OFPUTIL_PC_PORT_DOWN) &&
-            !(ofport->up.pp.state & OFPUTIL_PS_LINK_DOWN)) {
-            enum ofputil_port_state of_state = ofport->up.pp.state;
-            if (enable) {
-                of_state |= OFPUTIL_PS_LIVE;
-            } else {
-                of_state &= ~OFPUTIL_PS_LIVE;
-            }
-            ofproto_port_set_state(&ofport->up, of_state);
-        }
     }
-
-    ofport->may_enable = enable;
 }
 
 static int
@@ -5051,17 +5030,28 @@ nxt_resume(struct ofproto *ofproto_,
            const struct ofputil_packet_in_private *pin)
 {
     struct ofproto_dpif *ofproto = ofproto_dpif_cast(ofproto_);
+    struct dpif_flow_stats stats;
+    struct xlate_cache xcache;
+    struct flow flow;
+    xlate_cache_init(&xcache);
 
     /* Translate pin into datapath actions. */
     uint64_t odp_actions_stub[1024 / 8];
     struct ofpbuf odp_actions = OFPBUF_STUB_INITIALIZER(odp_actions_stub);
     enum slow_path_reason slow;
-    enum ofperr error = xlate_resume(ofproto, pin, &odp_actions, &slow);
+    enum ofperr error = xlate_resume(ofproto, pin, &odp_actions, &slow,
+                                     &flow, &xcache);
 
     /* Steal 'pin->packet' and put it into a dp_packet. */
     struct dp_packet packet;
     dp_packet_init(&packet, pin->base.packet_len);
     dp_packet_put(&packet, pin->base.packet, pin->base.packet_len);
+
+    /* Run the side effects from the xcache. */
+    dpif_flow_stats_extract(&flow, &packet, time_msec(), &stats);
+    ovs_mutex_lock(&ofproto_mutex);
+    ofproto_dpif_xcache_execute(ofproto, &xcache, &stats);
+    ovs_mutex_unlock(&ofproto_mutex);
 
     pkt_metadata_from_flow(&packet.md, &pin->base.flow_metadata.flow);
 
@@ -5234,7 +5224,7 @@ ofproto_unixctl_fdb_show(struct unixctl_conn *conn, int argc OVS_UNUSED,
     ovs_rwlock_rdlock(&ofproto->ml->rwlock);
     LIST_FOR_EACH (e, lru_node, &ofproto->ml->lrus) {
         struct ofbundle *bundle = mac_entry_get_port(ofproto->ml, e);
-        char name[OFP10_MAX_PORT_NAME_LEN];
+        char name[OFP_MAX_PORT_NAME_LEN];
 
         ofputil_port_to_string(ofbundle_get_a_port(bundle)->up.ofp_port,
                                NULL, name, sizeof name);
@@ -5242,6 +5232,69 @@ ofproto_unixctl_fdb_show(struct unixctl_conn *conn, int argc OVS_UNUSED,
                       name, e->vlan, ETH_ADDR_ARGS(e->mac),
                       mac_entry_age(ofproto->ml, e));
     }
+    ovs_rwlock_unlock(&ofproto->ml->rwlock);
+    unixctl_command_reply(conn, ds_cstr(&ds));
+    ds_destroy(&ds);
+}
+
+static void
+ofproto_unixctl_fdb_stats_clear(struct unixctl_conn *conn, int argc,
+                                const char *argv[], void *aux OVS_UNUSED)
+{
+    struct ofproto_dpif *ofproto;
+
+    if (argc > 1) {
+        ofproto = ofproto_dpif_lookup_by_name(argv[1]);
+        if (!ofproto) {
+            unixctl_command_reply_error(conn, "no such bridge");
+            return;
+        }
+        ovs_rwlock_wrlock(&ofproto->ml->rwlock);
+        mac_learning_clear_statistics(ofproto->ml);
+        ovs_rwlock_unlock(&ofproto->ml->rwlock);
+    } else {
+        HMAP_FOR_EACH (ofproto, all_ofproto_dpifs_by_name_node,
+                       &all_ofproto_dpifs_by_name) {
+            ovs_rwlock_wrlock(&ofproto->ml->rwlock);
+            mac_learning_clear_statistics(ofproto->ml);
+            ovs_rwlock_unlock(&ofproto->ml->rwlock);
+        }
+    }
+
+    unixctl_command_reply(conn, "statistics successfully cleared");
+}
+
+static void
+ofproto_unixctl_fdb_stats_show(struct unixctl_conn *conn, int argc OVS_UNUSED,
+                               const char *argv[], void *aux OVS_UNUSED)
+{
+    struct ds ds = DS_EMPTY_INITIALIZER;
+    const struct ofproto_dpif *ofproto;
+    ofproto = ofproto_dpif_lookup_by_name(argv[1]);
+    if (!ofproto) {
+        unixctl_command_reply_error(conn, "no such bridge");
+        return;
+    }
+
+    ds_put_format(&ds, "Statistics for bridge \"%s\":\n", argv[1]);
+    ovs_rwlock_rdlock(&ofproto->ml->rwlock);
+
+    ds_put_format(&ds, "  Current/maximum MAC entries in the table: %"
+                  PRIuSIZE"/%"PRIuSIZE"\n",
+                  hmap_count(&ofproto->ml->table), ofproto->ml->max_entries);
+    ds_put_format(&ds,
+                  "  Total number of learned MAC entries     : %"PRIu64"\n",
+                  ofproto->ml->total_learned);
+    ds_put_format(&ds,
+                  "  Total number of expired MAC entries     : %"PRIu64"\n",
+                  ofproto->ml->total_expired);
+    ds_put_format(&ds,
+                  "  Total number of evicted MAC entries     : %"PRIu64"\n",
+                  ofproto->ml->total_evicted);
+    ds_put_format(&ds,
+                  "  Total number of port moved MAC entries  : %"PRIu64"\n",
+                  ofproto->ml->total_moved);
+
     ovs_rwlock_unlock(&ofproto->ml->rwlock);
     unixctl_command_reply(conn, ds_cstr(&ds));
     ds_destroy(&ds);
@@ -5275,7 +5328,7 @@ ofproto_unixctl_mcast_snooping_show(struct unixctl_conn *conn,
     ovs_rwlock_rdlock(&ofproto->ms->rwlock);
     LIST_FOR_EACH (grp, group_node, &ofproto->ms->group_lru) {
         LIST_FOR_EACH(b, bundle_node, &grp->bundle_lru) {
-            char name[OFP10_MAX_PORT_NAME_LEN];
+            char name[OFP_MAX_PORT_NAME_LEN];
 
             bundle = b->port;
             ofputil_port_to_string(ofbundle_get_a_port(bundle)->up.ofp_port,
@@ -5289,7 +5342,7 @@ ofproto_unixctl_mcast_snooping_show(struct unixctl_conn *conn,
 
     /* ports connected to multicast routers */
     LIST_FOR_EACH(mrouter, mrouter_node, &ofproto->ms->mrouter_lru) {
-        char name[OFP10_MAX_PORT_NAME_LEN];
+        char name[OFP_MAX_PORT_NAME_LEN];
 
         bundle = mrouter->port;
         ofputil_port_to_string(ofbundle_get_a_port(bundle)->up.ofp_port,
@@ -5642,8 +5695,10 @@ ofproto_unixctl_dpif_dump_flows(struct unixctl_conn *conn,
     while (dpif_flow_dump_next(flow_dump_thread, &f, 1)) {
         struct flow flow;
 
-        if (odp_flow_key_to_flow(f.key, f.key_len, &flow) == ODP_FIT_ERROR
-            || xlate_lookup_ofproto(ofproto->backer, &flow, NULL) != ofproto) {
+        if ((odp_flow_key_to_flow(f.key, f.key_len, &flow, NULL)
+             == ODP_FIT_ERROR)
+            || (xlate_lookup_ofproto(ofproto->backer, &flow, NULL, NULL)
+                != ofproto)) {
             continue;
         }
 
@@ -5737,6 +5792,10 @@ ofproto_unixctl_init(void)
                              ofproto_unixctl_fdb_flush, NULL);
     unixctl_command_register("fdb/show", "bridge", 1, 1,
                              ofproto_unixctl_fdb_show, NULL);
+    unixctl_command_register("fdb/stats-clear", "[bridge]", 0, 1,
+                             ofproto_unixctl_fdb_stats_clear, NULL);
+    unixctl_command_register("fdb/stats-show", "bridge", 1, 1,
+                             ofproto_unixctl_fdb_stats_show, NULL);
     unixctl_command_register("mdb/flush", "[bridge]", 0, 1,
                              ofproto_unixctl_mcast_snooping_flush, NULL);
     unixctl_command_register("mdb/show", "bridge", 1, 1,
@@ -5747,7 +5806,8 @@ ofproto_unixctl_init(void)
                              NULL);
     unixctl_command_register("dpif/show-dp-features", "bridge", 1, 1,
                              ofproto_unixctl_dpif_show_dp_features, NULL);
-    unixctl_command_register("dpif/dump-flows", "[-m] [--names | --no-nmaes] bridge", 1, INT_MAX,
+    unixctl_command_register("dpif/dump-flows",
+                             "[-m] [--names | --no-names] bridge", 1, INT_MAX,
                              ofproto_unixctl_dpif_dump_flows, NULL);
     unixctl_command_register("dpif/set-dp-features", "bridge", 1, 3 ,
                              ofproto_unixctl_dpif_set_dp_features, NULL);
@@ -5883,15 +5943,15 @@ meter_set(struct ofproto *ofproto_, ofproto_meter_id *meter_id,
     /* Provider ID unknown. Use backer to allocate a new DP meter */
     if (meter_id->uint32 == UINT32_MAX) {
         if (!ofproto->backer->meter_ids) {
-            return EFBIG; /* Datapath does not support meter.  */
+            return OFPERR_OFPMMFC_OUT_OF_METERS; /* Meters not supported. */
         }
 
         if(!id_pool_alloc_id(ofproto->backer->meter_ids, &meter_id->uint32)) {
-            return ENOMEM; /* Can't allocate a DP meter. */
+            return OFPERR_OFPMMFC_OUT_OF_METERS; /* Can't allocate meter. */
         }
     }
 
-    switch (dpif_meter_set(ofproto->backer->dpif, meter_id, config)) {
+    switch (dpif_meter_set(ofproto->backer->dpif, *meter_id, config)) {
     case 0:
         return 0;
     case EFBIG: /* meter_id out of range */
@@ -5972,6 +6032,7 @@ const struct ofproto_class ofproto_dpif_class = {
     type_get_memory_usage,
     flush,
     query_tables,
+    NULL,                       /* modify_tables */
     set_tables_version,
     port_alloc,
     port_construct,

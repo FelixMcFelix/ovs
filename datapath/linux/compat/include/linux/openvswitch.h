@@ -375,6 +375,7 @@ enum ovs_key_attr {
 #ifndef __KERNEL__
 	/* Only used within userspace data path. */
 	OVS_KEY_ATTR_PACKET_TYPE,  /* be32 packet type */
+	OVS_KEY_ATTR_ND_EXTENSIONS, /* struct ovs_key_nd_extensions */
 #endif
 
 	__OVS_KEY_ATTR_MAX
@@ -488,6 +489,13 @@ struct ovs_key_nd {
 	__u8	nd_sll[ETH_ALEN];
 	__u8	nd_tll[ETH_ALEN];
 };
+
+#ifndef __KERNEL__
+struct ovs_key_nd_extensions {
+    __be32  nd_reserved;
+    __u8    nd_options_type;
+};
+#endif
 
 #define OVS_CT_LABELS_LEN_32	4
 #define OVS_CT_LABELS_LEN	(OVS_CT_LABELS_LEN_32 * sizeof(__u32))
@@ -909,6 +917,8 @@ enum ovs_nat_attr {
  * tunnel header.
  * @OVS_ACTION_ATTR_METER: Run packet through a meter, which may drop the
  * packet, or modify the packet (e.g., change the DSCP field).
+ * @OVS_ACTION_ATTR_CLONE: make a copy of the packet and execute a list of
+ * actions without affecting the original packet and key.
  * @OVS_ACTION_ATTR_PROBDROP: Drop packet, given some known probability.
  */
 
@@ -935,12 +945,12 @@ enum ovs_action_attr {
 	OVS_ACTION_ATTR_CT_CLEAR,     /* No argument. */
 	OVS_ACTION_ATTR_PUSH_NSH,     /* Nested OVS_NSH_KEY_ATTR_*. */
 	OVS_ACTION_ATTR_POP_NSH,      /* No argument. */
-	OVS_ACTION_ATTR_METER,         /* u32 meter number. */
+	OVS_ACTION_ATTR_METER,        /* u32 meter number. */
+	OVS_ACTION_ATTR_CLONE,        /* Nested OVS_CLONE_ATTR_*.  */
 
 #ifndef __KERNEL__
 	OVS_ACTION_ATTR_TUNNEL_PUSH,   /* struct ovs_action_push_tnl*/
 	OVS_ACTION_ATTR_TUNNEL_POP,    /* u32 port number. */
-	OVS_ACTION_ATTR_CLONE,         /* Nested OVS_CLONE_ATTR_*.  */
 #endif
 	OVS_ACTION_ATTR_PROBDROP=23,     /* unit32_t, probability in [0,2^32 -1] */
 
@@ -1006,5 +1016,38 @@ enum ovs_meter_band_type {
 };
 
 #define OVS_METER_BAND_TYPE_MAX (__OVS_METER_BAND_TYPE_MAX - 1)
+
+/* Conntrack limit */
+#define OVS_CT_LIMIT_FAMILY  "ovs_ct_limit"
+#define OVS_CT_LIMIT_MCGROUP "ovs_ct_limit"
+#define OVS_CT_LIMIT_VERSION 0x1
+
+enum ovs_ct_limit_cmd {
+	OVS_CT_LIMIT_CMD_UNSPEC,
+	OVS_CT_LIMIT_CMD_SET,		/* Add or modify ct limit. */
+	OVS_CT_LIMIT_CMD_DEL,		/* Delete ct limit. */
+	OVS_CT_LIMIT_CMD_GET		/* Get ct limit. */
+};
+
+enum ovs_ct_limit_attr {
+	OVS_CT_LIMIT_ATTR_UNSPEC,
+	OVS_CT_LIMIT_ATTR_ZONE_LIMIT,	/* Nested struct ovs_zone_limit. */
+	__OVS_CT_LIMIT_ATTR_MAX
+};
+
+#define OVS_CT_LIMIT_ATTR_MAX (__OVS_CT_LIMIT_ATTR_MAX - 1)
+
+#define OVS_ZONE_LIMIT_DEFAULT_ZONE -1
+
+struct ovs_zone_limit {
+	int zone_id;
+	__u32 limit;
+	__u32 count;
+};
+
+#define OVS_CLONE_ATTR_EXEC      0   /* Specify an u32 value. When nonzero,
+				      * actions in clone will not change flow
+				      * keys. False otherwise.
+				      */
 
 #endif /* _LINUX_OPENVSWITCH_H */

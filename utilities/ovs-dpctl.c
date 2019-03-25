@@ -100,8 +100,9 @@ parse_options(int argc, char *argv[])
     char *short_options = ovs_cmdl_long_options_to_short_options(long_options);
 
     bool set_names = false;
+    unsigned int timeout = 0;
+
     for (;;) {
-        unsigned long int timeout;
         int c;
 
         c = getopt_long(argc, argv, short_options, long_options, NULL);
@@ -141,12 +142,8 @@ parse_options(int argc, char *argv[])
             break;
 
         case 't':
-            timeout = strtoul(optarg, NULL, 10);
-            if (timeout <= 0) {
-                ovs_fatal(0, "value %s on -t or --timeout is not at least 1",
-                          optarg);
-            } else {
-                time_alarm(timeout);
+            if (!str_to_uint(optarg, 10, &timeout) || !timeout) {
+                ovs_fatal(0, "value %s on -t or --timeout is invalid", optarg);
             }
             break;
 
@@ -171,6 +168,8 @@ parse_options(int argc, char *argv[])
         }
     }
     free(short_options);
+
+    ctl_timeout_setup(timeout);
 
     if (!set_names) {
         dpctl_p.names = dpctl_p.verbosity > 0;

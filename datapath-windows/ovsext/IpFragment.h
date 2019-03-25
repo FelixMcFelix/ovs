@@ -57,7 +57,7 @@ typedef struct _OVS_IPFRAG_THREAD_CTX {
 
 #define IP_FRAG_HASH_TABLE_SIZE ((UINT32)1 << 10)
 #define IP_FRAG_HASH_TABLE_MASK (IP_FRAG_HASH_TABLE_SIZE - 1)
-/*30s -Sufficient time to recieve all fragments.*/
+/*30s -Sufficient time to receive all fragments.*/
 #define IPFRAG_ENTRY_TIMEOUT 300000000LL
 #define IPFRAG_CLEANUP_INTERVAL IPFRAG_ENTRY_TIMEOUT * 2 /*1m.*/
 PNET_BUFFER_LIST OvsIpv4FragmentNBL(PVOID ovsContext,
@@ -68,8 +68,8 @@ NDIS_STATUS OvsProcessIpv4Fragment(POVS_SWITCH_CONTEXT switchContext,
                                    PNET_BUFFER_LIST *curNbl,
                                    OvsCompletionList *completionList,
                                    NDIS_SWITCH_PORT_ID sourcePort,
-                                   ovs_be64 tunnelId,
-                                   PNET_BUFFER_LIST *newNbl);
+                                   POVS_PACKET_HDR_INFO layers,
+                                   ovs_be64 tunnelId);
 NDIS_STATUS OvsInitIpFragment(POVS_SWITCH_CONTEXT context);
 VOID OvsCleanupIpFragment(VOID);
 #endif /* __IPFRAGMENT_H_ */

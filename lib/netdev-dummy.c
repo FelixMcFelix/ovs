@@ -29,6 +29,7 @@
 #include "odp-util.h"
 #include "openvswitch/dynamic-string.h"
 #include "openvswitch/list.h"
+#include "openvswitch/match.h"
 #include "openvswitch/ofp-print.h"
 #include "openvswitch/ofpbuf.h"
 #include "openvswitch/vlog.h"
@@ -92,6 +93,13 @@ struct pkt_list_node {
     struct ovs_list list_node;
 };
 
+struct offloaded_flow {
+    struct hmap_node node;
+    ovs_u128 ufid;
+    struct match match;
+    uint32_t mark;
+};
+
 /* Protects 'dummy_list'. */
 static struct ovs_mutex dummy_list_mutex = OVS_MUTEX_INITIALIZER;
 
@@ -118,11 +126,13 @@ struct netdev_dummy {
 
     struct dummy_packet_conn conn OVS_GUARDED;
 
-    FILE *tx_pcap, *rxq_pcap OVS_GUARDED;
+    struct pcap_file *tx_pcap, *rxq_pcap OVS_GUARDED;
 
     struct in_addr address, netmask;
     struct in6_addr ipv6, ipv6_mask;
     struct ovs_list rxes OVS_GUARDED; /* List of child "netdev_rxq_dummy"s. */
+
+    struct hmap offloaded_flows OVS_GUARDED;
 
     /* The following properties are for dummy-pmd and they cannot be changed
      * when a device is running, so we remember the request and update them
@@ -146,7 +156,7 @@ struct netdev_rxq_dummy {
 static unixctl_cb_func netdev_dummy_set_admin_state;
 static int netdev_dummy_construct(struct netdev *);
 static void netdev_dummy_queue_packet(struct netdev_dummy *,
-                                      struct dp_packet *, int);
+                                      struct dp_packet *, struct flow *, int);
 
 static void dummy_packet_stream_close(struct dummy_packet_stream *);
 
@@ -273,7 +283,7 @@ dummy_packet_stream_run(struct netdev_dummy *dev, struct dummy_packet_stream *s)
             if (retval == n && dp_packet_size(&s->rxbuf) > 2) {
                 dp_packet_pull(&s->rxbuf, 2);
                 netdev_dummy_queue_packet(dev,
-                                          dp_packet_clone(&s->rxbuf), 0);
+                                          dp_packet_clone(&s->rxbuf), NULL, 0);
                 dp_packet_clear(&s->rxbuf);
             }
         } else if (retval != -EAGAIN) {
@@ -683,7 +693,7 @@ netdev_dummy_construct(struct netdev *netdev_)
     netdev->hwaddr.ea[4] = n >> 8;
     netdev->hwaddr.ea[5] = n;
     netdev->mtu = 1500;
-    netdev->flags = 0;
+    netdev->flags = NETDEV_UP;
     netdev->ifindex = -EOPNOTSUPP;
     netdev->requested_n_rxq = netdev_->n_rxq;
     netdev->requested_n_txq = netdev_->n_txq;
@@ -699,6 +709,7 @@ netdev_dummy_construct(struct netdev *netdev_)
     dummy_packet_conn_init(&netdev->conn);
 
     ovs_list_init(&netdev->rxes);
+    hmap_init(&netdev->offloaded_flows);
     ovs_mutex_unlock(&netdev->mutex);
 
     ovs_mutex_lock(&dummy_list_mutex);
@@ -712,6 +723,7 @@ static void
 netdev_dummy_destruct(struct netdev *netdev_)
 {
     struct netdev_dummy *netdev = netdev_dummy_cast(netdev_);
+    struct offloaded_flow *off_flow;
 
     ovs_mutex_lock(&dummy_list_mutex);
     ovs_list_remove(&netdev->list_node);
@@ -719,13 +731,18 @@ netdev_dummy_destruct(struct netdev *netdev_)
 
     ovs_mutex_lock(&netdev->mutex);
     if (netdev->rxq_pcap) {
-        fclose(netdev->rxq_pcap);
+        ovs_pcap_close(netdev->rxq_pcap);
     }
     if (netdev->tx_pcap && netdev->tx_pcap != netdev->rxq_pcap) {
-        fclose(netdev->tx_pcap);
+        ovs_pcap_close(netdev->tx_pcap);
     }
     dummy_packet_conn_close(&netdev->conn);
     netdev->conn.type = NONE;
+
+    HMAP_FOR_EACH_POP (off_flow, node, &netdev->offloaded_flows) {
+        free(off_flow);
+    }
+    hmap_destroy(&netdev->offloaded_flows);
 
     ovs_mutex_unlock(&netdev->mutex);
     ovs_mutex_destroy(&netdev->mutex);
@@ -859,10 +876,10 @@ netdev_dummy_set_config(struct netdev *netdev_, const struct smap *args,
     dummy_packet_conn_set_config(&netdev->conn, args);
 
     if (netdev->rxq_pcap) {
-        fclose(netdev->rxq_pcap);
+        ovs_pcap_close(netdev->rxq_pcap);
     }
     if (netdev->tx_pcap && netdev->tx_pcap != netdev->rxq_pcap) {
-        fclose(netdev->tx_pcap);
+        ovs_pcap_close(netdev->tx_pcap);
     }
     netdev->rxq_pcap = netdev->tx_pcap = NULL;
     pcap = smap_get(args, "pcap");
@@ -1036,8 +1053,7 @@ netdev_dummy_rxq_recv(struct netdev_rxq *rxq_, struct dp_packet_batch *batch,
     netdev->custom_stats[1].value++;
     ovs_mutex_unlock(&netdev->mutex);
 
-    batch->packets[0] = packet;
-    batch->count = 1;
+    dp_packet_batch_init_packet(batch, packet);
 
     if (qfill) {
         *qfill = -ENOTSUP;
@@ -1091,7 +1107,7 @@ netdev_dummy_send(struct netdev *netdev, int qid OVS_UNUSED,
         const void *buffer = dp_packet_data(packet);
         size_t size = dp_packet_size(packet);
 
-        if (batch->packets[i]->packet_type != htonl(PT_ETH)) {
+        if (packet->packet_type != htonl(PT_ETH)) {
             error = EPFNOSUPPORT;
             break;
         }
@@ -1135,7 +1151,7 @@ netdev_dummy_send(struct netdev *netdev, int qid OVS_UNUSED,
                 struct dp_packet *reply = dp_packet_new(0);
                 compose_arp(reply, ARP_OP_REPLY, dev->hwaddr, flow.dl_src,
                             false, flow.nw_dst, flow.nw_src);
-                netdev_dummy_queue_packet(dev, reply, 0);
+                netdev_dummy_queue_packet(dev, reply, NULL, 0);
             }
         }
 
@@ -1144,7 +1160,6 @@ netdev_dummy_send(struct netdev *netdev, int qid OVS_UNUSED,
 
             dp_packet_use_const(&dp, buffer, size);
             ovs_pcap_write(dev->tx_pcap, &dp);
-            fflush(dev->tx_pcap);
         }
 
         ovs_mutex_unlock(&dev->mutex);
@@ -1390,93 +1405,181 @@ netdev_dummy_update_flags(struct netdev *netdev_,
 
     return error;
 }
-
-/* Helper functions. */
 
-#define NETDEV_DUMMY_CLASS(NAME, PMD, RECOFIGURE)               \
-{                                                               \
-    NAME,                                                       \
-    PMD,                        /* is_pmd */                    \
-    NULL,                       /* init */                      \
-    netdev_dummy_run,                                           \
-    netdev_dummy_wait,                                          \
-                                                                \
-    netdev_dummy_alloc,                                         \
-    netdev_dummy_construct,                                     \
-    netdev_dummy_destruct,                                      \
-    netdev_dummy_dealloc,                                       \
-    netdev_dummy_get_config,                                    \
-    netdev_dummy_set_config,                                    \
-    NULL,                       /* get_tunnel_config */         \
-    NULL,                       /* build header */              \
-    NULL,                       /* push header */               \
-    NULL,                       /* pop header */                \
-    netdev_dummy_get_numa_id,                                   \
-    NULL,                       /* set_tx_multiq */             \
-                                                                \
-    netdev_dummy_send,          /* send */                      \
-    NULL,                       /* send_wait */                 \
-                                                                \
-    netdev_dummy_set_etheraddr,                                 \
-    netdev_dummy_get_etheraddr,                                 \
-    netdev_dummy_get_mtu,                                       \
-    netdev_dummy_set_mtu,                                       \
-    netdev_dummy_get_ifindex,                                   \
-    NULL,                       /* get_carrier */               \
-    NULL,                       /* get_carrier_resets */        \
-    NULL,                       /* get_miimon */                \
-    netdev_dummy_get_stats,                                     \
-    netdev_dummy_get_custom_stats,                              \
-                                                                \
-    NULL,                       /* get_features */              \
-    NULL,                       /* set_advertisements */        \
-    NULL,                       /* get_pt_mode */               \
-                                                                \
-    NULL,                       /* set_policing */              \
-    NULL,                       /* get_qos_types */             \
-    NULL,                       /* get_qos_capabilities */      \
-    NULL,                       /* get_qos */                   \
-    NULL,                       /* set_qos */                   \
-    netdev_dummy_get_queue,                                     \
-    NULL,                       /* set_queue */                 \
-    NULL,                       /* delete_queue */              \
-    netdev_dummy_get_queue_stats,                               \
-    netdev_dummy_queue_dump_start,                              \
-    netdev_dummy_queue_dump_next,                               \
-    netdev_dummy_queue_dump_done,                               \
-    netdev_dummy_dump_queue_stats,                              \
-                                                                \
-    NULL,                       /* set_in4 */                   \
-    netdev_dummy_get_addr_list,                                 \
-    NULL,                       /* add_router */                \
-    NULL,                       /* get_next_hop */              \
-    NULL,                       /* get_status */                \
-    NULL,                       /* arp_lookup */                \
-                                                                \
-    netdev_dummy_update_flags,                                  \
-    RECOFIGURE,                                                 \
-                                                                \
-    netdev_dummy_rxq_alloc,                                     \
-    netdev_dummy_rxq_construct,                                 \
-    netdev_dummy_rxq_destruct,                                  \
-    netdev_dummy_rxq_dealloc,                                   \
-    netdev_dummy_rxq_recv,                                      \
-    netdev_dummy_rxq_wait,                                      \
-    netdev_dummy_rxq_drain,                                     \
-                                                                \
-    NO_OFFLOAD_API,                                             \
-    NULL                        /* get_block_id */              \
+/* Flow offload API. */
+static uint32_t
+netdev_dummy_flow_hash(const ovs_u128 *ufid)
+{
+    return ufid->u32[0];
 }
 
-static const struct netdev_class dummy_class =
-    NETDEV_DUMMY_CLASS("dummy", false, NULL);
+static struct offloaded_flow *
+find_offloaded_flow(const struct hmap *offloaded_flows, const ovs_u128 *ufid)
+{
+    uint32_t hash = netdev_dummy_flow_hash(ufid);
+    struct offloaded_flow *data;
 
-static const struct netdev_class dummy_internal_class =
-    NETDEV_DUMMY_CLASS("dummy-internal", false, NULL);
+    HMAP_FOR_EACH_WITH_HASH (data, node, hash, offloaded_flows) {
+        if (ovs_u128_equals(*ufid, data->ufid)) {
+            return data;
+        }
+    }
 
-static const struct netdev_class dummy_pmd_class =
-    NETDEV_DUMMY_CLASS("dummy-pmd", true,
-                       netdev_dummy_reconfigure);
+    return NULL;
+}
+
+static int
+netdev_dummy_flow_put(struct netdev *netdev, struct match *match,
+                      struct nlattr *actions OVS_UNUSED,
+                      size_t actions_len OVS_UNUSED,
+                      const ovs_u128 *ufid, struct offload_info *info,
+                      struct dpif_flow_stats *stats OVS_UNUSED)
+{
+    struct netdev_dummy *dev = netdev_dummy_cast(netdev);
+    struct offloaded_flow *off_flow;
+    bool modify = true;
+
+    ovs_mutex_lock(&dev->mutex);
+
+    off_flow = find_offloaded_flow(&dev->offloaded_flows, ufid);
+    if (!off_flow) {
+        /* Create new offloaded flow. */
+        off_flow = xzalloc(sizeof *off_flow);
+        memcpy(&off_flow->ufid, ufid, sizeof *ufid);
+        hmap_insert(&dev->offloaded_flows, &off_flow->node,
+                    netdev_dummy_flow_hash(ufid));
+        modify = false;
+    }
+
+    off_flow->mark = info->flow_mark;
+    memcpy(&off_flow->match, match, sizeof *match);
+
+    /* As we have per-netdev 'offloaded_flows', we don't need to match
+     * the 'in_port' for received packets. This will also allow offloading for
+     * packets passed to 'receive' command without specifying the 'in_port'. */
+    off_flow->match.wc.masks.in_port.odp_port = 0;
+
+    ovs_mutex_unlock(&dev->mutex);
+
+    if (VLOG_IS_DBG_ENABLED()) {
+        struct ds ds = DS_EMPTY_INITIALIZER;
+
+        ds_put_format(&ds, "%s: flow put[%s]: ", netdev_get_name(netdev),
+                      modify ? "modify" : "create");
+        odp_format_ufid(ufid, &ds);
+        ds_put_cstr(&ds, " flow match: ");
+        match_format(match, NULL, &ds, OFP_DEFAULT_PRIORITY);
+        ds_put_format(&ds, ", mark: %"PRIu32, info->flow_mark);
+
+        VLOG_DBG("%s", ds_cstr(&ds));
+        ds_destroy(&ds);
+    }
+
+    return 0;
+}
+
+static int
+netdev_dummy_flow_del(struct netdev *netdev, const ovs_u128 *ufid,
+                      struct dpif_flow_stats *stats OVS_UNUSED)
+{
+    struct netdev_dummy *dev = netdev_dummy_cast(netdev);
+    struct offloaded_flow *off_flow;
+    const char *error = NULL;
+    uint32_t mark;
+
+    ovs_mutex_lock(&dev->mutex);
+
+    off_flow = find_offloaded_flow(&dev->offloaded_flows, ufid);
+    if (!off_flow) {
+        error = "No such flow.";
+        goto exit;
+    }
+
+    mark = off_flow->mark;
+    hmap_remove(&dev->offloaded_flows, &off_flow->node);
+    free(off_flow);
+
+exit:
+    ovs_mutex_unlock(&dev->mutex);
+
+    if (error || VLOG_IS_DBG_ENABLED()) {
+        struct ds ds = DS_EMPTY_INITIALIZER;
+
+        ds_put_format(&ds, "%s: ", netdev_get_name(netdev));
+        if (error) {
+            ds_put_cstr(&ds, "failed to ");
+        }
+        ds_put_cstr(&ds, "flow del: ");
+        odp_format_ufid(ufid, &ds);
+        if (error) {
+            ds_put_format(&ds, " error: %s", error);
+        } else {
+            ds_put_format(&ds, " mark: %"PRIu32, mark);
+        }
+        VLOG(error ? VLL_WARN : VLL_DBG, "%s", ds_cstr(&ds));
+        ds_destroy(&ds);
+    }
+
+    return error ? -1 : 0;
+}
+
+#define DUMMY_FLOW_OFFLOAD_API                          \
+    .flow_put = netdev_dummy_flow_put,                  \
+    .flow_del = netdev_dummy_flow_del
+
+#define NETDEV_DUMMY_CLASS_COMMON                       \
+    .run = netdev_dummy_run,                            \
+    .wait = netdev_dummy_wait,                          \
+    .alloc = netdev_dummy_alloc,                        \
+    .construct = netdev_dummy_construct,                \
+    .destruct = netdev_dummy_destruct,                  \
+    .dealloc = netdev_dummy_dealloc,                    \
+    .get_config = netdev_dummy_get_config,              \
+    .set_config = netdev_dummy_set_config,              \
+    .get_numa_id = netdev_dummy_get_numa_id,            \
+    .send = netdev_dummy_send,                          \
+    .set_etheraddr = netdev_dummy_set_etheraddr,        \
+    .get_etheraddr = netdev_dummy_get_etheraddr,        \
+    .get_mtu = netdev_dummy_get_mtu,                    \
+    .set_mtu = netdev_dummy_set_mtu,                    \
+    .get_ifindex = netdev_dummy_get_ifindex,            \
+    .get_stats = netdev_dummy_get_stats,                \
+    .get_custom_stats = netdev_dummy_get_custom_stats,  \
+    .get_queue = netdev_dummy_get_queue,                \
+    .get_queue_stats = netdev_dummy_get_queue_stats,    \
+    .queue_dump_start = netdev_dummy_queue_dump_start,  \
+    .queue_dump_next = netdev_dummy_queue_dump_next,    \
+    .queue_dump_done = netdev_dummy_queue_dump_done,    \
+    .dump_queue_stats = netdev_dummy_dump_queue_stats,  \
+    .get_addr_list = netdev_dummy_get_addr_list,        \
+    .update_flags = netdev_dummy_update_flags,          \
+    .rxq_alloc = netdev_dummy_rxq_alloc,                \
+    .rxq_construct = netdev_dummy_rxq_construct,        \
+    .rxq_destruct = netdev_dummy_rxq_destruct,          \
+    .rxq_dealloc = netdev_dummy_rxq_dealloc,            \
+    .rxq_recv = netdev_dummy_rxq_recv,                  \
+    .rxq_wait = netdev_dummy_rxq_wait,                  \
+    .rxq_drain = netdev_dummy_rxq_drain,                \
+    DUMMY_FLOW_OFFLOAD_API
+
+static const struct netdev_class dummy_class = {
+    NETDEV_DUMMY_CLASS_COMMON,
+    .type = "dummy"
+};
+
+static const struct netdev_class dummy_internal_class = {
+    NETDEV_DUMMY_CLASS_COMMON,
+    .type = "dummy-internal"
+};
+
+static const struct netdev_class dummy_pmd_class = {
+    NETDEV_DUMMY_CLASS_COMMON,
+    .type = "dummy-pmd",
+    .is_pmd = true,
+    .reconfigure = netdev_dummy_reconfigure
+};
+
+/* Helper functions. */
 
 static void
 pkt_list_delete(struct ovs_list *l)
@@ -1498,12 +1601,14 @@ eth_from_packet(const char *s)
 }
 
 static struct dp_packet *
-eth_from_flow(const char *s, size_t packet_size)
+eth_from_flow_str(const char *s, size_t packet_size,
+                  struct flow *flow, char **errorp)
 {
+    *errorp = NULL;
+
     enum odp_key_fitness fitness;
     struct dp_packet *packet;
     struct ofpbuf odp_key;
-    struct flow flow;
     int error;
 
     /* Convert string to datapath key.
@@ -1513,14 +1618,14 @@ eth_from_flow(const char *s, size_t packet_size)
      * settle for parsing a datapath key for now.
      */
     ofpbuf_init(&odp_key, 0);
-    error = odp_flow_from_string(s, NULL, &odp_key, NULL);
+    error = odp_flow_from_string(s, NULL, &odp_key, NULL, errorp);
     if (error) {
         ofpbuf_uninit(&odp_key);
         return NULL;
     }
 
     /* Convert odp_key to flow. */
-    fitness = odp_flow_key_to_flow(odp_key.data, odp_key.size, &flow);
+    fitness = odp_flow_key_to_flow(odp_key.data, odp_key.size, flow, errorp);
     if (fitness == ODP_FIT_ERROR) {
         ofpbuf_uninit(&odp_key);
         return NULL;
@@ -1528,15 +1633,15 @@ eth_from_flow(const char *s, size_t packet_size)
 
     packet = dp_packet_new(0);
     if (packet_size) {
-        flow_compose(packet, &flow, NULL, 0);
+        flow_compose(packet, flow, NULL, 0);
         if (dp_packet_size(packet) < packet_size) {
-            packet_expand(packet, &flow, packet_size);
+            packet_expand(packet, flow, packet_size);
         } else if (dp_packet_size(packet) > packet_size){
             dp_packet_delete(packet);
             packet = NULL;
         }
     } else {
-        flow_compose(packet, &flow, NULL, 64);
+        flow_compose(packet, flow, NULL, 64);
     }
 
     ofpbuf_uninit(&odp_key);
@@ -1556,15 +1661,49 @@ netdev_dummy_queue_packet__(struct netdev_rxq_dummy *rx, struct dp_packet *packe
 
 static void
 netdev_dummy_queue_packet(struct netdev_dummy *dummy, struct dp_packet *packet,
-                          int queue_id)
+                          struct flow *flow, int queue_id)
     OVS_REQUIRES(dummy->mutex)
 {
     struct netdev_rxq_dummy *rx, *prev;
+    struct offloaded_flow *data;
+    struct flow packet_flow;
 
     if (dummy->rxq_pcap) {
         ovs_pcap_write(dummy->rxq_pcap, packet);
-        fflush(dummy->rxq_pcap);
     }
+
+    if (!flow) {
+        flow = &packet_flow;
+        flow_extract(packet, flow);
+    }
+    HMAP_FOR_EACH (data, node, &dummy->offloaded_flows) {
+        if (flow_equal_except(flow, &data->match.flow, &data->match.wc)) {
+
+            dp_packet_set_flow_mark(packet, data->mark);
+
+            if (VLOG_IS_DBG_ENABLED()) {
+                struct ds ds = DS_EMPTY_INITIALIZER;
+
+                ds_put_format(&ds, "%s: packet: ",
+                              netdev_get_name(&dummy->up));
+                /* 'flow' does not contain proper port number here.
+                 * Let's just clear it as it wildcarded anyway. */
+                flow->in_port.ofp_port = 0;
+                flow_format(&ds, flow, NULL);
+
+                ds_put_cstr(&ds, " matches with flow: ");
+                odp_format_ufid(&data->ufid, &ds);
+                ds_put_cstr(&ds, " ");
+                match_format(&data->match, NULL, &ds, OFP_DEFAULT_PRIORITY);
+                ds_put_format(&ds, " with mark: %"PRIu32, data->mark);
+
+                VLOG_DBG("%s", ds_cstr(&ds));
+                ds_destroy(&ds);
+            }
+            break;
+        }
+    }
+
     prev = NULL;
     LIST_FOR_EACH (rx, node, &dummy->rxes) {
         if (rx->up.queue_id == queue_id &&
@@ -1610,6 +1749,7 @@ netdev_dummy_receive(struct unixctl_conn *conn,
 
     for (i = k; i < argc; i++) {
         struct dp_packet *packet;
+        struct flow flow;
 
         /* Try to parse 'argv[i]' as packet in hex. */
         packet = eth_from_packet(argv[i]);
@@ -1629,15 +1769,18 @@ netdev_dummy_receive(struct unixctl_conn *conn,
                 i += 2;
             }
             /* Try parse 'argv[i]' as odp flow. */
-            packet = eth_from_flow(flow_str, packet_size);
-
+            char *error_s;
+            packet = eth_from_flow_str(flow_str, packet_size, &flow, &error_s);
             if (!packet) {
-                unixctl_command_reply_error(conn, "bad packet or flow syntax");
+                unixctl_command_reply_error(conn, error_s);
+                free(error_s);
                 goto exit;
             }
+        } else {
+            flow_extract(packet, &flow);
         }
 
-        netdev_dummy_queue_packet(dummy_dev, packet, rx_qid);
+        netdev_dummy_queue_packet(dummy_dev, packet, &flow, rx_qid);
     }
 
     unixctl_command_reply(conn, NULL);

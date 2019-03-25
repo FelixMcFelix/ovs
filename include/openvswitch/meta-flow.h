@@ -136,7 +136,7 @@ struct ofputil_tlv_table_mod;
  *       tunnel flags: Any number of the strings "df", "csum", "key", or
  *         "oam" separated by "|".
  *
- *       TCP flags: See the description of tcp_flags in ovs-ofctl(8).
+ *       TCP flags: See the description of tcp_flags in ovs-fields(7).
  *
  *       packet type: A pair of packet type namespace NS and NS_TYPE within
  *       that namespace "(NS,NS_TYPE)". NS and NS_TYPE are formatted in
@@ -274,7 +274,7 @@ enum OVS_PACKED_ENUM mf_field_id {
 
     /* "conj_id".
      *
-     * ID for "conjunction" actions.  Please refer to ovs-ofctl(8)
+     * ID for "conjunction" actions.  Please refer to ovs-fields(7)
      * documentation of "conjunction" for details.
      *
      * Type: be32.
@@ -1454,7 +1454,7 @@ enum OVS_PACKED_ENUM mf_field_id {
      */
     MFF_IP_TTL,
 
-    /* "ip_frag".
+    /* "ip_frag" (aka "nw_frag").
      *
      * IP fragment information.
      *
@@ -1796,6 +1796,34 @@ enum OVS_PACKED_ENUM mf_field_id {
      */
     MFF_ND_TLL,
 
+    /* "nd_reserved".
+     *
+     * The reserved field in IPv6 Neighbor Discovery message.
+     *
+     * Type: be32.
+     * Maskable: no.
+     * Formatting: decimal.
+     * Prerequisites: ND.
+     * Access: read/write.
+     * NXM: none.
+     * OXM: ERICOXM_OF_ICMPV6_ND_RESERVED(1) since v2.11.
+     */
+    MFF_ND_RESERVED,
+
+    /* "nd_options_type".
+     *
+     * The type of the option in IPv6 Neighbor Discovery message.
+     *
+     * Type: u8.
+     * Maskable: no.
+     * Formatting: decimal.
+     * Prerequisites: ND.
+     * Access: read/write.
+     * NXM: none.
+     * OXM: ERICOXM_OF_ICMPV6_ND_OPTIONS_TYPE(2) since v2.11.
+     */
+    MFF_ND_OPTIONS_TYPE,
+
 /* ## ---- ## */
 /* ## NSH  ## */
 /* ## ---- ## */
@@ -1912,6 +1940,9 @@ struct mf_bitmap {
     unsigned long bm[BITMAP_N_LONGS(MFF_N_IDS)];
 };
 #define MF_BITMAP_INITIALIZER { { [0] = 0 } }
+
+bool mf_bitmap_is_superset(const struct mf_bitmap *super,
+                           const struct mf_bitmap *sub);
 
 /* Use this macro as CASE_MFF_REGS: in a switch statement to choose all of the
  * MFF_REGn cases. */

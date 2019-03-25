@@ -182,6 +182,10 @@ create_gen_opts(struct hmap *dhcp_opts, struct hmap *dhcpv6_opts,
     dhcp_opt_add(dhcp_opts, "tcp_ttl", 37, "uint8");
     dhcp_opt_add(dhcp_opts, "mtu", 26, "uint16");
     dhcp_opt_add(dhcp_opts, "lease_time",  51, "uint32");
+    dhcp_opt_add(dhcp_opts, "wpad", 252, "str");
+    dhcp_opt_add(dhcp_opts, "bootfile_name", 67, "str");
+    dhcp_opt_add(dhcp_opts, "path_prefix", 210, "str");
+    dhcp_opt_add(dhcp_opts, "tftp_server_address", 150, "ipv4");
 
     /* DHCPv6 options. */
     hmap_init(dhcpv6_opts);
@@ -1346,6 +1350,8 @@ test_parse_actions(struct ovs_cmdl_context *ctx OVS_UNUSED)
     dhcp_opts_destroy(&dhcp_opts);
     dhcp_opts_destroy(&dhcpv6_opts);
     nd_ra_opts_destroy(&nd_ra_opts);
+    ovn_extend_table_destroy(&group_table);
+    ovn_extend_table_destroy(&meter_table);
     exit(ok ? EXIT_SUCCESS : EXIT_FAILURE);
 }
 

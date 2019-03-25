@@ -65,7 +65,7 @@ ofputil_encode_bundle_msgs(const struct ofputil_bundle_msg *bms,
             request = ofputil_encode_flow_mod(&bms[i].fm, protocol);
             break;
         case OFPTYPE_GROUP_MOD:
-            request = ofputil_encode_group_mod(version, &bms[i].gm);
+            request = ofputil_encode_group_mod(version, &bms[i].gm, NULL, -1);
             break;
         case OFPTYPE_PACKET_OUT:
             request = ofputil_encode_packet_out(&bms[i].po, protocol);
@@ -112,7 +112,6 @@ ofputil_encode_bundle_ctrl_request(enum ofp_version ofp_version,
     case OFP13_VERSION:
     case OFP14_VERSION:
     case OFP15_VERSION:
-    case OFP16_VERSION:
         request = ofpraw_alloc(ofp_version == OFP13_VERSION
                                ? OFPRAW_ONFT13_BUNDLE_CONTROL
                                : OFPRAW_OFPT14_BUNDLE_CONTROL, ofp_version, 0);

@@ -90,7 +90,7 @@ def make_unix_socket(style, nonblock, bind_path, connect_path, short=False):
 
             try:
                 os.fchmod(sock.fileno(), 0o700)
-            except OSError as e:
+            except OSError:
                 pass
         if connect_path is not None:
             try:
@@ -162,8 +162,8 @@ def make_unix_socket(style, nonblock, bind_path, connect_path, short=False):
 
 
 def check_connection_completion(sock):
-    p = ovs.poller.SelectPoll()
     if sys.platform == "win32":
+        p = ovs.poller.SelectPoll()
         event = winutils.get_new_event(None, False, True, None)
         # Receive notification of readiness for writing, of completed
         # connection or multipoint join operation, and of socket closure.
@@ -173,14 +173,15 @@ def check_connection_completion(sock):
                                  win32file.FD_CLOSE)
         p.register(event, ovs.poller.POLLOUT)
     else:
+        p = ovs.poller.get_system_poll()
         p.register(sock, ovs.poller.POLLOUT)
     pfds = p.poll(0)
     if len(pfds) == 1:
         revents = pfds[0][1]
-        if revents & ovs.poller.POLLERR:
+        if revents & ovs.poller.POLLERR or revents & ovs.poller.POLLHUP:
             try:
                 # The following should raise an exception.
-                socket.send("\0", socket.MSG_DONTWAIT)
+                sock.send("\0".encode(), socket.MSG_DONTWAIT)
 
                 # (Here's where we end up if it didn't.)
                 # XXX rate-limit

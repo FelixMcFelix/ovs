@@ -459,6 +459,8 @@ expr_print(const struct expr *e)
 
 /* Parsing. */
 
+#define MAX_PAREN_DEPTH 100
+
 /* Context maintained during expr_parse(). */
 struct expr_context {
     struct lexer *lexer;           /* Lexer for pulling more tokens. */
@@ -466,6 +468,7 @@ struct expr_context {
     const struct shash *addr_sets; /* Address set table. */
     const struct shash *port_groups; /* Port group table. */
     bool not;                    /* True inside odd number of NOT operators. */
+    unsigned int paren_depth;    /* Depth of nested parentheses. */
 };
 
 struct expr *expr_parse__(struct expr_context *);
@@ -576,6 +579,11 @@ make_cmp(struct expr_context *ctx,
                         "with %s field %s.",
                         expr_level_to_string(f->symbol->level),
                         f->symbol->name);
+            goto exit;
+        }
+        if (!cs->n_values) {
+            lexer_error(ctx->lexer, "Only == and != operators may be used "
+                        "to compare a field against an empty value set.");
             goto exit;
         }
         if (cs->values[0].masked) {
@@ -1077,7 +1085,15 @@ expr_parse_primary(struct expr_context *ctx, bool *atomic)
 {
     *atomic = false;
     if (lexer_match(ctx->lexer, LEX_T_LPAREN)) {
+        if (ctx->paren_depth >= MAX_PAREN_DEPTH) {
+            lexer_error(ctx->lexer, "Parentheses nested too deeply.");
+            return NULL;
+        }
+
+        ctx->paren_depth++;
         struct expr *e = expr_parse__(ctx);
+        ctx->paren_depth--;
+
         if (!lexer_force_match(ctx->lexer, LEX_T_RPAREN)) {
             expr_destroy(e);
             return NULL;

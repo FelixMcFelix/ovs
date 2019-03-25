@@ -198,7 +198,7 @@ odp_set_sctp(struct dp_packet *packet, const struct ovs_key_sctp *key,
 static void
 odp_set_tunnel_action(const struct nlattr *a, struct flow_tnl *tun_key)
 {
-    ovs_assert(odp_tun_key_from_attr(a, tun_key) != ODP_FIT_ERROR);
+    ovs_assert(odp_tun_key_from_attr(a, tun_key, NULL) != ODP_FIT_ERROR);
 }
 
 static void
@@ -225,6 +225,23 @@ set_arp(struct dp_packet *packet, const struct ovs_key_arp *key,
         put_16aligned_be32(&arp->ar_tpa,
                            key->arp_tip | (ar_tpa & ~mask->arp_tip));
     }
+}
+
+static void
+odp_set_nd_ext(struct dp_packet *packet, const struct ovs_key_nd_extensions
+        *key, const struct ovs_key_nd_extensions *mask)
+{
+    const struct ovs_nd_msg *ns = dp_packet_l4(packet);
+    ovs_16aligned_be32 reserved = ns->rso_flags;
+    uint8_t opt_type = ns->options[0].type;
+
+    if (mask->nd_reserved) {
+        put_16aligned_be32(&reserved, key->nd_reserved);
+    }
+    if (mask->nd_options_type) {
+        opt_type = key->nd_options_type;
+    }
+    packet_set_nd_ext(packet, reserved, opt_type);
 }
 
 static void
@@ -280,9 +297,9 @@ odp_set_nsh(struct dp_packet *packet, const struct nlattr *a, bool has_mask)
     ovs_be32 path_hdr;
 
     if (has_mask) {
-        odp_nsh_key_from_attr(a, &key, &mask);
+        odp_nsh_key_from_attr(a, &key, &mask, NULL);
     } else {
-        odp_nsh_key_from_attr(a, &key, NULL);
+        odp_nsh_key_from_attr(a, &key, NULL, NULL);
     }
 
     if (!has_mask) {
@@ -438,6 +455,16 @@ odp_execute_set_action(struct dp_packet *packet, const struct nlattr *a)
         }
         break;
 
+    case OVS_KEY_ATTR_ND_EXTENSIONS:
+        if (OVS_LIKELY(dp_packet_get_nd_payload(packet))) {
+            const struct ovs_key_nd_extensions *nd_ext_key
+                 = nl_attr_get_unspec(a, sizeof(struct ovs_key_nd_extensions));
+            ovs_16aligned_be32 rso_flags;
+            put_16aligned_be32(&rso_flags, nd_ext_key->nd_reserved);
+            packet_set_nd_ext(packet, rso_flags, nd_ext_key->nd_options_type);
+        }
+        break;
+
     case OVS_KEY_ATTR_DP_HASH:
         md->dp_hash = nl_attr_get_u32(a);
         break;
@@ -538,6 +565,11 @@ odp_execute_masked_set_action(struct dp_packet *packet,
     case OVS_KEY_ATTR_ND:
         odp_set_nd(packet, nl_attr_get(a),
                    get_mask(a, struct ovs_key_nd));
+        break;
+
+    case OVS_KEY_ATTR_ND_EXTENSIONS:
+        odp_set_nd_ext(packet, nl_attr_get(a),
+                       get_mask(a, struct ovs_key_nd_extensions));
         break;
 
     case OVS_KEY_ATTR_DP_HASH:
@@ -718,7 +750,7 @@ odp_execute_actions(void *dp, struct dp_packet_batch *batch, bool steal,
 
                 dp_execute_action(dp, batch, a, should_steal);
 
-                if (last_action || batch->count == 0) {
+                if (last_action || dp_packet_batch_is_empty(batch)) {
                     /* We do not need to free the packets.
                      * Either dp_execute_actions() has stolen them
                      * or the batch is freed due to errors. In either

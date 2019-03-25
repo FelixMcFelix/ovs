@@ -40,13 +40,13 @@ pidfile_is_running () {
 
 stop_nb_ovsdb() {
     if pidfile_is_running $DB_NB_PID; then
-        ovs-appctl -t $rundir/ovnnb_db.ctl exit
+        ovs-appctl -t $OVN_RUNDIR/ovnnb_db.ctl exit
     fi
 }
 
 stop_sb_ovsdb() {
     if pidfile_is_running $DB_SB_PID; then
-        ovs-appctl -t $rundir/ovnsb_db.ctl exit
+        ovs-appctl -t $OVN_RUNDIR/ovnsb_db.ctl exit
     fi
 }
 
@@ -61,8 +61,8 @@ demote_ovnnb() {
     fi
 
     if test -e $ovnnb_active_conf_file; then
-        ovs-appctl -t $rundir/ovnnb_db.ctl ovsdb-server/set-active-ovsdb-server `cat $ovnnb_active_conf_file`
-        ovs-appctl -t $rundir/ovnnb_db.ctl ovsdb-server/connect-active-ovsdb-server
+        ovs-appctl -t $OVN_RUNDIR/ovnnb_db.ctl ovsdb-server/set-active-ovsdb-server `cat $ovnnb_active_conf_file`
+        ovs-appctl -t $OVN_RUNDIR/ovnnb_db.ctl ovsdb-server/connect-active-ovsdb-server
     else
         echo >&2 "$0: active server details not set"
         exit 1
@@ -75,8 +75,8 @@ demote_ovnsb() {
     fi
 
     if test -e $ovnsb_active_conf_file; then
-        ovs-appctl -t $rundir/ovnsb_db.ctl ovsdb-server/set-active-ovsdb-server `cat $ovnsb_active_conf_file`
-        ovs-appctl -t $rundir/ovnsb_db.ctl ovsdb-server/connect-active-ovsdb-server
+        ovs-appctl -t $OVN_RUNDIR/ovnsb_db.ctl ovsdb-server/set-active-ovsdb-server `cat $ovnsb_active_conf_file`
+        ovs-appctl -t $OVN_RUNDIR/ovnsb_db.ctl ovsdb-server/connect-active-ovsdb-server
     else
         echo >&2 "$0: active server details not set"
         exit 1
@@ -85,17 +85,17 @@ demote_ovnsb() {
 
 promote_ovnnb() {
     rm -f $ovnnb_active_conf_file
-    ovs-appctl -t $rundir/ovnnb_db.ctl ovsdb-server/disconnect-active-ovsdb-server
+    ovs-appctl -t $OVN_RUNDIR/ovnnb_db.ctl ovsdb-server/disconnect-active-ovsdb-server
 }
 
 promote_ovnsb() {
     rm -f $ovnsb_active_conf_file
-    ovs-appctl -t $rundir/ovnsb_db.ctl ovsdb-server/disconnect-active-ovsdb-server
+    ovs-appctl -t $OVN_RUNDIR/ovnsb_db.ctl ovsdb-server/disconnect-active-ovsdb-server
 }
 
 start_ovsdb__() {
     local DB=$1 db=$2 schema_name=$3 table_name=$4
-    local pid
+    local db_pid_file
     local cluster_local_addr
     local cluster_local_port
     local cluster_local_proto
@@ -115,7 +115,11 @@ start_ovsdb__() {
     local port
     local addr
     local active_conf_file
-    eval pid=\$DB_${DB}_PID
+    local use_remote_in_db
+    local ovn_db_ssl_key
+    local ovn_db_ssl_cert
+    local ovn_db_ssl_cacert
+    eval db_pid_file=\$DB_${DB}_PID
     eval cluster_local_addr=\$DB_${DB}_CLUSTER_LOCAL_ADDR
     eval cluster_local_port=\$DB_${DB}_CLUSTER_LOCAL_PORT
     eval cluster_local_proto=\$DB_${DB}_CLUSTER_LOCAL_PROTO
@@ -135,9 +139,14 @@ start_ovsdb__() {
     eval port=\$DB_${DB}_PORT
     eval addr=\$DB_${DB}_ADDR
     eval active_conf_file=\$ovn${db}_active_conf_file
+    eval use_remote_in_db=\$DB_${DB}_USE_REMOTE_IN_DB
+    eval ovn_db_ssl_key=\$OVN_${DB}_DB_SSL_KEY
+    eval ovn_db_ssl_cert=\$OVN_${DB}_DB_SSL_CERT
+    eval ovn_db_ssl_cacert=\$OVN_${DB}_DB_SSL_CA_CERT
 
+    install_dir "$OVN_RUNDIR"
     # Check and eventually start ovsdb-server for DB
-    if pidfile_is_running $pid; then
+    if pidfile_is_running $db_pid_file; then
         return
     fi
 
@@ -167,8 +176,10 @@ $cluster_remote_port
 
     set ovsdb-server
     set "$@" $log --log-file=$logfile
-    set "$@" --remote=punix:$sock --pidfile=$pid
+    set "$@" --remote=punix:$sock --pidfile=$db_pid_file
     set "$@" --unixctl=ovn${db}_db.ctl
+
+    [ "$OVS_USER" != "" ] && set "$@" --user "$OVS_USER"
 
     if test X"$detach" != Xno; then
         set "$@" --detach --monitor
@@ -176,10 +187,26 @@ $cluster_remote_port
         set exec "$@"
     fi
 
-    set "$@" --remote=db:$schema_name,$table_name,connections
-    set "$@" --private-key=db:$schema_name,SSL,private_key
-    set "$@" --certificate=db:$schema_name,SSL,certificate
-    set "$@" --ca-cert=db:$schema_name,SSL,ca_cert
+    if test X"$use_remote_in_db" != Xno; then
+        set "$@" --remote=db:$schema_name,$table_name,connections
+    fi
+
+    if test X"$ovn_db_ssl_key" != X; then
+        set "$@" --private-key=$ovn_db_ssl_key
+    else
+        set "$@" --private-key=db:$schema_name,SSL,private_key
+    fi
+    if test X"$ovn_db_ssl_cert" != X; then
+        set "$@" --certificate=$ovn_db_ssl_cert
+    else
+        set "$@" --certificate=db:$schema_name,SSL,certificate
+    fi
+    if test X"$ovn_db_ssl_cacert" != X; then
+        set "$@" --ca-cert=$ovn_db_ssl_cacert
+    else
+        set "$@" --ca-cert=db:$schema_name,SSL,ca_cert
+    fi
+
     set "$@" --ssl-protocols=db:$schema_name,SSL,ssl_protocols
     set "$@" --ssl-ciphers=db:$schema_name,SSL,ssl_ciphers
 
@@ -196,7 +223,7 @@ $cluster_remote_port
     # Initialize the database if it's running standalone,
     # active-passive, or is the first server in a cluster.
     if test -z "$cluster_remote_addr"; then
-        ovn-nbctl init
+        ovn-${db}ctl init
     fi
 
     if test $mode = cluster; then
@@ -218,7 +245,7 @@ start_ovsdb () {
 }
 
 sync_status() {
-    ovs-appctl -t $rundir/ovn${1}_db.ctl ovsdb-server/sync-status | awk '{if(NR==1) print $2}'
+    ovs-appctl -t $OVN_RUNDIR/ovn${1}_db.ctl ovsdb-server/sync-status | awk '{if(NR==1) print $2}'
 }
 
 status_ovnnb() {
@@ -289,6 +316,8 @@ start_northd () {
             set "$@" --log-file=$OVN_NORTHD_LOGFILE
         fi
 
+        [ "$OVN_USER" != "" ] && set "$@" --user "$OVN_USER"
+
         set "$@" $OVN_NORTHD_LOG $ovn_northd_params
 
         OVS_RUNDIR=${OVN_RUNDIR} start_daemon "$OVN_NORTHD_PRIORITY" "$OVN_NORTHD_WRAPPER" "$@"
@@ -310,6 +339,9 @@ start_controller () {
     if test X"$OVN_CONTROLLER_SSL_BOOTSTRAP_CA_CERT" != X; then
         set "$@" --bootstrap-ca-cert=$OVN_CONTROLLER_SSL_BOOTSTRAP_CA_CERT
     fi
+
+    [ "$OVN_USER" != "" ] && set "$@" --user "$OVN_USER"
+
     OVS_RUNDIR=${OVN_RUNDIR} start_daemon "$OVN_CONTROLLER_PRIORITY" "$OVN_CONTROLLER_WRAPPER" "$@"
 }
 
@@ -328,6 +360,9 @@ start_controller_vtep () {
     if test X"$OVN_CONTROLLER_SSL_BOOTSTRAP_CA_CERT" != X; then
         set "$@" --bootstrap-ca-cert=$OVN_CONTROLLER_SSL_BOOTSTRAP_CA_CERT
     fi
+
+    [ "$OVN_USER" != "" ] && set "$@" --user "$OVN_USER"
+
     OVS_RUNDIR=${OVN_RUNDIR} start_daemon "$OVN_CONTROLLER_PRIORITY" "$OVN_CONTROLLER_WRAPPER" "$@"
 }
 
@@ -346,7 +381,7 @@ stop_northd () {
 }
 
 stop_controller () {
-    OVS_RUNDIR=${OVN_RUNDIR} stop_daemon ovn-controller
+    OVS_RUNDIR=${OVN_RUNDIR} stop_daemon ovn-controller "$@"
 }
 
 stop_controller_vtep () {
@@ -363,7 +398,7 @@ restart_northd () {
 }
 
 restart_controller () {
-    stop_controller
+    stop_controller --restart
     start_controller
 }
 
@@ -394,8 +429,11 @@ restart_sb_ovsdb () {
 set_defaults () {
     OVN_MANAGE_OVSDB=yes
 
-    DB_NB_SOCK=$rundir/ovnnb_db.sock
-    DB_NB_PID=$rundir/ovnnb_db.pid
+    OVS_RUNDIR=${OVS_RUNDIR:-${rundir}}
+    OVN_RUNDIR=${OVN_RUNDIR:-${OVS_RUNDIR}}
+
+    DB_NB_SOCK=$OVN_RUNDIR/ovnnb_db.sock
+    DB_NB_PID=$OVN_RUNDIR/ovnnb_db.pid
     DB_NB_FILE=$dbdir/ovnnb_db.db
     DB_NB_ADDR=0.0.0.0
     DB_NB_PORT=6641
@@ -403,8 +441,8 @@ set_defaults () {
     DB_NB_SYNC_FROM_ADDR=
     DB_NB_SYNC_FROM_PORT=6641
 
-    DB_SB_SOCK=$rundir/ovnsb_db.sock
-    DB_SB_PID=$rundir/ovnsb_db.pid
+    DB_SB_SOCK=$OVN_RUNDIR/ovnsb_db.sock
+    DB_SB_PID=$OVN_RUNDIR/ovnsb_db.pid
     DB_SB_FILE=$dbdir/ovnsb_db.db
     DB_SB_ADDR=0.0.0.0
     DB_SB_PORT=6642
@@ -415,7 +453,7 @@ set_defaults () {
     DB_NB_SCHEMA=$datadir/ovn-nb.ovsschema
     DB_SB_SCHEMA=$datadir/ovn-sb.ovsschema
 
-    DB_SOCK=$rundir/db.sock
+    DB_SOCK=$OVN_RUNDIR/db.sock
     DB_CONF_FILE=$dbdir/conf.db
 
     OVN_NORTHD_PRIORITY=-10
@@ -423,8 +461,8 @@ set_defaults () {
     OVN_CONTROLLER_PRIORITY=-10
     OVN_CONTROLLER_WRAPPER=
 
-    OVS_RUNDIR=${OVS_RUNDIR:-${rundir}}
-    OVN_RUNDIR=${OVN_RUNDIR:-${OVS_RUNDIR}}
+    OVN_USER=
+    OVS_USER=
 
     OVN_CONTROLLER_LOG="-vconsole:emer -vsyslog:err -vfile:info"
     OVN_NORTHD_LOG="-vconsole:emer -vsyslog:err -vfile:info"
@@ -463,6 +501,17 @@ set_defaults () {
 
     OVN_NORTHD_NB_DB="unix:$DB_NB_SOCK"
     OVN_NORTHD_SB_DB="unix:$DB_SB_SOCK"
+    DB_NB_USE_REMOTE_IN_DB="yes"
+    DB_SB_USE_REMOTE_IN_DB="yes"
+
+    OVN_NB_DB_SSL_KEY=""
+    OVN_NB_DB_SSL_CERT=""
+    OVN_NB_DB_SSL_CA_CERT=""
+
+    OVN_SB_DB_SSL_KEY=""
+    OVN_SB_DB_SSL_CERT=""
+    OVN_SB_DB_SSL_CA_CERT=""
+
 }
 
 set_option () {
@@ -506,6 +555,14 @@ Commands:
   restart_sb_ovsdb            restart ovn southbound db ovsdb-server process
   restart_controller          restart ovn-controller
   restart_controller_vtep     restart ovn-controller-vtep
+  status_northd               status ovs-northd
+  status_ovsdb                status related ovsdb-server processes
+  status_controller           status ovn-controller
+  status_controller_vtep      status ovn-controller-vtep
+  promote_ovnnb               promote ovn northbound db backup server to active
+  promote_ovnsb               promote ovn southbound db backup server to active
+  demote_ovnnb                demote ovn northbound db active server to backup
+  demote_ovnsb                demote ovn southbound db active server to backup
   run_nb_ovsdb                run ovn northbound db ovsdb-server process
   run_sb_ovsdb                run ovn southbound db ovsdb-server process
 
@@ -518,6 +575,12 @@ Options:
   --ovn-controller-ssl-cert=CERT OVN Southbound SSL certificate file
   --ovn-controller-ssl-ca-cert=CERT OVN Southbound SSL CA certificate file
   --ovn-controller-ssl-bootstrap-ca-cert=CERT Bootstrapped OVN Southbound SSL CA certificate file
+  --ovn-nb-db-ssl-key=KEY OVN Northbound DB SSL private key file
+  --ovn-nb-db-ssl-cert=CERT OVN Northbound DB SSL certificate file
+  --ovn-nb-db-ssl-ca-cert=CERT OVN Northbound DB SSL CA certificate file
+  --ovn-sb-db-ssl-key=KEY OVN Southbound DB SSL private key file
+  --ovn-sb-db-ssl-cert=CERT OVN Southbound DB SSL certificate file
+  --ovn-sb-db-ssl-ca-cert=CERT OVN Southbound DB SSL CA certificate file
   --ovn-manage-ovsdb=yes|no        Whether or not the OVN databases should be
                                    automatically started and stopped along
                                    with ovn-northd. The default is "yes". If
@@ -529,6 +592,8 @@ Options:
   --ovn-northd-logfile=STRING        ovn northd process log file (default: $OVN_NORTHD_LOGFILE)
   --ovn-nb-log=STRING             ovn NB ovsdb-server processes logging params (default: $OVN_NB_LOG)
   --ovn-sb-log=STRING             ovn SB ovsdb-server processes logging params (default: $OVN_SB_LOG)
+  --ovn-user="user[:group]"      pass the --user flag to the ovn daemons
+  --ovs-user="user[:group]"      pass the --user flag to ovs daemons
   -h, --help                     display this help message
 
 File location options:
@@ -577,6 +642,8 @@ File location options:
   transport (default: $DB_SB_CLUSTER_REMOTE_PROTO)
   --ovn-northd-nb-db=NB DB address(es) (default: $OVN_NORTHD_NB_DB)
   --ovn-northd-sb-db=SB DB address(es) (default: $OVN_NORTHD_SB_DB)
+  --db-nb-use-remote-in-db=yes|no OVN_Northbound db listen on target connection table (default: $DB_NB_USE_REMOTE_IN_DB)
+  --db-sb-use-remote-in-db=yes|no OVN_Southbound db listen on target connection table (default: $DB_SB_USE_REMOTE_IN_DB)
 
 Default directories with "configure" option and environment variable override:
   logs: /usr/local/var/log/openvswitch (--with-logdir, OVS_LOGDIR)

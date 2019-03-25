@@ -29,8 +29,8 @@ check: all
 installcheck:
 mostlyclean:
 clean:
-	rm -f *.o *.ko *.mod.* Module.symvers .*.cmd kcompat.h.new \
-		modules.order .tmp_versions/openvswitch.mod
+	rm -f *.o *.ko *.mod.* .*.gcno .*.d .*.cmd kcompat.h.new \
+		.cache.mk Module.symvers modules.order .tmp_versions/*.mod
 	for d in $(build_links); do if test -h $$d; then rm $$d; fi; done
 distclean: clean
 	rm -f kcompat.h
@@ -68,11 +68,11 @@ ifeq (,$(wildcard $(CONFIG_FILE)))
 endif
 
 default:
-	$(MAKE) -C $(KSRC) M=$(builddir) modules
+	$(MAKE) -C $(KSRC) $(if @KARCH@,ARCH=@KARCH@) M=$(builddir) modules
 
 modules_install:
-	$(MAKE) -C $(KSRC) M=$(builddir) modules_install
-	depmod `sed -n 's/#define UTS_RELEASE "\([^"]*\)"/\1/p' $(KSRC)/include/generated/utsrelease.h`
+	$(MAKE) -C $(KSRC) $(if @KARCH@,ARCH=@KARCH@) M=$(builddir) modules_install
+	/sbin/depmod `sed -n 's/#define UTS_RELEASE "\([^"]*\)"/\1/p' $(KSRC)/include/generated/utsrelease.h`
 endif
 
 # Much of the kernel build system in this file is derived from Intel's

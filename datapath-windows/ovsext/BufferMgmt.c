@@ -1101,9 +1101,9 @@ nblcopy_error:
 
 NDIS_STATUS
 GetIpHeaderInfo(PNET_BUFFER_LIST curNbl,
+                const POVS_PACKET_HDR_INFO hdrInfo,
                 UINT32 *hdrSize)
 {
-    CHAR *ethBuf[sizeof(EthHdr)];
     EthHdr *eth;
     IPHdr *ipHdr;
     PNET_BUFFER curNb;
@@ -1111,16 +1111,14 @@ GetIpHeaderInfo(PNET_BUFFER_LIST curNbl,
     curNb = NET_BUFFER_LIST_FIRST_NB(curNbl);
     ASSERT(NET_BUFFER_NEXT_NB(curNb) == NULL);
 
-    eth = (EthHdr *)NdisGetDataBuffer(curNb, ETH_HEADER_LENGTH,
-                                      (PVOID)&ethBuf, 1, 0);
+    eth = (EthHdr *)NdisGetDataBuffer(curNb,
+                                      hdrInfo->l4Offset,
+                                      NULL, 1, 0);
     if (eth == NULL) {
         return NDIS_STATUS_INVALID_PACKET;
     }
-    ipHdr = (IPHdr *)((PCHAR)eth + ETH_HEADER_LENGTH);
-    if (ipHdr == NULL) {
-        return NDIS_STATUS_INVALID_PACKET;
-    }
-    *hdrSize = (UINT32)(ETH_HEADER_LENGTH + (ipHdr->ihl * 4));
+    ipHdr = (IPHdr *)((PCHAR)eth + hdrInfo->l3Offset);
+    *hdrSize = (UINT32)(hdrInfo->l3Offset + (ipHdr->ihl * 4));
     return NDIS_STATUS_SUCCESS;
 }
 
@@ -1380,7 +1378,7 @@ OvsFragmentNBL(PVOID ovsContext,
 
     /* Figure out the header size */
     if (isIpFragment) {
-        status = GetIpHeaderInfo(nbl, &hdrSize);
+        status = GetIpHeaderInfo(nbl, hdrInfo, &hdrSize);
     } else {
         status = GetSegmentHeaderInfo(nbl, hdrInfo, &hdrSize, &seqNumber);
     }
@@ -1622,6 +1620,7 @@ OvsCompleteNBL(PVOID switch_ctx,
 {
     POVS_BUFFER_CONTEXT ctx;
     UINT16 flags;
+    UINT32 dataOffsetDelta;
     PNET_BUFFER_LIST parent;
     NDIS_STATUS status;
     NDIS_HANDLE poolHandle;
@@ -1653,6 +1652,7 @@ OvsCompleteNBL(PVOID switch_ctx,
     nb = NET_BUFFER_LIST_FIRST_NB(nbl);
 
     flags = ctx->flags;
+    dataOffsetDelta = ctx->dataOffsetDelta;
     if (!(flags & OVS_BUFFER_FRAGMENT) &&
         NET_BUFFER_DATA_LENGTH(nb) != ctx->origDataLength) {
         UINT32 diff;
@@ -1667,7 +1667,7 @@ OvsCompleteNBL(PVOID switch_ctx,
         }
     }
 
-    if (ctx->flags & OVS_BUFFER_PRIVATE_CONTEXT) {
+    if (flags & OVS_BUFFER_PRIVATE_CONTEXT) {
         NdisFreeNetBufferListContext(nbl, sizeof (OVS_BUFFER_CONTEXT));
     }
 
@@ -1740,7 +1740,7 @@ OvsCompleteNBL(PVOID switch_ctx,
 #ifdef DBG
         InterlockedDecrement((LONG volatile *)&ovsPool->fragNBLCount);
 #endif
-        NdisFreeFragmentNetBufferList(nbl, ctx->dataOffsetDelta, 0);
+        NdisFreeFragmentNetBufferList(nbl, dataOffsetDelta, 0);
     }
 
     if (parent != NULL) {

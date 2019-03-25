@@ -48,6 +48,7 @@
 #include "netlink-protocol.h"
 #include "netlink-socket.h"
 #endif
+#include "dns-resolve.h"
 
 VLOG_DEFINE_THIS_MODULE(socket_util);
 
@@ -56,6 +57,12 @@ static int getsockopt_int(int fd, int level, int option, const char *optname,
 static struct sockaddr_in *sin_cast(const struct sockaddr *);
 static struct sockaddr_in6 *sin6_cast(const struct sockaddr *);
 static const struct sockaddr *sa_cast(const struct sockaddr_storage *);
+static bool parse_sockaddr_components(struct sockaddr_storage *ss,
+                                      char *host_s,
+                                      const char *port_s,
+                                      uint16_t default_port,
+                                      const char *s,
+                                      bool resolve_host);
 
 /* Sets 'fd' to non-blocking mode.  Returns 0 if successful, otherwise a
  * positive errno value. */
@@ -278,7 +285,7 @@ check_connection_completion(int fd)
     }
 #endif
     if (retval == 1) {
-        if (pfd.revents & POLLERR) {
+        if (pfd.revents & (POLLERR | POLLHUP)) {
             ssize_t n = send(fd, "", 1, 0);
             if (n < 0) {
                 return sock_errno();
@@ -420,10 +427,30 @@ inet_parse_port_host_tokens(char *s, char **portp, char **hostp)
 }
 
 static bool
+parse_sockaddr_components_dns(struct sockaddr_storage *ss OVS_UNUSED,
+                              char *host_s,
+                              const char *port_s OVS_UNUSED,
+                              uint16_t default_port OVS_UNUSED,
+                              const char *s OVS_UNUSED)
+{
+    char *tmp_host_s;
+
+    dns_resolve(host_s, &tmp_host_s);
+    if (tmp_host_s != NULL) {
+        parse_sockaddr_components(ss, tmp_host_s, port_s,
+                                  default_port, s, false);
+        free(tmp_host_s);
+        return true;
+    }
+    return false;
+}
+
+static bool
 parse_sockaddr_components(struct sockaddr_storage *ss,
                           char *host_s,
                           const char *port_s, uint16_t default_port,
-                          const char *s)
+                          const char *s,
+                          bool resolve_host)
 {
     struct sockaddr_in *sin = sin_cast(sa_cast(ss));
     int port;
@@ -445,7 +472,6 @@ parse_sockaddr_components(struct sockaddr_storage *ss,
         sin6->sin6_family = AF_INET6;
         sin6->sin6_port = htons(port);
         if (!addr || !*addr || !ipv6_parse(addr, &sin6->sin6_addr)) {
-            VLOG_ERR("%s: bad IPv6 address \"%s\"", s, addr ? addr : "");
             goto exit;
         }
 
@@ -468,13 +494,19 @@ parse_sockaddr_components(struct sockaddr_storage *ss,
         sin->sin_family = AF_INET;
         sin->sin_port = htons(port);
         if (host_s && !ip_parse(host_s, &sin->sin_addr.s_addr)) {
-            VLOG_ERR("%s: bad IPv4 address \"%s\"", s, host_s);
-            goto exit;
+            goto resolve;
         }
     }
 
     return true;
 
+resolve:
+    if (resolve_host && parse_sockaddr_components_dns(ss, host_s, port_s,
+                                                      default_port, s)) {
+        return true;
+    } else if (!resolve_host) {
+        VLOG_ERR("%s: bad IP address \"%s\"", s, host_s);
+    }
 exit:
     memset(ss, 0, sizeof *ss);
     return false;
@@ -486,12 +518,13 @@ exit:
  * is optional and defaults to 'default_port' (use 0 to make the kernel choose
  * an available port, although this isn't usually appropriate for active
  * connections).  If 'default_port' is negative, then <port> is required.
+ * It resolves the host if 'resolve_host' is true.
  *
  * On success, returns true and stores the parsed remote address into '*ss'.
  * On failure, logs an error, stores zeros into '*ss', and returns false. */
 bool
 inet_parse_active(const char *target_, int default_port,
-                  struct sockaddr_storage *ss)
+                  struct sockaddr_storage *ss, bool resolve_host)
 {
     char *target = xstrdup(target_);
     char *port, *host;
@@ -505,7 +538,8 @@ inet_parse_active(const char *target_, int default_port,
         VLOG_ERR("%s: port must be specified", target_);
         ok = false;
     } else {
-        ok = parse_sockaddr_components(ss, host, port, default_port, target_);
+        ok = parse_sockaddr_components(ss, host, port, default_port,
+                                       target_, resolve_host);
     }
     if (!ok) {
         memset(ss, 0, sizeof *ss);
@@ -542,7 +576,7 @@ inet_open_active(int style, const char *target, int default_port,
     int error;
 
     /* Parse. */
-    if (!inet_parse_active(target, default_port, &ss)) {
+    if (!inet_parse_active(target, default_port, &ss, true)) {
         error = EAFNOSUPPORT;
         goto exit;
     }
@@ -625,7 +659,8 @@ inet_parse_passive(const char *target_, int default_port,
         VLOG_ERR("%s: port must be specified", target_);
         ok = false;
     } else {
-        ok = parse_sockaddr_components(ss, host, port, default_port, target_);
+        ok = parse_sockaddr_components(ss, host, port, default_port,
+                                       target_, true);
     }
     if (!ok) {
         memset(ss, 0, sizeof *ss);
@@ -691,7 +726,8 @@ inet_open_passive(int style, const char *target, int default_port,
     /* Bind. */
     if (bind(fd, (struct sockaddr *) &ss, ss_length(&ss)) < 0) {
         error = sock_errno();
-        VLOG_ERR("%s: bind: %s", target, sock_strerror(error));
+        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
+        VLOG_ERR_RL(&rl, "%s: bind: %s", target, sock_strerror(error));
         goto error;
     }
 
@@ -747,7 +783,7 @@ inet_parse_address(const char *target_, struct sockaddr_storage *ss)
 {
     char *target = xstrdup(target_);
     char *host = unbracket(target);
-    bool ok = parse_sockaddr_components(ss, host, NULL, 0, target_);
+    bool ok = parse_sockaddr_components(ss, host, NULL, 0, target_, false);
     if (!ok) {
         memset(ss, 0, sizeof *ss);
     }
@@ -1205,7 +1241,7 @@ sock_strerror(int error)
 #endif
 }
 
-#ifndef _WIN32 //Avoid using sendmsg on Windows entirely
+#ifndef _WIN32 /* Avoid using sendmsg on Windows entirely. */
 static int
 emulate_sendmmsg(int fd, struct mmsghdr *msgs, unsigned int n,
                  unsigned int flags)

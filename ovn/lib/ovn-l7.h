@@ -70,6 +70,12 @@ struct gen_opts_map {
 #define DHCP_OPT_T1 DHCP_OPTION("T1", 58, "uint32")
 #define DHCP_OPT_T2 DHCP_OPTION("T2", 59, "uint32")
 
+#define DHCP_OPT_BOOTFILE DHCP_OPTION("bootfile_name", 67, "str")
+#define DHCP_OPT_WPAD DHCP_OPTION("wpad", 252, "str")
+#define DHCP_OPT_PATH_PREFIX DHCP_OPTION("path_prefix", 210, "str")
+#define DHCP_OPT_TFTP_SERVER_ADDRESS \
+    DHCP_OPTION("tftp_server_address", 150, "ipv4")
+
 static inline uint32_t
 gen_opt_hash(char *opt_name)
 {
@@ -136,6 +142,15 @@ dhcp_opts_destroy(struct hmap *dhcp_opts)
     gen_opts_destroy(dhcp_opts);
 }
 
+OVS_PACKED(
+struct dhcp_opt_header {
+    uint8_t code;
+    uint8_t len;
+});
+
+#define DHCP_OPT_PAYLOAD(hdr) \
+    (void *)((char *)hdr + sizeof(struct dhcp_opt_header))
+
 /* Used in the OpenFlow PACKET_IN userdata */
 struct dhcp_opt6_header {
     ovs_be16 opt_code;
@@ -149,6 +164,7 @@ struct dhcp_opt6_header {
 #define DHCPV6_MSG_TYPE_CONFIRM     4
 #define DHCPV6_MSG_TYPE_REPLY       7
 #define DHCPV6_MSG_TYPE_DECLINE     9
+#define DHCPV6_MSG_TYPE_INFO_REQ    11
 
 
 /* DHCPv6 Option codes */

@@ -65,7 +65,7 @@ static bool oneline;
 static bool dry_run;
 
 /* --timeout: Time to wait for a connection to 'db'. */
-static int timeout;
+static unsigned int timeout;
 
 /* Format for table output. */
 static struct table_style table_style = TABLE_STYLE_DEFAULT;
@@ -111,14 +111,15 @@ main(int argc, char *argv[])
     char *args = process_escape_args(argv);
     shash_init(&local_options);
     parse_options(argc, argv, &local_options);
-    commands = ctl_parse_commands(argc - optind, argv + optind, &local_options,
-                                  &n_commands);
+    char *error = ctl_parse_commands(argc - optind, argv + optind,
+                                     &local_options, &commands, &n_commands);
+    if (error) {
+        ctl_fatal("%s", error);
+    }
     VLOG(ctl_might_write_to_db(commands, n_commands) ? VLL_INFO : VLL_DBG,
          "Called as %s", args);
 
-    if (timeout) {
-        time_alarm(timeout);
-    }
+    ctl_timeout_setup(timeout);
 
     /* Initialize IDL. */
     idl = the_idl = ovsdb_idl_create(db, &vteprec_idl_class, false, false);
@@ -249,10 +250,8 @@ parse_options(int argc, char *argv[], struct shash *local_options)
             exit(EXIT_SUCCESS);
 
         case 't':
-            timeout = strtoul(optarg, NULL, 10);
-            if (timeout < 0) {
-                ctl_fatal("value %s on -t or --timeout is invalid",
-                          optarg);
+            if (!str_to_uint(optarg, 10, &timeout) || !timeout) {
+                ctl_fatal("value %s on -t or --timeout is invalid", optarg);
             }
             break;
 

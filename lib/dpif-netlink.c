@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2017 Nicira, Inc.
+ * Copyright (c) 2008-2018 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -53,6 +53,7 @@
 #include "openvswitch/ofpbuf.h"
 #include "openvswitch/poll-loop.h"
 #include "openvswitch/shash.h"
+#include "openvswitch/thread.h"
 #include "openvswitch/vlog.h"
 #include "packets.h"
 #include "random.h"
@@ -76,6 +77,10 @@ enum { MAX_PORTS = USHRT_MAX };
 
 #define FLOW_DUMP_MAX_BATCH 50
 #define OPERATE_MAX_OPS 50
+
+#ifndef EPOLLEXCLUSIVE
+#define EPOLLEXCLUSIVE (1u << 28)
+#endif
 
 struct dpif_netlink_dp {
     /* Generic Netlink header. */
@@ -169,7 +174,6 @@ struct dpif_windows_vport_sock {
 #endif
 
 struct dpif_handler {
-    struct dpif_channel *channels;/* Array of channels for each handler. */
     struct epoll_event *epoll_events;
     int epoll_fd;                 /* epoll fd that includes channel socks. */
     int n_events;                 /* Num events returned by epoll_wait(). */
@@ -192,6 +196,7 @@ struct dpif_netlink {
     struct fat_rwlock upcall_lock;
     struct dpif_handler *handlers;
     uint32_t n_handlers;           /* Num of upcall handlers. */
+    struct dpif_channel *channels; /* Array of channels for each port. */
     int uc_array_size;             /* Size of 'handler->channels' and */
                                    /* 'handler->epoll_events'. */
 
@@ -212,6 +217,8 @@ static int ovs_datapath_family;
 static int ovs_vport_family;
 static int ovs_flow_family;
 static int ovs_packet_family;
+static int ovs_meter_family;
+static int ovs_ct_limit_family;
 
 /* Generic Netlink multicast groups for OVS.
  *
@@ -227,7 +234,7 @@ static bool ovs_tunnels_out_of_tree = true;
 static int dpif_netlink_init(void);
 static int open_dpif(const struct dpif_netlink_dp *, struct dpif **);
 static uint32_t dpif_netlink_port_get_pid(const struct dpif *,
-                                          odp_port_t port_no, uint32_t hash);
+                                          odp_port_t port_no);
 static void dpif_netlink_handler_uninit(struct dpif_handler *handler);
 static int dpif_netlink_refresh_channels(struct dpif_netlink *,
                                          uint32_t n_handlers);
@@ -238,6 +245,42 @@ static int dpif_netlink_vport_from_ofpbuf(struct dpif_netlink_vport *,
 static int dpif_netlink_port_query__(const struct dpif_netlink *dpif,
                                      odp_port_t port_no, const char *port_name,
                                      struct dpif_port *dpif_port);
+
+static int
+create_nl_sock(struct dpif_netlink *dpif OVS_UNUSED, struct nl_sock **socksp)
+    OVS_REQ_WRLOCK(dpif->upcall_lock)
+{
+#ifndef _WIN32
+    return nl_sock_create(NETLINK_GENERIC, socksp);
+#else
+    /* Pick netlink sockets to use in a round-robin fashion from each
+     * handler's pool of sockets. */
+    struct dpif_handler *handler = &dpif->handlers[0];
+    struct dpif_windows_vport_sock *sock_pool = handler->vport_sock_pool;
+    size_t index = handler->last_used_pool_idx;
+
+    /* A pool of sockets is allocated when the handler is initialized. */
+    if (sock_pool == NULL) {
+        *socksp = NULL;
+        return EINVAL;
+    }
+
+    ovs_assert(index < VPORT_SOCK_POOL_SIZE);
+    *socksp = sock_pool[index].nl_sock;
+    ovs_assert(*socksp);
+    index = (index == VPORT_SOCK_POOL_SIZE - 1) ? 0 : index + 1;
+    handler->last_used_pool_idx = index;
+    return 0;
+#endif
+}
+
+static void
+close_nl_sock(struct nl_sock *socksp)
+{
+#ifndef _WIN32
+    nl_sock_destroy(socksp);
+#endif
+}
 
 static struct dpif_netlink *
 dpif_netlink_cast(const struct dpif *dpif)
@@ -328,43 +371,6 @@ open_dpif(const struct dpif_netlink_dp *dp, struct dpif **dpifp)
     return 0;
 }
 
-/* Destroys the netlink sockets pointed by the elements in 'socksp'
- * and frees the 'socksp'.  */
-static void
-vport_del_socksp__(struct nl_sock **socksp, uint32_t n_socks)
-{
-    size_t i;
-
-    for (i = 0; i < n_socks; i++) {
-        nl_sock_destroy(socksp[i]);
-    }
-
-    free(socksp);
-}
-
-/* Creates an array of netlink sockets.  Returns an array of the
- * corresponding pointers.  Records the error in 'error'. */
-static struct nl_sock **
-vport_create_socksp__(uint32_t n_socks, int *error)
-{
-    struct nl_sock **socksp = xzalloc(n_socks * sizeof *socksp);
-    size_t i;
-
-    for (i = 0; i < n_socks; i++) {
-        *error = nl_sock_create(NETLINK_GENERIC, &socksp[i]);
-        if (*error) {
-            goto error;
-        }
-    }
-
-    return socksp;
-
-error:
-    vport_del_socksp__(socksp, n_socks);
-
-    return NULL;
-}
-
 #ifdef _WIN32
 static void
 vport_delete_sock_pool(struct dpif_handler *handler)
@@ -419,129 +425,34 @@ error:
     vport_delete_sock_pool(handler);
     return error;
 }
-
-/* Returns an array pointers to netlink sockets.  The sockets are picked from a
- * pool. Records the error in 'error'. */
-static struct nl_sock **
-vport_create_socksp_windows(struct dpif_netlink *dpif, int *error)
-    OVS_REQ_WRLOCK(dpif->upcall_lock)
-{
-    uint32_t n_socks = dpif->n_handlers;
-    struct nl_sock **socksp;
-    size_t i;
-
-    ovs_assert(n_socks <= 1);
-    socksp = xzalloc(n_socks * sizeof *socksp);
-
-    /* Pick netlink sockets to use in a round-robin fashion from each
-     * handler's pool of sockets. */
-    for (i = 0; i < n_socks; i++) {
-        struct dpif_handler *handler = &dpif->handlers[i];
-        struct dpif_windows_vport_sock *sock_pool = handler->vport_sock_pool;
-        size_t index = handler->last_used_pool_idx;
-
-        /* A pool of sockets is allocated when the handler is initialized. */
-        if (sock_pool == NULL) {
-            free(socksp);
-            *error = EINVAL;
-            return NULL;
-        }
-
-        ovs_assert(index < VPORT_SOCK_POOL_SIZE);
-        socksp[i] = sock_pool[index].nl_sock;
-        socksp[i] = sock_pool[index].nl_sock;
-        ovs_assert(socksp[i]);
-        index = (index == VPORT_SOCK_POOL_SIZE - 1) ? 0 : index + 1;
-        handler->last_used_pool_idx = index;
-    }
-
-    return socksp;
-}
-
-static void
-vport_del_socksp_windows(struct dpif_netlink *dpif, struct nl_sock **socksp)
-{
-    free(socksp);
-}
 #endif /* _WIN32 */
 
-static struct nl_sock **
-vport_create_socksp(struct dpif_netlink *dpif, int *error)
-{
-#ifdef _WIN32
-    return vport_create_socksp_windows(dpif, error);
-#else
-    return vport_create_socksp__(dpif->n_handlers, error);
-#endif
-}
-
-static void
-vport_del_socksp(struct dpif_netlink *dpif, struct nl_sock **socksp)
-{
-#ifdef _WIN32
-    vport_del_socksp_windows(dpif, socksp);
-#else
-    vport_del_socksp__(socksp, dpif->n_handlers);
-#endif
-}
-
-/* Given the array of pointers to netlink sockets 'socksp', returns
- * the array of corresponding pids. If the 'socksp' is NULL, returns
- * a single-element array of value 0. */
-static uint32_t *
-vport_socksp_to_pids(struct nl_sock **socksp, uint32_t n_socks)
-{
-    uint32_t *pids;
-
-    if (!socksp) {
-        pids = xzalloc(sizeof *pids);
-    } else {
-        size_t i;
-
-        pids = xzalloc(n_socks * sizeof *pids);
-        for (i = 0; i < n_socks; i++) {
-            pids[i] = nl_sock_pid(socksp[i]);
-        }
-    }
-
-    return pids;
-}
-
-/* Given the port number 'port_idx', extracts the pids of netlink sockets
- * associated to the port and assigns it to 'upcall_pids'. */
+/* Given the port number 'port_idx', extracts the pid of netlink socket
+ * associated to the port and assigns it to 'upcall_pid'. */
 static bool
-vport_get_pids(struct dpif_netlink *dpif, uint32_t port_idx,
-               uint32_t **upcall_pids)
+vport_get_pid(struct dpif_netlink *dpif, uint32_t port_idx,
+              uint32_t *upcall_pid)
 {
-    uint32_t *pids;
-    size_t i;
-
     /* Since the nl_sock can only be assigned in either all
-     * or none "dpif->handlers" channels, the following check
+     * or none "dpif" channels, the following check
      * would suffice. */
-    if (!dpif->handlers[0].channels[port_idx].sock) {
+    if (!dpif->channels[port_idx].sock) {
         return false;
     }
     ovs_assert(!WINDOWS || dpif->n_handlers <= 1);
 
-    pids = xzalloc(dpif->n_handlers * sizeof *pids);
-
-    for (i = 0; i < dpif->n_handlers; i++) {
-        pids[i] = nl_sock_pid(dpif->handlers[i].channels[port_idx].sock);
-    }
-
-    *upcall_pids = pids;
+    *upcall_pid = nl_sock_pid(dpif->channels[port_idx].sock);
 
     return true;
 }
 
 static int
-vport_add_channels(struct dpif_netlink *dpif, odp_port_t port_no,
-                   struct nl_sock **socksp)
+vport_add_channel(struct dpif_netlink *dpif, odp_port_t port_no,
+                  struct nl_sock *socksp)
 {
     struct epoll_event event;
     uint32_t port_idx = odp_to_u32(port_no);
-    size_t i, j;
+    size_t i;
     int error;
 
     if (dpif->handlers == NULL) {
@@ -550,7 +461,7 @@ vport_add_channels(struct dpif_netlink *dpif, odp_port_t port_no,
 
     /* We assume that the datapath densely chooses port numbers, which can
      * therefore be used as an index into 'channels' and 'epoll_events' of
-     * 'dpif->handler'. */
+     * 'dpif'. */
     if (port_idx >= dpif->uc_array_size) {
         uint32_t new_size = port_idx + 1;
 
@@ -560,15 +471,15 @@ vport_add_channels(struct dpif_netlink *dpif, odp_port_t port_no,
             return EFBIG;
         }
 
+        dpif->channels = xrealloc(dpif->channels,
+                                  new_size * sizeof *dpif->channels);
+
+        for (i = dpif->uc_array_size; i < new_size; i++) {
+            dpif->channels[i].sock = NULL;
+        }
+
         for (i = 0; i < dpif->n_handlers; i++) {
             struct dpif_handler *handler = &dpif->handlers[i];
-
-            handler->channels = xrealloc(handler->channels,
-                                         new_size * sizeof *handler->channels);
-
-            for (j = dpif->uc_array_size; j < new_size; j++) {
-                handler->channels[j].sock = NULL;
-            }
 
             handler->epoll_events = xrealloc(handler->epoll_events,
                 new_size * sizeof *handler->epoll_events);
@@ -578,33 +489,33 @@ vport_add_channels(struct dpif_netlink *dpif, odp_port_t port_no,
     }
 
     memset(&event, 0, sizeof event);
-    event.events = EPOLLIN;
+    event.events = EPOLLIN | EPOLLEXCLUSIVE;
     event.data.u32 = port_idx;
 
     for (i = 0; i < dpif->n_handlers; i++) {
         struct dpif_handler *handler = &dpif->handlers[i];
 
 #ifndef _WIN32
-        if (epoll_ctl(handler->epoll_fd, EPOLL_CTL_ADD, nl_sock_fd(socksp[i]),
+        if (epoll_ctl(handler->epoll_fd, EPOLL_CTL_ADD, nl_sock_fd(socksp),
                       &event) < 0) {
             error = errno;
             goto error;
         }
 #endif
-        dpif->handlers[i].channels[port_idx].sock = socksp[i];
-        dpif->handlers[i].channels[port_idx].last_poll = LLONG_MIN;
     }
+    dpif->channels[port_idx].sock = socksp;
+    dpif->channels[port_idx].last_poll = LLONG_MIN;
 
     return 0;
 
 error:
-    for (j = 0; j < i; j++) {
 #ifndef _WIN32
-        epoll_ctl(dpif->handlers[j].epoll_fd, EPOLL_CTL_DEL,
-                  nl_sock_fd(socksp[j]), NULL);
-#endif
-        dpif->handlers[j].channels[port_idx].sock = NULL;
+    while (i--) {
+        epoll_ctl(dpif->handlers[i].epoll_fd, EPOLL_CTL_DEL,
+                  nl_sock_fd(socksp), NULL);
     }
+#endif
+    dpif->channels[port_idx].sock = NULL;
 
     return error;
 }
@@ -615,14 +526,8 @@ vport_del_channels(struct dpif_netlink *dpif, odp_port_t port_no)
     uint32_t port_idx = odp_to_u32(port_no);
     size_t i;
 
-    if (!dpif->handlers || port_idx >= dpif->uc_array_size) {
-        return;
-    }
-
-    /* Since the sock can only be assigned in either all or none
-     * of "dpif->handlers" channels, the following check would
-     * suffice. */
-    if (!dpif->handlers[0].channels[port_idx].sock) {
+    if (!dpif->handlers || port_idx >= dpif->uc_array_size
+        || !dpif->channels[port_idx].sock) {
         return;
     }
 
@@ -630,12 +535,14 @@ vport_del_channels(struct dpif_netlink *dpif, odp_port_t port_no)
         struct dpif_handler *handler = &dpif->handlers[i];
 #ifndef _WIN32
         epoll_ctl(handler->epoll_fd, EPOLL_CTL_DEL,
-                  nl_sock_fd(handler->channels[port_idx].sock), NULL);
-        nl_sock_destroy(handler->channels[port_idx].sock);
+                  nl_sock_fd(dpif->channels[port_idx].sock), NULL);
 #endif
-        handler->channels[port_idx].sock = NULL;
         handler->event_offset = handler->n_events = 0;
     }
+#ifndef _WIN32
+    nl_sock_destroy(dpif->channels[port_idx].sock);
+#endif
+    dpif->channels[port_idx].sock = NULL;
 }
 
 static void
@@ -652,10 +559,7 @@ destroy_all_channels(struct dpif_netlink *dpif)
         struct dpif_netlink_vport vport_request;
         uint32_t upcall_pids = 0;
 
-        /* Since the sock can only be assigned in either all or none
-         * of "dpif->handlers" channels, the following check would
-         * suffice. */
-        if (!dpif->handlers[0].channels[i].sock) {
+        if (!dpif->channels[i].sock) {
             continue;
         }
 
@@ -676,11 +580,11 @@ destroy_all_channels(struct dpif_netlink *dpif)
 
         dpif_netlink_handler_uninit(handler);
         free(handler->epoll_events);
-        free(handler->channels);
     }
-
+    free(dpif->channels);
     free(dpif->handlers);
     dpif->handlers = NULL;
+    dpif->channels = NULL;
     dpif->n_handlers = 0;
     dpif->uc_array_size = 0;
 }
@@ -843,13 +747,13 @@ dpif_netlink_port_add__(struct dpif_netlink *dpif, const char *name,
 {
     struct dpif_netlink_vport request, reply;
     struct ofpbuf *buf;
-    struct nl_sock **socksp = NULL;
-    uint32_t *upcall_pids;
+    struct nl_sock *socksp = NULL;
+    uint32_t upcall_pids = 0;
     int error = 0;
 
     if (dpif->handlers) {
-        socksp = vport_create_socksp(dpif, &error);
-        if (!socksp) {
+        error = create_nl_sock(dpif, &socksp);
+        if (error) {
             return error;
         }
     }
@@ -861,9 +765,11 @@ dpif_netlink_port_add__(struct dpif_netlink *dpif, const char *name,
     request.name = name;
 
     request.port_no = *port_nop;
-    upcall_pids = vport_socksp_to_pids(socksp, dpif->n_handlers);
-    request.n_upcall_pids = socksp ? dpif->n_handlers : 1;
-    request.upcall_pids = upcall_pids;
+    if (socksp) {
+        upcall_pids = nl_sock_pid(socksp);
+    }
+    request.n_upcall_pids = 1;
+    request.upcall_pids = &upcall_pids;
 
     if (options) {
         request.options = options->data;
@@ -879,31 +785,27 @@ dpif_netlink_port_add__(struct dpif_netlink *dpif, const char *name,
                       dpif_name(&dpif->dpif), *port_nop);
         }
 
-        vport_del_socksp(dpif, socksp);
+        close_nl_sock(socksp);
         goto exit;
     }
 
-    if (socksp) {
-        error = vport_add_channels(dpif, *port_nop, socksp);
-        if (error) {
-            VLOG_INFO("%s: could not add channel for port %s",
-                      dpif_name(&dpif->dpif), name);
+    error = vport_add_channel(dpif, *port_nop, socksp);
+    if (error) {
+        VLOG_INFO("%s: could not add channel for port %s",
+                    dpif_name(&dpif->dpif), name);
 
-            /* Delete the port. */
-            dpif_netlink_vport_init(&request);
-            request.cmd = OVS_VPORT_CMD_DEL;
-            request.dp_ifindex = dpif->dp_ifindex;
-            request.port_no = *port_nop;
-            dpif_netlink_vport_transact(&request, NULL, NULL);
-            vport_del_socksp(dpif, socksp);
-            goto exit;
-        }
+        /* Delete the port. */
+        dpif_netlink_vport_init(&request);
+        request.cmd = OVS_VPORT_CMD_DEL;
+        request.dp_ifindex = dpif->dp_ifindex;
+        request.port_no = *port_nop;
+        dpif_netlink_vport_transact(&request, NULL, NULL);
+        close_nl_sock(socksp);
+        goto exit;
     }
-    free(socksp);
 
 exit:
     ofpbuf_delete(buf);
-    free(upcall_pids);
 
     return error;
 }
@@ -1128,7 +1030,7 @@ dpif_netlink_port_query_by_name(const struct dpif *dpif_, const char *devname,
 
 static uint32_t
 dpif_netlink_port_get_pid__(const struct dpif_netlink *dpif,
-                            odp_port_t port_no, uint32_t hash)
+                            odp_port_t port_no)
     OVS_REQ_RDLOCK(dpif->upcall_lock)
 {
     uint32_t port_idx = odp_to_u32(port_no);
@@ -1138,14 +1040,13 @@ dpif_netlink_port_get_pid__(const struct dpif_netlink *dpif,
         /* The ODPP_NONE "reserved" port number uses the "ovs-system"'s
          * channel, since it is not heavily loaded. */
         uint32_t idx = port_idx >= dpif->uc_array_size ? 0 : port_idx;
-        struct dpif_handler *h = &dpif->handlers[hash % dpif->n_handlers];
 
         /* Needs to check in case the socket pointer is changed in between
          * the holding of upcall_lock.  A known case happens when the main
          * thread deletes the vport while the handler thread is handling
          * the upcall from that port. */
-        if (h->channels[idx].sock) {
-            pid = nl_sock_pid(h->channels[idx].sock);
+        if (dpif->channels[idx].sock) {
+            pid = nl_sock_pid(dpif->channels[idx].sock);
         }
     }
 
@@ -1153,14 +1054,13 @@ dpif_netlink_port_get_pid__(const struct dpif_netlink *dpif,
 }
 
 static uint32_t
-dpif_netlink_port_get_pid(const struct dpif *dpif_, odp_port_t port_no,
-                          uint32_t hash)
+dpif_netlink_port_get_pid(const struct dpif *dpif_, odp_port_t port_no)
 {
     const struct dpif_netlink *dpif = dpif_netlink_cast(dpif_);
     uint32_t ret;
 
     fat_rwlock_rdlock(&dpif->upcall_lock);
-    ret = dpif_netlink_port_get_pid__(dpif, port_no, hash);
+    ret = dpif_netlink_port_get_pid__(dpif, port_no);
     fat_rwlock_unlock(&dpif->upcall_lock);
 
     return ret;
@@ -1462,16 +1362,6 @@ dpif_netlink_init_flow_del(struct dpif_netlink *dpif,
                                  del->ufid, del->terse, request);
 }
 
-enum {
-    DUMP_OVS_FLOWS_BIT    = 0,
-    DUMP_NETDEV_FLOWS_BIT = 1,
-};
-
-enum {
-    DUMP_OVS_FLOWS    = (1 << DUMP_OVS_FLOWS_BIT),
-    DUMP_NETDEV_FLOWS = (1 << DUMP_NETDEV_FLOWS_BIT),
-};
-
 struct dpif_netlink_flow_dump {
     struct dpif_flow_dump up;
     struct nl_dump nl_dump;
@@ -1480,7 +1370,7 @@ struct dpif_netlink_flow_dump {
     int netdev_dumps_num;                    /* Number of netdev_flow_dumps */
     struct ovs_mutex netdev_lock;            /* Guards the following. */
     int netdev_current_dump OVS_GUARDED;     /* Shared current dump */
-    int type;                                /* Type of dump */
+    struct dpif_flow_dump_types types;       /* Type of dump */
 };
 
 static struct dpif_netlink_flow_dump *
@@ -1495,7 +1385,7 @@ start_netdev_dump(const struct dpif *dpif_,
 {
     ovs_mutex_init(&dump->netdev_lock);
 
-    if (!(dump->type & DUMP_NETDEV_FLOWS)) {
+    if (!(dump->types.netdev_flows)) {
         dump->netdev_dumps_num = 0;
         dump->netdev_dumps = NULL;
         return;
@@ -1509,24 +1399,21 @@ start_netdev_dump(const struct dpif *dpif_,
     ovs_mutex_unlock(&dump->netdev_lock);
 }
 
-static int
-dpif_netlink_get_dump_type(char *str) {
-    int type = 0;
-
-    if (!str || !strcmp(str, "ovs") || !strcmp(str, "dpctl")) {
-        type |= DUMP_OVS_FLOWS;
+static void
+dpif_netlink_populate_flow_dump_types(struct dpif_netlink_flow_dump *dump,
+                                      struct dpif_flow_dump_types *types)
+{
+    if (!types) {
+        dump->types.ovs_flows = true;
+        dump->types.netdev_flows = true;
+    } else {
+        memcpy(&dump->types, types, sizeof *types);
     }
-    if ((netdev_is_flow_api_enabled() && !str)
-        || (str && (!strcmp(str, "offloaded") || !strcmp(str, "dpctl")))) {
-        type |= DUMP_NETDEV_FLOWS;
-    }
-
-    return type;
 }
 
 static struct dpif_flow_dump *
 dpif_netlink_flow_dump_create(const struct dpif *dpif_, bool terse,
-                              char *type)
+                              struct dpif_flow_dump_types *types)
 {
     const struct dpif_netlink *dpif = dpif_netlink_cast(dpif_);
     struct dpif_netlink_flow_dump *dump;
@@ -1536,9 +1423,9 @@ dpif_netlink_flow_dump_create(const struct dpif *dpif_, bool terse,
     dump = xmalloc(sizeof *dump);
     dpif_flow_dump_init(&dump->up, dpif_);
 
-    dump->type = dpif_netlink_get_dump_type(type);
+    dpif_netlink_populate_flow_dump_types(dump, types);
 
-    if (dump->type & DUMP_OVS_FLOWS) {
+    if (dump->types.ovs_flows) {
         dpif_netlink_flow_init(&request);
         request.cmd = OVS_FLOW_CMD_GET;
         request.dp_ifindex = dpif->dp_ifindex;
@@ -1565,7 +1452,7 @@ dpif_netlink_flow_dump_destroy(struct dpif_flow_dump *dump_)
     unsigned int nl_status = 0;
     int dump_status;
 
-    if (dump->type & DUMP_OVS_FLOWS) {
+    if (dump->types.ovs_flows) {
         nl_status = nl_dump_done(&dump->nl_dump);
     }
 
@@ -1709,7 +1596,7 @@ dpif_netlink_netdev_match_to_dpif_flow(struct match *match,
         .flow = &match->flow,
         .mask = &match->wc.masks,
         .support = {
-            .max_vlan_headers = 1,
+            .max_vlan_headers = 2,
         },
     };
     size_t offset;
@@ -1801,7 +1688,7 @@ dpif_netlink_flow_dump_next(struct dpif_flow_dump_thread *thread_,
         }
     }
 
-    if (!(dump->type & DUMP_OVS_FLOWS)) {
+    if (!(dump->types.ovs_flows)) {
         return n_flows;
     }
 
@@ -2104,6 +1991,7 @@ parse_flow_put(struct dpif_netlink *dpif, struct dpif_flow_put *put)
     struct netdev *dev;
     struct offload_info info;
     ovs_be16 dst_port = 0;
+    uint8_t csum_on = false;
     int err;
 
     if (put->flags & DPIF_FP_PROBE) {
@@ -2144,12 +2032,16 @@ parse_flow_put(struct dpif_netlink *dpif, struct dpif_flow_put *put)
             if (tnl_cfg && tnl_cfg->dst_port != 0) {
                 dst_port = tnl_cfg->dst_port;
             }
+            if (tnl_cfg) {
+                csum_on = tnl_cfg->csum;
+            }
             netdev_close(outdev);
         }
     }
 
     info.dpif_class = dpif_class;
     info.tp_dst_port = dst_port;
+    info.tunnel_csum_on = csum_on;
     err = netdev_flow_put(dev, &match,
                           CONST_CAST(struct nlattr *, put->actions),
                           put->actions_len,
@@ -2175,7 +2067,26 @@ parse_flow_put(struct dpif_netlink *dpif, struct dpif_flow_put *put)
 
         VLOG_DBG("added flow");
     } else if (err != EEXIST) {
-        VLOG_ERR_RL(&rl, "failed to offload flow: %s", ovs_strerror(err));
+        struct netdev *oor_netdev = NULL;
+        enum vlog_level level;
+        if (err == ENOSPC && netdev_is_offload_rebalance_policy_enabled()) {
+            /*
+             * We need to set OOR on the input netdev (i.e, 'dev') for the
+             * flow. But if the flow has a tunnel attribute (i.e, decap action,
+             * with a virtual device like a VxLAN interface as its in-port),
+             * then lookup and set OOR on the underlying tunnel (real) netdev.
+             */
+            oor_netdev = flow_get_tunnel_netdev(&match.flow.tunnel);
+            if (!oor_netdev) {
+                /* Not a 'tunnel' flow */
+                oor_netdev = dev;
+            }
+            netdev_set_hw_info(oor_netdev, HW_INFO_TYPE_OOR, true);
+        }
+        level = (err == ENOSPC || err == EOPNOTSUPP) ? VLL_DBG : VLL_ERR;
+        VLOG_RL(&rl, level, "failed to offload flow: %s: %s",
+                ovs_strerror(err),
+                (oor_netdev ? oor_netdev->name : dev->name));
     }
 
 out:
@@ -2262,7 +2173,8 @@ dpif_netlink_operate_chunks(struct dpif_netlink *dpif, struct dpif_op **ops,
 }
 
 static void
-dpif_netlink_operate(struct dpif *dpif_, struct dpif_op **ops, size_t n_ops)
+dpif_netlink_operate(struct dpif *dpif_, struct dpif_op **ops, size_t n_ops,
+                     enum dpif_offload_type offload_type)
 {
     struct dpif_netlink *dpif = dpif_netlink_cast(dpif_);
     struct dpif_op *new_ops[OPERATE_MAX_OPS];
@@ -2270,7 +2182,12 @@ dpif_netlink_operate(struct dpif *dpif_, struct dpif_op **ops, size_t n_ops)
     int i = 0;
     int err = 0;
 
-    if (netdev_is_flow_api_enabled()) {
+    if (offload_type == DPIF_OFFLOAD_ALWAYS && !netdev_is_flow_api_enabled()) {
+        VLOG_DBG("Invalid offload_type: %d", offload_type);
+        return;
+    }
+
+    if (offload_type != DPIF_OFFLOAD_NEVER && netdev_is_flow_api_enabled()) {
         while (n_ops > 0) {
             count = 0;
 
@@ -2279,6 +2196,23 @@ dpif_netlink_operate(struct dpif *dpif_, struct dpif_op **ops, size_t n_ops)
 
                 err = try_send_to_netdev(dpif, op);
                 if (err && err != EEXIST) {
+                    if (offload_type == DPIF_OFFLOAD_ALWAYS) {
+                        /* We got an error while offloading an op. Since
+                         * OFFLOAD_ALWAYS is specified, we stop further
+                         * processing and return to the caller without
+                         * invoking kernel datapath as fallback. But the
+                         * interface requires us to process all n_ops; so
+                         * return the same error in the remaining ops too.
+                         */
+                        op->error = err;
+                        n_ops--;
+                        while (n_ops > 0) {
+                            op = ops[i++];
+                            op->error = err;
+                            n_ops--;
+                        }
+                        return;
+                    }
                     new_ops[count++] = op;
                 } else {
                     op->error = err;
@@ -2289,7 +2223,7 @@ dpif_netlink_operate(struct dpif *dpif_, struct dpif_op **ops, size_t n_ops)
 
             dpif_netlink_operate_chunks(dpif, new_ops, count);
         }
-    } else {
+    } else if (offload_type != DPIF_OFFLOAD_ALWAYS) {
         dpif_netlink_operate_chunks(dpif, ops, n_ops);
     }
 }
@@ -2379,42 +2313,41 @@ dpif_netlink_refresh_channels(struct dpif_netlink *dpif, uint32_t n_handlers)
     dpif_netlink_port_dump_start__(dpif, &dump);
     while (!dpif_netlink_port_dump_next__(dpif, &dump, &vport, &buf)) {
         uint32_t port_no = odp_to_u32(vport.port_no);
-        uint32_t *upcall_pids = NULL;
+        uint32_t upcall_pid;
         int error;
 
         if (port_no >= dpif->uc_array_size
-            || !vport_get_pids(dpif, port_no, &upcall_pids)) {
-            struct nl_sock **socksp = vport_create_socksp(dpif, &error);
+            || !vport_get_pid(dpif, port_no, &upcall_pid)) {
+            struct nl_sock *socksp;
+            error = create_nl_sock(dpif, &socksp);
 
-            if (!socksp) {
+            if (error) {
                 goto error;
             }
 
-            error = vport_add_channels(dpif, vport.port_no, socksp);
+            error = vport_add_channel(dpif, vport.port_no, socksp);
             if (error) {
                 VLOG_INFO("%s: could not add channels for port %s",
                           dpif_name(&dpif->dpif), vport.name);
-                vport_del_socksp(dpif, socksp);
+                nl_sock_destroy(socksp);
                 retval = error;
                 goto error;
             }
-            upcall_pids = vport_socksp_to_pids(socksp, dpif->n_handlers);
-            free(socksp);
+            upcall_pid = nl_sock_pid(socksp);
         }
 
         /* Configure the vport to deliver misses to 'sock'. */
         if (vport.upcall_pids[0] == 0
-            || vport.n_upcall_pids != dpif->n_handlers
-            || memcmp(upcall_pids, vport.upcall_pids, n_handlers * sizeof
-                      *upcall_pids)) {
+            || vport.n_upcall_pids != 1
+            || upcall_pid != vport.upcall_pids[0]) {
             struct dpif_netlink_vport vport_request;
 
             dpif_netlink_vport_init(&vport_request);
             vport_request.cmd = OVS_VPORT_CMD_SET;
             vport_request.dp_ifindex = dpif->dp_ifindex;
             vport_request.port_no = vport.port_no;
-            vport_request.n_upcall_pids = dpif->n_handlers;
-            vport_request.upcall_pids = upcall_pids;
+            vport_request.n_upcall_pids = 1;
+            vport_request.upcall_pids = &upcall_pid;
             error = dpif_netlink_vport_transact(&vport_request, NULL, NULL);
             if (error) {
                 VLOG_WARN_RL(&error_rl,
@@ -2435,11 +2368,9 @@ dpif_netlink_refresh_channels(struct dpif_netlink *dpif, uint32_t n_handlers)
         if (port_no < keep_channels_nbits) {
             bitmap_set1(keep_channels, port_no);
         }
-        free(upcall_pids);
         continue;
 
     error:
-        free(upcall_pids);
         vport_del_channels(dpif, vport.port_no);
     }
     nl_dump_done(&dump);
@@ -2698,7 +2629,7 @@ dpif_netlink_recv__(struct dpif_netlink *dpif, uint32_t handler_id,
 
     while (handler->event_offset < handler->n_events) {
         int idx = handler->epoll_events[handler->event_offset].data.u32;
-        struct dpif_channel *ch = &dpif->handlers[handler_id].channels[idx];
+        struct dpif_channel *ch = &dpif->channels[idx];
 
         handler->event_offset++;
 
@@ -2800,16 +2731,14 @@ dpif_netlink_recv_purge__(struct dpif_netlink *dpif)
     OVS_REQ_WRLOCK(dpif->upcall_lock)
 {
     if (dpif->handlers) {
-        size_t i, j;
+        size_t i;
 
+        if (!dpif->channels[0].sock) {
+            return;
+        }
         for (i = 0; i < dpif->uc_array_size; i++ ) {
-            if (!dpif->handlers[0].channels[i].sock) {
-                continue;
-            }
 
-            for (j = 0; j < dpif->n_handlers; j++) {
-                nl_sock_drain(dpif->handlers[j].channels[i].sock);
-            }
+            nl_sock_drain(dpif->channels[i].sock);
         }
     }
 }
@@ -2918,45 +2847,539 @@ dpif_netlink_ct_flush(struct dpif *dpif OVS_UNUSED, const uint16_t *zone,
     }
 }
 
+static int
+dpif_netlink_ct_set_limits(struct dpif *dpif OVS_UNUSED,
+                           const uint32_t *default_limits,
+                           const struct ovs_list *zone_limits)
+{
+    struct ovs_zone_limit req_zone_limit;
+
+    if (ovs_ct_limit_family < 0) {
+        return EOPNOTSUPP;
+    }
+
+    struct ofpbuf *request = ofpbuf_new(NL_DUMP_BUFSIZE);
+    nl_msg_put_genlmsghdr(request, 0, ovs_ct_limit_family,
+                          NLM_F_REQUEST | NLM_F_ECHO, OVS_CT_LIMIT_CMD_SET,
+                          OVS_CT_LIMIT_VERSION);
+
+    struct ovs_header *ovs_header;
+    ovs_header = ofpbuf_put_uninit(request, sizeof *ovs_header);
+    ovs_header->dp_ifindex = 0;
+
+    size_t opt_offset;
+    opt_offset = nl_msg_start_nested(request, OVS_CT_LIMIT_ATTR_ZONE_LIMIT);
+    if (default_limits) {
+        req_zone_limit.zone_id = OVS_ZONE_LIMIT_DEFAULT_ZONE;
+        req_zone_limit.limit = *default_limits;
+        nl_msg_put(request, &req_zone_limit, sizeof req_zone_limit);
+    }
+
+    if (!ovs_list_is_empty(zone_limits)) {
+        struct ct_dpif_zone_limit *zone_limit;
+
+        LIST_FOR_EACH (zone_limit, node, zone_limits) {
+            req_zone_limit.zone_id = zone_limit->zone;
+            req_zone_limit.limit = zone_limit->limit;
+            nl_msg_put(request, &req_zone_limit, sizeof req_zone_limit);
+        }
+    }
+    nl_msg_end_nested(request, opt_offset);
+
+    int err = nl_transact(NETLINK_GENERIC, request, NULL);
+    ofpbuf_delete(request);
+    return err;
+}
+
+static int
+dpif_netlink_zone_limits_from_ofpbuf(const struct ofpbuf *buf,
+                                     uint32_t *default_limit,
+                                     struct ovs_list *zone_limits)
+{
+    static const struct nl_policy ovs_ct_limit_policy[] = {
+        [OVS_CT_LIMIT_ATTR_ZONE_LIMIT] = { .type = NL_A_NESTED,
+                                           .optional = true },
+    };
+
+    struct ofpbuf b = ofpbuf_const_initializer(buf->data, buf->size);
+    struct nlmsghdr *nlmsg = ofpbuf_try_pull(&b, sizeof *nlmsg);
+    struct genlmsghdr *genl = ofpbuf_try_pull(&b, sizeof *genl);
+    struct ovs_header *ovs_header = ofpbuf_try_pull(&b, sizeof *ovs_header);
+
+    struct nlattr *attr[ARRAY_SIZE(ovs_ct_limit_policy)];
+
+    if (!nlmsg || !genl || !ovs_header
+        || nlmsg->nlmsg_type != ovs_ct_limit_family
+        || !nl_policy_parse(&b, 0, ovs_ct_limit_policy, attr,
+                            ARRAY_SIZE(ovs_ct_limit_policy))) {
+        return EINVAL;
+    }
+
+
+    if (!attr[OVS_CT_LIMIT_ATTR_ZONE_LIMIT]) {
+        return EINVAL;
+    }
+
+    int rem = NLA_ALIGN(
+                nl_attr_get_size(attr[OVS_CT_LIMIT_ATTR_ZONE_LIMIT]));
+    const struct ovs_zone_limit *zone_limit =
+                nl_attr_get(attr[OVS_CT_LIMIT_ATTR_ZONE_LIMIT]);
+
+    while (rem >= sizeof *zone_limit) {
+        if (zone_limit->zone_id == OVS_ZONE_LIMIT_DEFAULT_ZONE) {
+            *default_limit = zone_limit->limit;
+        } else if (zone_limit->zone_id < OVS_ZONE_LIMIT_DEFAULT_ZONE ||
+                   zone_limit->zone_id > UINT16_MAX) {
+        } else {
+            ct_dpif_push_zone_limit(zone_limits, zone_limit->zone_id,
+                                    zone_limit->limit, zone_limit->count);
+        }
+        rem -= NLA_ALIGN(sizeof *zone_limit);
+        zone_limit = ALIGNED_CAST(struct ovs_zone_limit *,
+            (unsigned char *) zone_limit  + NLA_ALIGN(sizeof *zone_limit));
+    }
+    return 0;
+}
+
+static int
+dpif_netlink_ct_get_limits(struct dpif *dpif OVS_UNUSED,
+                           uint32_t *default_limit,
+                           const struct ovs_list *zone_limits_request,
+                           struct ovs_list *zone_limits_reply)
+{
+    if (ovs_ct_limit_family < 0) {
+        return EOPNOTSUPP;
+    }
+
+    struct ofpbuf *request = ofpbuf_new(NL_DUMP_BUFSIZE);
+    nl_msg_put_genlmsghdr(request, 0, ovs_ct_limit_family,
+            NLM_F_REQUEST | NLM_F_ECHO, OVS_CT_LIMIT_CMD_GET,
+            OVS_CT_LIMIT_VERSION);
+
+    struct ovs_header *ovs_header;
+    ovs_header = ofpbuf_put_uninit(request, sizeof *ovs_header);
+    ovs_header->dp_ifindex = 0;
+
+    if (!ovs_list_is_empty(zone_limits_request)) {
+        size_t opt_offset = nl_msg_start_nested(request,
+                                                OVS_CT_LIMIT_ATTR_ZONE_LIMIT);
+
+        struct ovs_zone_limit req_zone_limit;
+        req_zone_limit.zone_id = OVS_ZONE_LIMIT_DEFAULT_ZONE;
+        nl_msg_put(request, &req_zone_limit, sizeof req_zone_limit);
+
+        struct ct_dpif_zone_limit *zone_limit;
+        LIST_FOR_EACH (zone_limit, node, zone_limits_request) {
+            req_zone_limit.zone_id = zone_limit->zone;
+            nl_msg_put(request, &req_zone_limit, sizeof req_zone_limit);
+        }
+
+        nl_msg_end_nested(request, opt_offset);
+    }
+
+    struct ofpbuf *reply;
+    int err = nl_transact(NETLINK_GENERIC, request, &reply);
+    if (err) {
+        goto out;
+    }
+
+    err = dpif_netlink_zone_limits_from_ofpbuf(reply, default_limit,
+                                               zone_limits_reply);
+
+out:
+    ofpbuf_delete(request);
+    ofpbuf_delete(reply);
+    return err;
+}
+
+static int
+dpif_netlink_ct_del_limits(struct dpif *dpif OVS_UNUSED,
+                           const struct ovs_list *zone_limits)
+{
+    if (ovs_ct_limit_family < 0) {
+        return EOPNOTSUPP;
+    }
+
+    struct ofpbuf *request = ofpbuf_new(NL_DUMP_BUFSIZE);
+    nl_msg_put_genlmsghdr(request, 0, ovs_ct_limit_family,
+            NLM_F_REQUEST | NLM_F_ECHO, OVS_CT_LIMIT_CMD_DEL,
+            OVS_CT_LIMIT_VERSION);
+
+    struct ovs_header *ovs_header;
+    ovs_header = ofpbuf_put_uninit(request, sizeof *ovs_header);
+    ovs_header->dp_ifindex = 0;
+
+    if (!ovs_list_is_empty(zone_limits)) {
+        size_t opt_offset =
+            nl_msg_start_nested(request, OVS_CT_LIMIT_ATTR_ZONE_LIMIT);
+
+        struct ct_dpif_zone_limit *zone_limit;
+        LIST_FOR_EACH (zone_limit, node, zone_limits) {
+            struct ovs_zone_limit req_zone_limit;
+            req_zone_limit.zone_id = zone_limit->zone;
+            nl_msg_put(request, &req_zone_limit, sizeof req_zone_limit);
+        }
+        nl_msg_end_nested(request, opt_offset);
+    }
+
+    int err = nl_transact(NETLINK_GENERIC, request, NULL);
+
+    ofpbuf_delete(request);
+    return err;
+}
 
 /* Meters */
+
+/* Set of supported meter flags */
+#define DP_SUPPORTED_METER_FLAGS_MASK \
+    (OFPMF13_STATS | OFPMF13_PKTPS | OFPMF13_KBPS | OFPMF13_BURST)
+
+/* Meter support was introduced in Linux 4.15.  In some versions of
+ * Linux 4.15, 4.16, and 4.17, there was a bug that never set the id
+ * when the meter was created, so all meters essentially had an id of
+ * zero.  Check for that condition and disable meters on those kernels. */
+static bool probe_broken_meters(struct dpif *);
+
 static void
-dpif_netlink_meter_get_features(const struct dpif * dpif OVS_UNUSED,
+dpif_netlink_meter_init(struct dpif_netlink *dpif, struct ofpbuf *buf,
+                        void *stub, size_t size, uint32_t command)
+{
+    ofpbuf_use_stub(buf, stub, size);
+
+    nl_msg_put_genlmsghdr(buf, 0, ovs_meter_family, NLM_F_REQUEST | NLM_F_ECHO,
+                          command, OVS_METER_VERSION);
+
+    struct ovs_header *ovs_header;
+    ovs_header = ofpbuf_put_uninit(buf, sizeof *ovs_header);
+    ovs_header->dp_ifindex = dpif->dp_ifindex;
+}
+
+/* Execute meter 'request' in the kernel datapath.  If the command
+ * fails, returns a positive errno value.  Otherwise, stores the reply
+ * in '*replyp', parses the policy according to 'reply_policy' into the
+ * array of Netlink attribute in 'a', and returns 0.  On success, the
+ * caller is responsible for calling ofpbuf_delete() on '*replyp'
+ * ('replyp' will contain pointers into 'a'). */
+static int
+dpif_netlink_meter_transact(struct ofpbuf *request, struct ofpbuf **replyp,
+                            const struct nl_policy *reply_policy,
+                            struct nlattr **a, size_t size_a)
+{
+    int error = nl_transact(NETLINK_GENERIC, request, replyp);
+    ofpbuf_uninit(request);
+
+    if (error) {
+        return error;
+    }
+
+    struct nlmsghdr *nlmsg = ofpbuf_try_pull(*replyp, sizeof *nlmsg);
+    struct genlmsghdr *genl = ofpbuf_try_pull(*replyp, sizeof *genl);
+    struct ovs_header *ovs_header = ofpbuf_try_pull(*replyp,
+                                                    sizeof *ovs_header);
+    if (!nlmsg || !genl || !ovs_header
+        || nlmsg->nlmsg_type != ovs_meter_family
+        || !nl_policy_parse(*replyp, 0, reply_policy, a, size_a)) {
+        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
+        VLOG_DBG_RL(&rl,
+                    "Kernel module response to meter tranaction is invalid");
+        return EINVAL;
+    }
+    return 0;
+}
+
+static void
+dpif_netlink_meter_get_features(const struct dpif *dpif_,
                                 struct ofputil_meter_features *features)
 {
-    features->max_meters = 0;
-    features->band_types = 0;
-    features->capabilities = 0;
-    features->max_bands = 0;
-    features->max_color = 0;
+    if (probe_broken_meters(CONST_CAST(struct dpif *, dpif_))) {
+        features = NULL;
+        return;
+    }
+
+    struct ofpbuf buf, *msg;
+    uint64_t stub[1024 / 8];
+
+    static const struct nl_policy ovs_meter_features_policy[] = {
+        [OVS_METER_ATTR_MAX_METERS] = { .type = NL_A_U32 },
+        [OVS_METER_ATTR_MAX_BANDS] = { .type = NL_A_U32 },
+        [OVS_METER_ATTR_BANDS] = { .type = NL_A_NESTED, .optional = true },
+    };
+    struct nlattr *a[ARRAY_SIZE(ovs_meter_features_policy)];
+
+    struct dpif_netlink *dpif = dpif_netlink_cast(dpif_);
+    dpif_netlink_meter_init(dpif, &buf, stub, sizeof stub,
+                            OVS_METER_CMD_FEATURES);
+    if (dpif_netlink_meter_transact(&buf, &msg, ovs_meter_features_policy, a,
+                                    ARRAY_SIZE(ovs_meter_features_policy))) {
+        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
+        VLOG_INFO_RL(&rl,
+                  "dpif_netlink_meter_transact OVS_METER_CMD_FEATURES failed");
+        return;
+    }
+
+    features->max_meters = nl_attr_get_u32(a[OVS_METER_ATTR_MAX_METERS]);
+    features->max_bands = nl_attr_get_u32(a[OVS_METER_ATTR_MAX_BANDS]);
+
+    /* Bands is a nested attribute of zero or more nested
+     * band attributes.  */
+    if (a[OVS_METER_ATTR_BANDS]) {
+        const struct nlattr *nla;
+        size_t left;
+
+        NL_NESTED_FOR_EACH (nla, left, a[OVS_METER_ATTR_BANDS]) {
+            const struct nlattr *band_nla;
+            size_t band_left;
+
+            NL_NESTED_FOR_EACH (band_nla, band_left, nla) {
+                if (nl_attr_type(band_nla) == OVS_BAND_ATTR_TYPE) {
+                    if (nl_attr_get_size(band_nla) == sizeof(uint32_t)) {
+                        switch (nl_attr_get_u32(band_nla)) {
+                        case OVS_METER_BAND_TYPE_DROP:
+                            features->band_types |= 1 << OFPMBT13_DROP;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    features->capabilities = DP_SUPPORTED_METER_FLAGS_MASK;
+
+    ofpbuf_delete(msg);
 }
 
 static int
-dpif_netlink_meter_set(struct dpif *dpif OVS_UNUSED,
-                       ofproto_meter_id *meter_id OVS_UNUSED,
-                       struct ofputil_meter_config *config OVS_UNUSED)
+dpif_netlink_meter_set__(struct dpif *dpif_, ofproto_meter_id meter_id,
+                         struct ofputil_meter_config *config)
 {
-    return EFBIG; /* meter_id out of range */
+    struct dpif_netlink *dpif = dpif_netlink_cast(dpif_);
+    struct ofpbuf buf, *msg;
+    uint64_t stub[1024 / 8];
+
+    static const struct nl_policy ovs_meter_set_response_policy[] = {
+        [OVS_METER_ATTR_ID] = { .type = NL_A_U32 },
+    };
+    struct nlattr *a[ARRAY_SIZE(ovs_meter_set_response_policy)];
+
+    if (config->flags & ~DP_SUPPORTED_METER_FLAGS_MASK) {
+        return EBADF; /* Unsupported flags set */
+    }
+
+    for (size_t i = 0; i < config->n_bands; i++) {
+        switch (config->bands[i].type) {
+        case OFPMBT13_DROP:
+            break;
+        default:
+            return ENODEV; /* Unsupported band type */
+        }
+    }
+
+    dpif_netlink_meter_init(dpif, &buf, stub, sizeof stub, OVS_METER_CMD_SET);
+
+    nl_msg_put_u32(&buf, OVS_METER_ATTR_ID, meter_id.uint32);
+
+    if (config->flags & OFPMF13_KBPS) {
+        nl_msg_put_flag(&buf, OVS_METER_ATTR_KBPS);
+    }
+
+    size_t bands_offset = nl_msg_start_nested(&buf, OVS_METER_ATTR_BANDS);
+    /* Bands */
+    for (size_t i = 0; i < config->n_bands; ++i) {
+        struct ofputil_meter_band * band = &config->bands[i];
+        uint32_t band_type;
+
+        size_t band_offset = nl_msg_start_nested(&buf, OVS_BAND_ATTR_UNSPEC);
+
+        switch (band->type) {
+        case OFPMBT13_DROP:
+            band_type = OVS_METER_BAND_TYPE_DROP;
+            break;
+        default:
+            band_type = OVS_METER_BAND_TYPE_UNSPEC;
+        }
+        nl_msg_put_u32(&buf, OVS_BAND_ATTR_TYPE, band_type);
+        nl_msg_put_u32(&buf, OVS_BAND_ATTR_RATE, band->rate);
+        nl_msg_put_u32(&buf, OVS_BAND_ATTR_BURST,
+                       config->flags & OFPMF13_BURST ?
+                       band->burst_size : band->rate);
+        nl_msg_end_nested(&buf, band_offset);
+    }
+    nl_msg_end_nested(&buf, bands_offset);
+
+    int error = dpif_netlink_meter_transact(&buf, &msg,
+                                    ovs_meter_set_response_policy, a,
+                                    ARRAY_SIZE(ovs_meter_set_response_policy));
+    if (error) {
+        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
+        VLOG_INFO_RL(&rl,
+                     "dpif_netlink_meter_transact OVS_METER_CMD_SET failed");
+        return error;
+    }
+
+    if (nl_attr_get_u32(a[OVS_METER_ATTR_ID]) != meter_id.uint32) {
+        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
+        VLOG_INFO_RL(&rl,
+                     "Kernel returned a different meter id than requested");
+    }
+    ofpbuf_delete(msg);
+    return 0;
 }
 
 static int
-dpif_netlink_meter_get(const struct dpif *dpif OVS_UNUSED,
-                       ofproto_meter_id meter_id OVS_UNUSED,
-                       struct ofputil_meter_stats *stats OVS_UNUSED,
-                       uint16_t n_bands OVS_UNUSED)
+dpif_netlink_meter_set(struct dpif *dpif_, ofproto_meter_id meter_id,
+                       struct ofputil_meter_config *config)
 {
-    return EFBIG; /* meter_id out of range */
+    if (probe_broken_meters(dpif_)) {
+        return ENOMEM;
+    }
+
+    return dpif_netlink_meter_set__(dpif_, meter_id, config);
+}
+
+/* Retrieve statistics and/or delete meter 'meter_id'.  Statistics are
+ * stored in 'stats', if it is not null.  If 'command' is
+ * OVS_METER_CMD_DEL, the meter is deleted and statistics are optionally
+ * retrieved.  If 'command' is OVS_METER_CMD_GET, then statistics are
+ * simply retrieved. */
+static int
+dpif_netlink_meter_get_stats(const struct dpif *dpif_,
+                             ofproto_meter_id meter_id,
+                             struct ofputil_meter_stats *stats,
+                             uint16_t max_bands,
+                             enum ovs_meter_cmd command)
+{
+    struct dpif_netlink *dpif = dpif_netlink_cast(dpif_);
+    struct ofpbuf buf, *msg;
+    uint64_t stub[1024 / 8];
+
+    static const struct nl_policy ovs_meter_stats_policy[] = {
+        [OVS_METER_ATTR_ID] = { .type = NL_A_U32, .optional = true},
+        [OVS_METER_ATTR_STATS] = { NL_POLICY_FOR(struct ovs_flow_stats),
+                                   .optional = true},
+        [OVS_METER_ATTR_BANDS] = { .type = NL_A_NESTED, .optional = true },
+    };
+    struct nlattr *a[ARRAY_SIZE(ovs_meter_stats_policy)];
+
+    dpif_netlink_meter_init(dpif, &buf, stub, sizeof stub, command);
+
+    nl_msg_put_u32(&buf, OVS_METER_ATTR_ID, meter_id.uint32);
+
+    int error = dpif_netlink_meter_transact(&buf, &msg,
+                                            ovs_meter_stats_policy, a,
+                                            ARRAY_SIZE(ovs_meter_stats_policy));
+    if (error) {
+        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
+        VLOG_INFO_RL(&rl, "dpif_netlink_meter_transact %s failed",
+                     command == OVS_METER_CMD_GET ? "get" : "del");
+        return error;
+    }
+
+    if (stats
+        && a[OVS_METER_ATTR_ID]
+        && a[OVS_METER_ATTR_STATS]
+        && nl_attr_get_u32(a[OVS_METER_ATTR_ID]) == meter_id.uint32) {
+        /* return stats */
+        const struct ovs_flow_stats *stat;
+        const struct nlattr *nla;
+        size_t left;
+
+        stat = nl_attr_get(a[OVS_METER_ATTR_STATS]);
+        stats->packet_in_count = get_32aligned_u64(&stat->n_packets);
+        stats->byte_in_count = get_32aligned_u64(&stat->n_bytes);
+
+        if (a[OVS_METER_ATTR_BANDS]) {
+            size_t n_bands = 0;
+            NL_NESTED_FOR_EACH (nla, left, a[OVS_METER_ATTR_BANDS]) {
+                const struct nlattr *band_nla;
+                band_nla = nl_attr_find_nested(nla, OVS_BAND_ATTR_STATS);
+                if (band_nla && nl_attr_get_size(band_nla) \
+                                == sizeof(struct ovs_flow_stats)) {
+                    stat = nl_attr_get(band_nla);
+
+                    if (n_bands < max_bands) {
+                        stats->bands[n_bands].packet_count
+                            = get_32aligned_u64(&stat->n_packets);
+                        stats->bands[n_bands].byte_count
+                            = get_32aligned_u64(&stat->n_bytes);
+                        ++n_bands;
+                    }
+                } else {
+                    stats->bands[n_bands].packet_count = 0;
+                    stats->bands[n_bands].byte_count = 0;
+                    ++n_bands;
+                }
+            }
+            stats->n_bands = n_bands;
+        } else {
+            /* For a non-existent meter, return 0 stats. */
+            stats->n_bands = 0;
+        }
+    }
+
+    ofpbuf_delete(msg);
+    return error;
 }
 
 static int
-dpif_netlink_meter_del(struct dpif *dpif OVS_UNUSED,
-                       ofproto_meter_id meter_id OVS_UNUSED,
-                       struct ofputil_meter_stats *stats OVS_UNUSED,
-                       uint16_t n_bands OVS_UNUSED)
+dpif_netlink_meter_get(const struct dpif *dpif, ofproto_meter_id meter_id,
+                       struct ofputil_meter_stats *stats, uint16_t max_bands)
 {
-    return EFBIG; /* meter_id out of range */
+    return dpif_netlink_meter_get_stats(dpif, meter_id, stats, max_bands,
+                                        OVS_METER_CMD_GET);
 }
 
+static int
+dpif_netlink_meter_del(struct dpif *dpif, ofproto_meter_id meter_id,
+                       struct ofputil_meter_stats *stats, uint16_t max_bands)
+{
+    return dpif_netlink_meter_get_stats(dpif, meter_id, stats, max_bands,
+                                        OVS_METER_CMD_DEL);
+}
+
+static bool
+probe_broken_meters__(struct dpif *dpif)
+{
+    /* This test is destructive if a probe occurs while ovs-vswitchd is
+     * running (e.g., an ovs-dpctl meter command is called), so choose a
+     * random high meter id to make this less likely to occur. */
+    ofproto_meter_id id1 = { 54545401 };
+    ofproto_meter_id id2 = { 54545402 };
+    struct ofputil_meter_band band = {OFPMBT13_DROP, 0, 1, 0};
+    struct ofputil_meter_config config1 = { 1, OFPMF13_KBPS, 1, &band};
+    struct ofputil_meter_config config2 = { 2, OFPMF13_KBPS, 1, &band};
+
+    /* Try adding two meters and make sure that they both come back with
+     * the proper meter id.  Use the "__" version so that we don't cause
+     * a recurve deadlock. */
+    dpif_netlink_meter_set__(dpif, id1, &config1);
+    dpif_netlink_meter_set__(dpif, id2, &config2);
+
+    if (dpif_netlink_meter_get(dpif, id1, NULL, 0)
+        || dpif_netlink_meter_get(dpif, id2, NULL, 0)) {
+        VLOG_INFO("The kernel module has a broken meter implementation.");
+        return true;
+    }
+
+    dpif_netlink_meter_del(dpif, id1, NULL, 0);
+    dpif_netlink_meter_del(dpif, id2, NULL, 0);
+
+    return false;
+}
+
+static bool
+probe_broken_meters(struct dpif *dpif)
+{
+    /* This is a once-only test because currently OVS only has at most a single
+     * Netlink capable datapath on any given platform. */
+    static struct ovsthread_once once = OVSTHREAD_ONCE_INITIALIZER;
+
+    static bool broken_meters = false;
+    if (ovsthread_once_start(&once)) {
+        broken_meters = probe_broken_meters__(dpif);
+        ovsthread_once_done(&once);
+    }
+    return broken_meters;
+}
 
 const struct dpif_class dpif_netlink_class = {
     "system",
@@ -3006,6 +3429,16 @@ const struct dpif_class dpif_netlink_class = {
     NULL,                       /* ct_set_maxconns */
     NULL,                       /* ct_get_maxconns */
     NULL,                       /* ct_get_nconns */
+    dpif_netlink_ct_set_limits,
+    dpif_netlink_ct_get_limits,
+    dpif_netlink_ct_del_limits,
+    NULL,                       /* ipf_set_enabled */
+    NULL,                       /* ipf_set_min_frag */
+    NULL,                       /* ipf_set_max_nfrags */
+    NULL,                       /* ipf_get_status */
+    NULL,                       /* ipf_dump_start */
+    NULL,                       /* ipf_dump_next */
+    NULL,                       /* ipf_dump_done */
     dpif_netlink_meter_get_features,
     dpif_netlink_meter_set,
     dpif_netlink_meter_get,
@@ -3039,6 +3472,17 @@ dpif_netlink_init(void)
         if (!error) {
             error = nl_lookup_genl_mcgroup(OVS_VPORT_FAMILY, OVS_VPORT_MCGROUP,
                                            &ovs_vport_mcgroup);
+        }
+        if (!error) {
+            if (nl_lookup_genl_family(OVS_METER_FAMILY, &ovs_meter_family)) {
+                VLOG_INFO("The kernel module does not support meters.");
+            }
+        }
+        if (nl_lookup_genl_family(OVS_CT_LIMIT_FAMILY,
+                                  &ovs_ct_limit_family) < 0) {
+            VLOG_INFO("Generic Netlink family '%s' does not exist. "
+                      "Please update the Open vSwitch kernel module to enable "
+                      "the conntrack limit feature.", OVS_CT_LIMIT_FAMILY);
         }
 
         ovs_tunnels_out_of_tree = dpif_netlink_rtnl_probe_oot_tunnels();
@@ -3491,7 +3935,7 @@ put_exclude_packet_type(struct ofpbuf *buf, uint16_t type,
             ovs_be16 pt = pt_ns_type_be(nl_attr_get_be32(packet_type));
             const struct nlattr *nla;
 
-            nla = nl_attr_find(buf, NLA_HDRLEN, OVS_KEY_ATTR_ETHERTYPE);
+            nla = nl_attr_find(buf, ofs + NLA_HDRLEN, OVS_KEY_ATTR_ETHERTYPE);
             if (nla) {
                 ovs_be16 *ethertype;
 

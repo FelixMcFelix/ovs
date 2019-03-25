@@ -63,7 +63,8 @@ setup_args = dict(
     url='http://www.openvswitch.org/',
     author='Open vSwitch',
     author_email='dev@openvswitch.org',
-    packages=['ovs', 'ovs.db', 'ovs.unixctl'],
+    packages=['ovs', 'ovs.compat', 'ovs.compat.sortedcontainers',
+              'ovs.db', 'ovs.unixctl'],
     keywords=['openvswitch', 'ovs', 'OVSDB'],
     license='Apache 2.0',
     classifiers=[
@@ -82,6 +83,7 @@ setup_args = dict(
                                       libraries=['openvswitch'])],
     cmdclass={'build_ext': try_build_ext},
     install_requires=['sortedcontainers'],
+    extras_require={':sys_platform == "win32"': ['pywin32 >= 1.0']},
 )
 
 try:

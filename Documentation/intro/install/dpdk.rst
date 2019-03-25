@@ -29,10 +29,12 @@ This document describes how to build and install Open vSwitch using a DPDK
 datapath. Open vSwitch can use the DPDK library to operate entirely in
 userspace.
 
-.. seealso::
+.. important::
 
     The :doc:`releases FAQ </faq/releases>` lists support for the required
-    versions of DPDK for each version of Open vSwitch.
+    versions of DPDK for each version of Open vSwitch. If building OVS and
+    DPDK outside of the master build tree users should consult this list
+    first.
 
 Build requirements
 ------------------
@@ -40,7 +42,7 @@ Build requirements
 In addition to the requirements described in :doc:`general`, building Open
 vSwitch with DPDK will require the following:
 
-- DPDK 17.11.2
+- DPDK 18.11
 
 - A `DPDK supported NIC`_
 
@@ -69,9 +71,9 @@ Install DPDK
 #. Download the `DPDK sources`_, extract the file and set ``DPDK_DIR``::
 
        $ cd /usr/src/
-       $ wget http://fast.dpdk.org/rel/dpdk-17.11.2.tar.xz
-       $ tar xf dpdk-17.11.2.tar.xz
-       $ export DPDK_DIR=/usr/src/dpdk-stable-17.11.2
+       $ wget http://fast.dpdk.org/rel/dpdk-18.11.tar.xz
+       $ tar xf dpdk-18.11.tar.xz
+       $ export DPDK_DIR=/usr/src/dpdk-18.11
        $ cd $DPDK_DIR
 
 #. (Optional) Configure DPDK as a shared library
@@ -169,6 +171,12 @@ To verify hugepage configuration::
 Mount the hugepages, if not already mounted by default::
 
     $ mount -t hugetlbfs none /dev/hugepages``
+
+.. note::
+
+   The amount of hugepage memory required can be affected by various
+   aspects of the datapath and device configuration. Refer to
+   :doc:`/topics/dpdk/memory` for more details.
 
 .. _dpdk-vfio:
 
@@ -653,7 +661,6 @@ The average number of packets per output batch can be checked in PMD stats::
 Limitations
 ------------
 
-- Currently DPDK ports does not use HW offload functionality.
 - Network Interface Firmware requirements: Each release of DPDK is
   validated against a specific firmware version for a supported Network
   Interface. New firmware versions introduce bug fixes, performance
@@ -665,7 +672,8 @@ Limitations
   The latest list of validated firmware versions can be found in the `DPDK
   release notes`_.
 
-.. _DPDK release notes: http://dpdk.org/doc/guides/rel_notes/release_17_11.html
+.. _DPDK release notes:
+   https://doc.dpdk.org/guides/rel_notes/release_18_11.html
 
 - Upper bound MTU: DPDK device drivers differ in how the L2 frame for a
   given MTU value is calculated e.g. i40e driver includes 2 x vlan headers in

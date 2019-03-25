@@ -65,6 +65,7 @@
 #define IP6_GRE_HASH_SIZE (1 << IP6_GRE_HASH_SIZE_SHIFT)
 
 static unsigned int ip6gre_net_id __read_mostly;
+static bool ip6_gre_loaded = false;
 struct ip6gre_net {
 	struct ip6_tnl __rcu *tunnels[4][IP6_GRE_HASH_SIZE];
 
@@ -376,7 +377,7 @@ static struct ip6_tnl *ip6gre_tunnel_locate(struct net *net,
 	if (parms->name[0])
 		strlcpy(name, parms->name, IFNAMSIZ);
 	else
-		strcpy(name, "ip6gre%d");
+		strlcpy(name, "ovs-ip6gre%d", IFNAMSIZ);
 
 	dev = alloc_netdev(sizeof(*t), name, NET_NAME_UNKNOWN,
 			   ip6gre_tunnel_setup);
@@ -875,9 +876,6 @@ static netdev_tx_t __gre6_xmit(struct sk_buff *skb,
 	struct tnl_ptk_info tpi;
 	__be16 protocol;
 
-	if (dev->type == ARPHRD_ETHER)
-		IPCB(skb)->flags = 0;
-
 	if (dev->header_ops && dev->type == ARPHRD_IP6GRE)
 		fl6->daddr = ((struct ipv6hdr *)skb->data)->daddr;
 	else
@@ -1145,7 +1143,6 @@ static netdev_tx_t ip6erspan_tunnel_xmit(struct sk_buff *skb,
 		goto tx_err;
 
 	t->parms.o_flags &= ~TUNNEL_KEY;
-	IPCB(skb)->flags = 0;
 
 	tun_info = ovs_skb_tunnel_info(skb);
 	if (unlikely(!tun_info ||
@@ -1715,7 +1712,8 @@ static int __net_init ip6gre_init_net(struct net *net)
 	struct ip6gre_net *ign = net_generic(net, ip6gre_net_id);
 	int err;
 
-	ign->fb_tunnel_dev = alloc_netdev(sizeof(struct ip6_tnl), "ip6gre0",
+	ign->fb_tunnel_dev = alloc_netdev(sizeof(struct ip6_tnl),
+					  "ovs-ip6gre0",
 					  NET_NAME_UNKNOWN,
 					  ip6gre_tunnel_setup);
 	if (!ign->fb_tunnel_dev) {
@@ -1982,6 +1980,7 @@ static void ip6gre_netlink_parms(struct nlattr *data[],
 	if (data[IFLA_GRE_COLLECT_METADATA])
 		parms->collect_md = true;
 
+	parms->erspan_ver = 1;
 	if (data[IFLA_GRE_ERSPAN_VER])
 		parms->erspan_ver = nla_get_u8(data[IFLA_GRE_ERSPAN_VER]);
 
@@ -2792,32 +2791,59 @@ int rpl_ip6gre_init(void)
 	int err;
 
 	err = register_pernet_device(&ip6gre_net_ops);
-	if (err < 0)
-		return err;
+	if (err < 0) {
+		if (err == -EEXIST)
+			goto ip6_gre_loaded;
+		else
+			goto out;
+	}
 
 	err = inet6_add_protocol(&ip6gre_protocol, IPPROTO_GRE);
 	if (err < 0) {
 		pr_info("%s: can't add protocol\n", __func__);
-		goto add_proto_failed;
+		unregister_pernet_device(&ip6gre_net_ops);
+		/*
+		 * inet6_add_protocol will return a -1 if it fails
+		 * to grab the pointer but the vport initialization
+		 * expects a return value of -EEXIST.  Set err to
+		 * -EEXIST here to ensure proper handling.
+		 */
+		err = -EEXIST;
+		goto ip6_gre_loaded;
 	}
 
 	pr_info("GRE over IPv6 tunneling driver\n");
 	ovs_vport_ops_register(&ovs_ip6gre_vport_ops);
 	ovs_vport_ops_register(&ovs_erspan6_vport_ops);
-	return 0;
-out:
 	return err;
 
-add_proto_failed:
-	unregister_pernet_device(&ip6gre_net_ops);
-	goto out;
+ip6_gre_loaded:
+	/* Since IPv6 GRE only allows single receiver to be registerd,
+	 * we skip here so only transmit works, see:
+	 *
+	 * commit f9242b6b28d61295f2bf7e8adfb1060b382e5381
+	 * Author: David S. Miller <davem@davemloft.net>
+	 * Date:   Tue Jun 19 18:56:21 2012 -0700
+	 *
+	 *     inet: Sanitize inet{,6} protocol demux.
+	 *
+	 * OVS GRE receive part is disabled.
+	 */
+	pr_info("GRE TX only over IPv6 tunneling driver\n");
+	ip6_gre_loaded = true;
+	ovs_vport_ops_register(&ovs_ip6gre_vport_ops);
+	ovs_vport_ops_register(&ovs_erspan6_vport_ops);
+out:
+	return err;
 }
 
 void rpl_ip6gre_fini(void)
 {
 	ovs_vport_ops_unregister(&ovs_erspan6_vport_ops);
 	ovs_vport_ops_unregister(&ovs_ip6gre_vport_ops);
-	inet6_del_protocol(&ip6gre_protocol, IPPROTO_GRE);
-	unregister_pernet_device(&ip6gre_net_ops);
+	if (!ip6_gre_loaded) {
+		inet6_del_protocol(&ip6gre_protocol, IPPROTO_GRE);
+		unregister_pernet_device(&ip6gre_net_ops);
+	}
 }
 #endif /* USE_UPSTREAM_TUNNEL */

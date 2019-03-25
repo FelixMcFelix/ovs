@@ -59,7 +59,7 @@ m4_define([CONFIGURE_VETH_OFFLOADS],
 # kernel conntrack tables when the test is finished.
 #
 m4_define([CHECK_CONNTRACK],
-    [AT_SKIP_IF([test $HAVE_PYTHON = no])
+    [AT_SKIP_IF([test $HAVE_PYTHON2 = no])
      m4_foreach([mod], [[nf_conntrack_ipv4], [nf_conntrack_ipv6], [nf_nat_ftp],
                         [nf_nat_tftp]],
                 [modprobe mod || echo "Module mod not loaded."
@@ -77,12 +77,6 @@ m4_define([CHECK_CONNTRACK],
 #
 m4_define([CHECK_CONNTRACK_ALG])
 
-# CHECK_CONNTRACK_FRAG()
-#
-# Perform requirements checks for running conntrack fragmentations tests.
-# The kernel always supports fragmentation, so no check is needed.
-m4_define([CHECK_CONNTRACK_FRAG])
-
 # CHECK_CONNTRACK_LOCAL_STACK()
 #
 # Perform requirements checks for running conntrack tests with local stack.
@@ -91,12 +85,27 @@ m4_define([CHECK_CONNTRACK_FRAG])
 # needed.
 m4_define([CHECK_CONNTRACK_LOCAL_STACK])
 
+# CHECK_CONNTRACK_FRAG_OVERLAP()
+#
+# The kernel does not support overlapping fragments checking.
+m4_define([CHECK_CONNTRACK_FRAG_OVERLAP],
+[
+    AT_SKIP_IF([:])
+])
+
 # CHECK_CONNTRACK_NAT()
 #
 # Perform requirements checks for running conntrack NAT tests. The kernel
 # always supports NAT, so no check is needed.
 #
 m4_define([CHECK_CONNTRACK_NAT])
+
+# CHECK_CT_DPIF_PER_ZONE_LIMIT()
+#
+# Perform requirements checks for running ovs-dpctl ct-[set|get|del]-limits per
+# zone. The kernel datapath does support this feature. Will remove this check
+# after both kernel and userspace datapath support it.
+m4_define([CHECK_CT_DPIF_PER_ZONE_LIMIT])
 
 # CHECK_CT_DPIF_SET_GET_MAXCONNS()
 #
@@ -115,4 +124,66 @@ m4_define([CHECK_CT_DPIF_SET_GET_MAXCONNS],
 m4_define([CHECK_CT_DPIF_GET_NCONNS],
 [
     AT_SKIP_IF([:])
+])
+
+# DPCTL_SET_MIN_FRAG_SIZE()
+#
+# The kernel does not support this command.
+m4_define([DPCTL_SET_MIN_FRAG_SIZE],
+[
+
+])
+
+# DPCTL_MODIFY_FRAGMENTATION()
+#
+# The kernel does not support this command.
+m4_define([DPCTL_MODIFY_FRAGMENTATION],
+[
+
+])
+
+# DPCTL_CHECK_FRAGMENTATION_PASS()
+#
+# The kernel does not support this command.
+m4_define([DPCTL_CHECK_FRAGMENTATION_PASS],
+[
+
+])
+
+# DPCTL_CHECK_V6_FRAGMENTATION_PASS()
+#
+# The kernel does not support this command.
+m4_define([DPCTL_CHECK_V6_FRAGMENTATION_PASS],
+[
+
+])
+
+# DPCTL_CHECK_FRAGMENTATION_FAIL()
+#
+# The kernel does not support this command.
+m4_define([DPCTL_CHECK_FRAGMENTATION_FAIL],
+[
+
+])
+
+# OVS_CHECK_KERNEL([minversion], [minsublevel], [maxversion], [maxsublevel])
+#
+# Check if kernel version falls between minversion.minsublevel and
+# maxversion.maxsublevel, skip this test if it is not.
+m4_define([OVS_CHECK_KERNEL],
+[
+    version=$(uname -r | sed -e 's/\./ /g' | awk '{print $ 1}')
+    sublevel=$(uname -r | sed -e 's/\./ /g' | awk '{print $ 2}')
+    AT_SKIP_IF([test $version -lt $1 || ( test $version -eq $1 && test $sublevel -lt $2 ) || test $version -gt $3 || ( test $version -eq $3 && test $sublevel -gt $4 )])
+])
+
+# OVS_CHECK_KERNEL_EXCL([minversion], [minsublevel], [maxversion], [maxsublevel])
+#
+# Check that kernel version doesn't fall between minversion.minsublevel and
+# maxversion.maxsublevel, skip this test if it is.
+m4_define([OVS_CHECK_KERNEL_EXCL],
+[
+    version=$(uname -r | sed -e 's/\./ /g' | awk '{print $ 1}')
+    sublevel=$(uname -r | sed -e 's/\./ /g' | awk '{print $ 2}')
+    AT_SKIP_IF([ ! ( test $version -lt $1 || ( test $version -eq $1 && test $sublevel -lt $2 ) || test $version -gt $3 || ( test $version -eq $3 && test $sublevel -gt $4 ) ) ])
 ])

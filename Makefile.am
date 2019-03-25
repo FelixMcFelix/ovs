@@ -76,6 +76,7 @@ EXTRA_DIST = \
 	MAINTAINERS.rst \
 	README.rst \
 	NOTICE \
+	.cirrus.yml \
 	.travis.yml \
 	.travis/linux-build.sh \
 	.travis/linux-prepare.sh \
@@ -105,6 +106,7 @@ dist_pkgdata_SCRIPTS =
 dist_sbin_SCRIPTS =
 dist_scripts_SCRIPTS =
 dist_scripts_DATA =
+EXTRA_PROGRAMS =
 INSTALL_DATA_LOCAL =
 UNINSTALL_LOCAL =
 man_MANS =
@@ -202,6 +204,7 @@ dist-hook-git: distfiles
 	  (cat distfiles; sed 's|^|datapath/|' datapath/distfiles) | \
 	    LC_ALL=C sort -u > all-distfiles; \
 	  (cd $(srcdir) && git ls-files) | grep -v '\.gitignore$$' | \
+	    grep -v '\.gitattributes$$' | \
 	    LC_ALL=C sort -u > all-gitfiles; \
 	  LC_ALL=C comm -1 -3 all-distfiles all-gitfiles > missing-distfiles; \
 	  if test -s missing-distfiles; then \
@@ -298,7 +301,7 @@ check-endian:
 	@if test -e $(srcdir)/.git && (git --version) >/dev/null 2>&1 && \
 	  (cd $(srcdir) && git --no-pager grep -l -E \
 	   -e 'BIG_ENDIAN|LITTLE_ENDIAN' --and --not -e 'BYTE_ORDER' | \
-	  $(EGREP) -v '^datapath/'); \
+	  $(EGREP) -v '^datapath/|^include/sparse/rte_'); \
 	then \
 	  echo "See above for list of files that misuse LITTLE""_ENDIAN"; \
 	  echo "or BIG""_ENDIAN.  Please use WORDS_BIGENDIAN instead."; \
@@ -392,6 +395,7 @@ ALL_LOCAL += flake8-check
 #   E131 continuation line unaligned for hanging indent
 #   E722 do not use bare except, specify exception instead
 #   W503 line break before binary operator
+#   W504 line break after binary operator
 # F*** -- warnings native to flake8
 #   F811 redefinition of unused <name> from line <N> (only from flake8 v2.0)
 # D*** -- warnings from flake8-docstrings plugin
@@ -401,7 +405,7 @@ ALL_LOCAL += flake8-check
 #   H233 Python 3.x incompatible use of print operator
 #   H238 old style class declaration, use new style (inherit from `object`)
 FLAKE8_SELECT = H231,H232,H233,H238
-FLAKE8_IGNORE = E121,E123,E125,E126,E127,E128,E129,E131,E722,W503,F811,D,H,I
+FLAKE8_IGNORE = E121,E123,E125,E126,E127,E128,E129,E131,E722,W503,W504,F811,D,H,I
 flake8-check: $(FLAKE8_PYFILES)
 	$(FLAKE8_WERROR)$(AM_V_GEN) \
 	  src='$^' && \
@@ -483,6 +487,7 @@ include tests/automake.mk
 include include/automake.mk
 include third-party/automake.mk
 include debian/automake.mk
+include ipsec/automake.mk
 include vswitchd/automake.mk
 include ovsdb/automake.mk
 include rhel/automake.mk

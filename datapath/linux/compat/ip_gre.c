@@ -64,13 +64,12 @@
 #include "vport-netdev.h"
 
 static int gre_tap_net_id __read_mostly;
-static int ipgre_net_id __read_mostly;
 static unsigned int erspan_net_id __read_mostly;
 static void erspan_build_header(struct sk_buff *skb,
 				__be32 id, u32 index,
 				bool truncate, bool is_ipv4);
 
-static struct rtnl_link_ops ipgre_link_ops __read_mostly;
+static bool ip_gre_loaded = false;
 
 #define ip_gre_calc_hlen rpl_ip_gre_calc_hlen
 static int ip_gre_calc_hlen(__be16 o_flags)
@@ -311,17 +310,14 @@ static int ipgre_rcv(struct sk_buff *skb, const struct tnl_ptk_info *tpi,
 
 	if (tpi->proto == htons(ETH_P_TEB))
 		itn = net_generic(net, gre_tap_net_id);
+	else if (tpi->proto == htons(ETH_P_ERSPAN) ||
+		 tpi->proto == htons(ETH_P_ERSPAN2))
+		itn = net_generic(net, erspan_net_id);
 	else
-		itn = net_generic(net, ipgre_net_id);
+		return PACKET_RCVD;
 
 	res = __ipgre_rcv(skb, tpi, itn, hdr_len, false);
-	if (res == PACKET_NEXT && tpi->proto == htons(ETH_P_TEB)) {
-		/* ipgre tunnels in collect metadata mode should receive
-		 * also ETH_P_TEB traffic.
-		 */
-		itn = net_generic(net, ipgre_net_id);
-		res = __ipgre_rcv(skb, tpi, itn, hdr_len, true);
-	}
+
 	return res;
 }
 
@@ -605,6 +601,8 @@ static void erspan_fb_xmit(struct sk_buff *skb, struct net_device *dev,
 		goto err_free_skb;
 
 	key = &tun_info->key;
+	if (!(tun_info->key.tun_flags & TUNNEL_ERSPAN_OPT))
+		goto err_free_rt;
 	md = ip_tunnel_info_opts(tun_info);
 	if (!md)
 		goto err_free_rt;
@@ -680,15 +678,12 @@ err_free_skb:
 static void __gre_tunnel_init(struct net_device *dev)
 {
 	struct ip_tunnel *tunnel;
-	int t_hlen;
 
 	tunnel = netdev_priv(dev);
 	tunnel->tun_hlen = ip_gre_calc_hlen(tunnel->parms.o_flags);
 	tunnel->parms.iph.protocol = IPPROTO_GRE;
 
 	tunnel->hlen = tunnel->tun_hlen + tunnel->encap_hlen;
-
-	t_hlen = tunnel->hlen + sizeof(struct iphdr);
 
 	dev->features		|= GRE_FEATURES;
 	dev->hw_features	|= GRE_FEATURES;
@@ -724,25 +719,6 @@ void __gre_err(struct sk_buff *skb, u32 info)
 static const struct gre_protocol ipgre_protocol = {
 	.handler     = __gre_rcv,
 	.err_handler = __gre_err,
-};
-
-static int __net_init ipgre_init_net(struct net *net)
-{
-	return ip_tunnel_init_net(net, ipgre_net_id, &ipgre_link_ops, NULL);
-}
-
-static void __net_exit ipgre_exit_net(struct net *net)
-{
-	struct ip_tunnel_net *itn = net_generic(net, ipgre_net_id);
-
-	ip_tunnel_delete_net(itn, &ipgre_link_ops);
-}
-
-static struct pernet_operations ipgre_net_ops = {
-	.init = ipgre_init_net,
-	.exit = ipgre_exit_net,
-	.id   = &ipgre_net_id,
-	.size = sizeof(struct ip_tunnel_net),
 };
 
 #ifdef HAVE_EXT_ACK_IN_RTNL_LINKOPS
@@ -1030,16 +1006,12 @@ EXPORT_SYMBOL_GPL(ovs_gre_fill_metadata_dst);
 static int erspan_tunnel_init(struct net_device *dev)
 {
 	struct ip_tunnel *tunnel = netdev_priv(dev);
-	int t_hlen;
 
 	tunnel->tun_hlen = 8;
 	tunnel->parms.iph.protocol = IPPROTO_GRE;
 	tunnel->hlen = tunnel->tun_hlen + tunnel->encap_hlen +
 		       erspan_hdr_len(tunnel->erspan_ver);
-	t_hlen = tunnel->hlen + sizeof(struct iphdr);
 
-	dev->needed_headroom = LL_MAX_HEADER + t_hlen + 4;
-	dev->mtu = ETH_DATA_LEN - t_hlen - 4;
 	dev->features		|= GRE_FEATURES;
 	dev->hw_features	|= GRE_FEATURES;
 	dev->priv_flags		|= IFF_LIVE_ADDR_CHANGE;
@@ -1208,13 +1180,6 @@ static const struct net_device_ops erspan_netdev_ops = {
 #endif
 };
 
-static void ipgre_tunnel_setup(struct net_device *dev)
-{
-	dev->netdev_ops		= &ipgre_netdev_ops;
-	dev->type		= ARPHRD_IPGRE;
-	ip_tunnel_setup(dev, ipgre_net_id);
-}
-
 static void ipgre_tap_setup(struct net_device *dev)
 {
 	ether_setup(dev);
@@ -1228,12 +1193,15 @@ static void ipgre_tap_setup(struct net_device *dev)
 
 static void erspan_setup(struct net_device *dev)
 {
+	struct ip_tunnel *t = netdev_priv(dev);
+
 	eth_hw_addr_random(dev);
 	ether_setup(dev);
 	dev->netdev_ops = &erspan_netdev_ops;
 	dev->priv_flags &= ~IFF_TX_SKB_SHARING;
 	dev->priv_flags |= IFF_LIVE_ADDR_CHANGE;
 	ip_tunnel_setup(dev, erspan_net_id);
+	t->erspan_ver = 1;
 }
 
 #ifdef HAVE_EXT_ACK_IN_RTNL_LINKOPS
@@ -1352,22 +1320,6 @@ static const struct nla_policy ipgre_policy[RPL_IFLA_GRE_MAX + 1] = {
 	[IFLA_GRE_ERSPAN_HWID]	= { .type = NLA_U16 },
 };
 
-static struct rtnl_link_ops ipgre_link_ops __read_mostly = {
-	.kind		= "gre",
-	.maxtype	= RPL_IFLA_GRE_MAX,
-	.policy		= ipgre_policy,
-	.priv_size	= sizeof(struct ip_tunnel),
-	.setup		= ipgre_tunnel_setup,
-	.validate	= ipgre_tunnel_validate,
-	.newlink	= ipgre_newlink,
-	.dellink	= ip_tunnel_dellink,
-	.get_size	= ipgre_get_size,
-	.fill_info	= ipgre_fill_info,
-#ifdef HAVE_GET_LINK_NET
-	.get_link_net	= ip_tunnel_get_link_net,
-#endif
-};
-
 static struct rtnl_link_ops ipgre_tap_ops __read_mostly = {
 	.kind		= "ovs_gretap",
 	.maxtype	= RPL_IFLA_GRE_MAX,
@@ -1466,7 +1418,7 @@ static struct pernet_operations erspan_net_ops = {
 
 static int __net_init ipgre_tap_init_net(struct net *net)
 {
-	return ip_tunnel_init_net(net, gre_tap_net_id, &ipgre_tap_ops, "gretap0");
+	return ip_tunnel_init_net(net, gre_tap_net_id, &ipgre_tap_ops, "ovs-gretap0");
 }
 
 static void __net_exit ipgre_tap_exit_net(struct net *net)
@@ -1640,32 +1592,54 @@ int rpl_ipgre_init(void)
 	int err;
 
 	err = register_pernet_device(&ipgre_tap_net_ops);
-	if (err < 0)
-		goto pnet_tap_failed;
+	if (err < 0) {
+		if (err == -EEXIST)
+			goto ip_gre_loaded;
+		else
+			goto pnet_tap_failed;
+	}
 
 	err = register_pernet_device(&erspan_net_ops);
-	if (err < 0)
-		goto pnet_erspan_failed;
-
-	err = register_pernet_device(&ipgre_net_ops);
-	if (err < 0)
-		goto pnet_ipgre_failed;
+	if (err < 0) {
+		if (err == -EEXIST)
+			goto ip_gre_loaded;
+		else
+			goto pnet_erspan_failed;
+	}
 
 	err = gre_add_protocol(&ipgre_protocol, GREPROTO_CISCO);
 	if (err < 0) {
 		pr_info("%s: can't add protocol\n", __func__);
-		goto add_proto_failed;
+		if (err == -EBUSY) {
+			goto ip_gre_loaded;
+		} else {
+			goto add_proto_failed;
+		}
 	}
 
 	pr_info("GRE over IPv4 tunneling driver\n");
-	
+	ovs_vport_ops_register(&ovs_ipgre_vport_ops);
+	ovs_vport_ops_register(&ovs_erspan_vport_ops);
+	return 0;
+
+ip_gre_loaded:
+	/* Since GRE only allows single receiver to be registerd,
+	 * we skip here so only gre transmit works, see:
+	 *
+	 * commit 9f57c67c379d88a10e8ad676426fee5ae7341b14
+	 * Author: Pravin B Shelar <pshelar@nicira.com>
+	 * Date:   Fri Aug 7 23:51:52 2015 -0700
+	 *     gre: Remove support for sharing GRE protocol hook
+	 *
+	 * OVS GRE receive part is disabled.
+	 */
+	pr_info("GRE TX only over IPv4 tunneling driver\n");
+	ip_gre_loaded = true;
 	ovs_vport_ops_register(&ovs_ipgre_vport_ops);
 	ovs_vport_ops_register(&ovs_erspan_vport_ops);
 	return 0;
 
 add_proto_failed:
-	unregister_pernet_device(&ipgre_net_ops);
-pnet_ipgre_failed:
 	unregister_pernet_device(&erspan_net_ops);
 pnet_erspan_failed:
 	unregister_pernet_device(&ipgre_tap_net_ops);
@@ -1678,10 +1652,12 @@ void rpl_ipgre_fini(void)
 {
 	ovs_vport_ops_unregister(&ovs_erspan_vport_ops);
 	ovs_vport_ops_unregister(&ovs_ipgre_vport_ops);
-	gre_del_protocol(&ipgre_protocol, GREPROTO_CISCO);
-	unregister_pernet_device(&ipgre_net_ops);
-	unregister_pernet_device(&erspan_net_ops);
-	unregister_pernet_device(&ipgre_tap_net_ops);
+
+	if (!ip_gre_loaded) {
+		gre_del_protocol(&ipgre_protocol, GREPROTO_CISCO);
+		unregister_pernet_device(&erspan_net_ops);
+		unregister_pernet_device(&ipgre_tap_net_ops);
+	}
 }
 
 #endif

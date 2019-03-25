@@ -705,13 +705,13 @@ match_set_any_vid(struct match *match)
  *     VID equals the low 12 bits of 'dl_vlan'.
  */
 void
-match_set_dl_vlan(struct match *match, ovs_be16 dl_vlan)
+match_set_dl_vlan(struct match *match, ovs_be16 dl_vlan, int id)
 {
-    flow_set_dl_vlan(&match->flow, dl_vlan);
+    flow_set_dl_vlan(&match->flow, dl_vlan, id);
     if (dl_vlan == htons(OFP10_VLAN_NONE)) {
-        match->wc.masks.vlans[0].tci = OVS_BE16_MAX;
+        match->wc.masks.vlans[id].tci = OVS_BE16_MAX;
     } else {
-        match->wc.masks.vlans[0].tci |= htons(VLAN_VID_MASK | VLAN_CFI);
+        match->wc.masks.vlans[id].tci |= htons(VLAN_VID_MASK | VLAN_CFI);
     }
 }
 
@@ -757,10 +757,10 @@ match_set_any_pcp(struct match *match)
 /* Modifies 'match' so that it matches only packets with an 802.1Q header whose
  * PCP equals the low 3 bits of 'dl_vlan_pcp'. */
 void
-match_set_dl_vlan_pcp(struct match *match, uint8_t dl_vlan_pcp)
+match_set_dl_vlan_pcp(struct match *match, uint8_t dl_vlan_pcp, int id)
 {
-    flow_set_vlan_pcp(&match->flow, dl_vlan_pcp);
-    match->wc.masks.vlans[0].tci |= htons(VLAN_CFI | VLAN_PCP_MASK);
+    flow_set_vlan_pcp(&match->flow, dl_vlan_pcp, id);
+    match->wc.masks.vlans[id].tci |= htons(VLAN_CFI | VLAN_PCP_MASK);
 }
 
 /* Modifies 'match' so that the MPLS label 'idx' matches 'lse' exactly. */
@@ -946,6 +946,13 @@ match_set_nw_ttl(struct match *match, uint8_t nw_ttl)
 }
 
 void
+match_set_nw_tos_masked(struct match *match, uint8_t nw_tos, uint8_t mask)
+{
+    match->flow.nw_tos = nw_tos & mask;
+    match->wc.masks.nw_tos = mask;
+}
+
+void
 match_set_nw_ttl_masked(struct match *match, uint8_t nw_ttl, uint8_t mask)
 {
     match->flow.nw_ttl = nw_ttl & mask;
@@ -1071,6 +1078,19 @@ match_set_nd_target_masked(struct match *match,
 {
     match->flow.nd_target = ipv6_addr_bitand(target, mask);
     match->wc.masks.nd_target = *mask;
+}
+
+void
+match_set_nd_reserved (struct match *match, ovs_be32 value)
+{
+   match->flow.igmp_group_ip4 = value;
+   match->wc.masks.igmp_group_ip4 = OVS_BE32_MAX;
+}
+
+void
+match_set_nd_options_type(struct match *match, uint8_t option)
+{
+    match_set_tcp_flags(match, htons(option));
 }
 
 /* Returns true if 'a' and 'b' wildcard the same fields and have the same
@@ -1681,6 +1701,14 @@ match_format(const struct match *match,
                             &wc->masks.nd_target);
         format_eth_masked(s, "nd_sll", f->arp_sha, wc->masks.arp_sha);
         format_eth_masked(s, "nd_tll", f->arp_tha, wc->masks.arp_tha);
+        if (wc->masks.igmp_group_ip4) {
+            format_be32_masked(s,"nd_reserved", f->igmp_group_ip4,
+                               wc->masks.igmp_group_ip4);
+        }
+        if (wc->masks.tcp_flags) {
+            format_be16_masked(s,"nd_options_type", f->tcp_flags,
+                               wc->masks.tcp_flags);
+        }
     } else {
         format_be16_masked(s, "tp_src", f->tp_src, wc->masks.tp_src);
         format_be16_masked(s, "tp_dst", f->tp_dst, wc->masks.tp_dst);

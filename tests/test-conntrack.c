@@ -177,7 +177,7 @@ pcap_batch_execute_conntrack(struct conntrack *ct_,
                               NULL, NULL, 0, 0, NULL, NULL, now);
             dp_packet_batch_init(&new_batch);
         }
-        new_batch.packets[new_batch.count++] = packet;;
+        dp_packet_batch_add(&new_batch, packet);
     }
 
     if (!dp_packet_batch_is_empty(&new_batch)) {
@@ -191,7 +191,7 @@ static void
 test_pcap(struct ovs_cmdl_context *ctx)
 {
     size_t total_count, batch_size_;
-    FILE *pcap;
+    struct pcap_file *pcap;
     int err = 0;
 
     pcap = ovs_pcap_open(ctx->argv[1], "rb");
@@ -226,7 +226,7 @@ test_pcap(struct ovs_cmdl_context *ctx)
             }
             dp_packet_batch_add(batch, packet);
         }
-        if (!batch->count) {
+        if (dp_packet_batch_is_empty(batch)) {
             break;
         }
         pcap_batch_execute_conntrack(&ct, batch);
@@ -245,7 +245,7 @@ test_pcap(struct ovs_cmdl_context *ctx)
         dp_packet_delete_batch(batch, true);
     }
     conntrack_destroy(&ct);
-    fclose(pcap);
+    ovs_pcap_close(pcap);
 }
 
 static const struct ovs_cmdl_command commands[] = {

@@ -38,7 +38,12 @@ insert_mod_if_required () {
 set_hostname () {
     # 'hostname -f' needs network connectivity to work.  So we should
     # call this only after ovs-vswitchd is running.
-    ovs_vsctl set Open_vSwitch . external-ids:hostname="$(hostname -f)"
+    if test X$FULL_HOSTNAME = Xyes; then
+        hn="$(hostname -f)" || hn="$(uname -n)"
+    else
+        hn="$(uname -n)"
+    fi
+    ovs_vsctl set Open_vSwitch . external-ids:hostname="$hn"
 }
 
 set_system_ids () {
@@ -57,8 +62,10 @@ set_system_ids () {
                 # Migrate from old file name.
                 . "$uuid_file"
                 SYSTEM_ID=$INSTALLATION_UUID
+                run_as_ovsuser touch "$id_file"
                 echo "$SYSTEM_ID" > "$id_file"
             elif SYSTEM_ID=`uuidgen`; then
+                run_as_ovsuser touch "$id_file"
                 echo "$SYSTEM_ID" > "$id_file"
             else
                 log_failure_msg "missing uuidgen, could not generate system ID"
@@ -137,6 +144,7 @@ do_start_ovsdb () {
         set "$@" --certificate=db:Open_vSwitch,SSL,certificate
         set "$@" --bootstrap-ca-cert=db:Open_vSwitch,SSL,ca_cert
         [ "$OVS_USER" != "" ] && set "$@" --user "$OVS_USER"
+        [ "$OVSDB_SERVER_OPTIONS" != "" ] && set "$@" $OVSDB_SERVER_OPTIONS
 
         start_daemon "$OVSDB_SERVER_PRIORITY" "$OVSDB_SERVER_WRAPPER" "$@" \
             || return 1
@@ -164,16 +172,14 @@ start_ovsdb() {
 }
 
 add_managers () {
-    # Now that ovs-vswitchd has started and completed its initial
-    # configuration, tell ovsdb-server to connect to the remote managers.  We
-    # used to do this at ovsdb-server startup time, but waiting for
-    # ovs-vswitchd to finish configuring means that remote managers see less
-    # churn in the database at startup or restart.  (For example, managers
-    # won't briefly see empty datapath-id or ofport columns for records that
-    # exist at startup.)
+    # Tell ovsdb-server to connect to the remote managers. If ovs-vswitchd
+    # is not finished configuring, it may mean that remote managers will
+    # see more churn in the database at startup or restart. (For example,
+    # managers may briefly see empty datapath-id or ofport columns for
+    # records that exist at startup.).  However, the alternative is a
+    # 'bricked' system, so we allow database connectivity regardless.
     if test X"$OVSDB_SERVER" = Xyes || test X"$OVS_VSWITCHD" = Xyes; then
-        if daemon_is_running ovsdb-server \
-                && daemon_is_running ovs-vswitchd; then
+        if daemon_is_running ovsdb-server; then
             action "Enabling remote OVSDB managers" \
                    ovs-appctl -t ovsdb-server ovsdb-server/add-remote \
                    db:Open_vSwitch,Open_vSwitch,manager_options
@@ -208,6 +214,7 @@ do_start_forwarding () {
             set "$@" --no-self-confinement
         fi
         [ "$OVS_USER" != "" ] && set "$@" --user "$OVS_USER"
+        [ "$OVS_VSWITCHD_OPTIONS" != "" ] &&set "$@" $OVS_VSWITCHD_OPTIONS
 
         start_daemon "$OVS_VSWITCHD_PRIORITY" "$OVS_VSWITCHD_WRAPPER" "$@" ||
             return 1
@@ -219,6 +226,14 @@ start_forwarding () {
         do_start_forwarding || return 1
     fi
     set_hostname &
+    return 0
+}
+
+start_ovs_ipsec () {
+    ${datadir}/scripts/ovs-monitor-ipsec \
+        --pidfile=${rundir}/ovs-monitor-ipsec.pid \
+        --ike-daemon=$IKE_DAEMON \
+        --log-file --detach --monitor unix:${rundir}/db.sock || return 1
     return 0
 }
 
@@ -236,6 +251,11 @@ stop_forwarding () {
     if test X"$OVS_VSWITCHD" = Xyes; then
         stop_daemon ovs-vswitchd
     fi
+}
+
+stop_ovs_ipsec () {
+    ${bindir}/ovs-appctl -t ovs-monitor-ipsec exit || return 1
+    return 0
 }
 
 ## --------------- ##
@@ -291,6 +311,8 @@ enable_protocol () {
 set_defaults () {
     SYSTEM_ID=
 
+    FULL_HOSTNAME=yes
+
     DELETE_BRIDGES=no
     DELETE_TRANSIENT_PORTS=no
 
@@ -306,6 +328,8 @@ set_defaults () {
     OVS_VSWITCHD_PRIORITY=-10
     OVSDB_SERVER_WRAPPER=
     OVS_VSWITCHD_WRAPPER=
+    OVSDB_SERVER_OPTIONS=
+    OVS_VSWITCHD_OPTIONS=
 
     DB_FILE=$dbdir/conf.db
     DB_SOCK=$rundir/db.sock
@@ -315,6 +339,8 @@ set_defaults () {
     PROTOCOL=gre
     DPORT=
     SPORT=
+
+    IKE_DAEMON=
 
     type_file=$etcdir/system-type.conf
     version_file=$etcdir/system-version.conf
@@ -356,6 +382,8 @@ Commands:
                           module, reload kernel module, start OVS, restore state
   enable-protocol         enable protocol specified in options with iptables
   delete-transient-ports  delete transient (other_config:transient=true) ports
+  start-ovs-ipsec         start Open vSwitch ipsec daemon
+  stop-ovs-ipsec          stop Open vSwitch ipsec daemon
   help                    display this help message
 
 One of the following options is required for "start", "restart" and "force-reload-kmod":
@@ -376,6 +404,7 @@ Less important options for "start", "restart" and "force-reload-kmod":
   --no-mlockall                  do not lock all of ovs-vswitchd into memory
   --ovsdb-server-priority=NICE   set ovsdb-server's niceness (default: $OVSDB_SERVER_PRIORITY)
   --ovs-vswitchd-priority=NICE   set ovs-vswitchd's niceness (default: $OVS_VSWITCHD_PRIORITY)
+  --no-full-hostname             set short hostname instead of full hostname
 
 Debugging options for "start", "restart" and "force-reload-kmod":
   --ovsdb-server-wrapper=WRAPPER
@@ -391,6 +420,10 @@ Options for "enable-protocol":
   --protocol=PROTOCOL  protocol to enable with iptables (default: gre)
   --sport=PORT       source port to match (for tcp or udp protocol)
   --dport=PORT       ddestination port to match (for tcp or udp protocol)
+
+Option for "start-ovs-ipsec":
+  --ike-daemon=IKE_DAEMON
+      the IKE daemon for ipsec tunnels (either libreswan or strongswan)
 
 Other options:
   -h, --help                  display this help message
@@ -521,6 +554,12 @@ case $command in
         ;;
     delete-transient-ports)
         del_transient_ports
+        ;;
+    start-ovs-ipsec)
+        start_ovs_ipsec
+        ;;
+    stop-ovs-ipsec)
+        stop_ovs_ipsec
         ;;
     help)
         usage

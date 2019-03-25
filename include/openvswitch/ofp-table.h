@@ -155,7 +155,7 @@ struct ofpbuf *ofputil_encode_table_mod(const struct ofputil_table_mod *,
                                        enum ofputil_protocol);
 void ofputil_table_mod_format(struct ds *, const struct ofputil_table_mod *,
                               const struct ofputil_table_map *);
-char *parse_ofp_table_mod(struct ofputil_table_mod *,
+char *parse_ofp_table_mod(struct ofputil_table_mod *, const char **namep,
                           const char *table_id, const char *flow_miss_handling,
                           const struct ofputil_table_map *,
                           uint32_t *usable_versions)
@@ -187,12 +187,22 @@ void ofputil_table_desc_format(struct ds *,
  * include support for a subset of ofp_table_features through OFPST_TABLE (aka
  * OFPMP_TABLE). */
 struct ofputil_table_features {
-    uint8_t table_id;         /* Identifier of table. Lower numbered tables
-                                 are consulted first. */
+    /* Only for OFPT_TABLE_FEATURES requests and only the first table_features
+     * in such a request.  */
+    enum ofp15_table_features_command command;
+
+    /* The following are always present in table features requests and
+     * replies. */
+    uint8_t table_id;
     char name[OFP_MAX_TABLE_NAME_LEN];
     ovs_be64 metadata_match;  /* Bits of metadata table can match. */
     ovs_be64 metadata_write;  /* Bits of metadata table can write. */
     uint32_t max_entries;     /* Max number of entries supported. */
+
+    /* True if the message included any properties.  This is important for
+     * OFPT_TABLE_FEATURES requests, which change table properties only if any
+     * are included. */
+    bool any_properties;
 
     /* Flags.
      *
@@ -261,22 +271,31 @@ struct ofputil_table_features {
     struct mf_bitmap wildcard;  /* Subset of 'match' that may be wildcarded. */
 };
 
-int ofputil_decode_table_features(struct ofpbuf *,
-                                  struct ofputil_table_features *, bool loose);
+int ofputil_decode_table_features(
+    struct ofpbuf *, struct ofputil_table_features *,
+    struct ofpbuf *raw_properties);
 
 struct ofpbuf *ofputil_encode_table_features_request(enum ofp_version);
 
 struct ofpbuf *ofputil_encode_table_desc_request(enum ofp_version);
 
-void ofputil_append_table_features_reply(
-    const struct ofputil_table_features *tf, struct ovs_list *replies);
+void ofputil_append_table_features(
+    const struct ofputil_table_features *tf,
+    const struct ofpbuf *raw_properties,
+    struct ovs_list *msgs);
 
 void ofputil_table_features_format(
     struct ds *, const struct ofputil_table_features *features,
     const struct ofputil_table_features *prev_features,
     const struct ofputil_table_stats *stats,
     const struct ofputil_table_stats *prev_stats,
-    const struct ofputil_table_map *table_map);
+    int *first_ditto, int *last_ditto);
+void ofputil_table_features_format_finish(struct ds *,
+                                          int first_ditto, int last_ditto);
+
+bool ofputil_table_features_are_superset(
+    const struct ofputil_table_features *super,
+    const struct ofputil_table_features *sub);
 
 /* Abstract table stats.
  *

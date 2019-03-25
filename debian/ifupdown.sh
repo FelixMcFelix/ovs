@@ -60,14 +60,14 @@ if [ "${MODE}" = "start" ]; then
                 ip link set "${IFACE}" up
                 ;;
         OVSBond)
-                ovs_vsctl -- --fake-iface add-bond "${IF_OVS_BRIDGE}"\
+                ovs_vsctl -- --fake-iface --may-exist add-bond "${IF_OVS_BRIDGE}"\
                     "${IFACE}" ${IF_OVS_BONDS} ${IF_OVS_OPTIONS} \
                     ${OVS_EXTRA+-- $OVS_EXTRA}
 
                 ip link set "${IFACE}" up
                 for slave in ${IF_OVS_BONDS}
                 do
-                    ip link set "${IFACE}" up
+                    ip link set "${slave}" up
                 done
                 ;;
         OVSPatchPort)

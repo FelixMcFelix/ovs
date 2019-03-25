@@ -43,6 +43,7 @@
 
 static LIST_HEAD(vport_ops_list);
 static bool compat_gre_loaded = false;
+static bool compat_ip6_tunnel_loaded = false;
 
 /* Protected by RCU read lock for reading, ovs_mutex for writing. */
 static struct hlist_head *dev_table;
@@ -57,7 +58,7 @@ int ovs_vport_init(void)
 {
 	int err;
 
-	dev_table = kzalloc(VPORT_HASH_BUCKETS * sizeof(struct hlist_head),
+	dev_table = kcalloc(VPORT_HASH_BUCKETS, sizeof(struct hlist_head),
 			    GFP_KERNEL);
 	if (!dev_table)
 		return -ENOMEM;
@@ -66,22 +67,37 @@ int ovs_vport_init(void)
 	if (err)
 		goto err_lisp;
 	err = gre_init();
-	if (err && err != -EEXIST)
+	if (err && err != -EEXIST) {
 		goto err_gre;
-	else if (err == -EEXIST)
-		pr_warn("Cannot take GRE protocol entry - The ERSPAN feature may not be supported\n");
-	else {
+	} else {
+		if (err == -EEXIST) {
+			pr_warn("Cannot take GRE protocol rx entry"\
+				"- The GRE/ERSPAN rx feature not supported\n");
+			/* continue GRE tx */
+		}
+
 		err = ipgre_init();
 		if (err && err != -EEXIST) 
 			goto err_ipgre;
 		compat_gre_loaded = true;
 	}
 	err = ip6gre_init();
-	if (err)
+	if (err && err != -EEXIST) {
 		goto err_ip6gre;
+	} else {
+		if (err == -EEXIST) {
+			pr_warn("IPv6 GRE/ERSPAN Rx mode is not supported\n");
+			goto skip_ip6_tunnel_init;
+		}
+	}
+
 	err = ip6_tunnel_init();
 	if (err)
 		goto err_ip6_tunnel;
+	else
+		compat_ip6_tunnel_loaded = true;
+
+skip_ip6_tunnel_init:
 	err = geneve_init_module();
 	if (err)
 		goto err_geneve;
@@ -127,7 +143,8 @@ void ovs_vport_exit(void)
 	ovs_stt_cleanup_module();
 	vxlan_cleanup_module();
 	geneve_cleanup_module();
-	ip6_tunnel_cleanup();
+	if (compat_ip6_tunnel_loaded)
+		ip6_tunnel_cleanup();
 	ip6gre_fini();
 	lisp_cleanup_module();
 	kfree(dev_table);

@@ -20,7 +20,9 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include "compiler.h"
+#include "openvswitch/json.h"
 
+struct ds;
 struct table_style;
 
 /* Manipulating tables and their rows and columns. */
@@ -82,6 +84,7 @@ struct table_style {
 };
 
 #define TABLE_STYLE_DEFAULT { TF_LIST, CF_STRING, true, JSSF_SORT, 0 }
+static const struct table_style table_style_default = TABLE_STYLE_DEFAULT;
 
 #define TABLE_OPTION_ENUMS                      \
     OPT_NO_HEADINGS,                            \
@@ -128,6 +131,9 @@ void table_parse_format(struct table_style *, const char *format);
 void table_parse_cell_format(struct table_style *, const char *format);
 
 void table_print(const struct table *, const struct table_style *);
+void table_format(const struct table *, const struct table_style *,
+                  struct ds *);
+void table_format_reset(void);
 void table_usage(void);
 
 #endif /* table.h */

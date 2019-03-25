@@ -85,7 +85,7 @@
       must be either <code>switch</code> or <code>port-group</code>.
     </p>
     <dl>
-      <dt>[<code>--type=</code>{<code>switch</code> | <code>port-group</code>}] [<code>--log</code>] [<code>--severity=</code><var>severity</var>] [<code>--name=</code><var>name</var>] [<code>--may-exist</code>] <code>acl-add</code> <var>entity</var> <var>direction</var> <var>priority</var> <var>match</var> <var>verdict</var></dt>
+      <dt>[<code>--type=</code>{<code>switch</code> | <code>port-group</code>}] [<code>--log</code>] [<code>--meter=</code><var>meter</var>] [<code>--severity=</code><var>severity</var>] [<code>--name=</code><var>name</var>] [<code>--may-exist</code>] <code>acl-add</code> <var>entity</var> <var>direction</var> <var>priority</var> <var>match</var> <var>verdict</var></dt>
       <dd>
         <p>
           Adds the specified ACL to <var>entity</var>.  <var>direction</var>
@@ -105,7 +105,9 @@
           logging).  The severity must be one of <code>alert</code>,
           <code>warning</code>, <code>notice</code>, <code>info</code>, or
           <code>debug</code>.  If a severity is not specified, the default is
-          <code>info</code>.
+          <code>info</code>.  The <code>--meter=<var>meter</var></code> option
+          is used to rate-limit packet logging.  The <var>meter</var> argument
+          names a meter configured by <code>meter-add</code>.
         </p>
       </dd>
 
@@ -127,21 +129,32 @@
 
     <h1>Logical Switch QoS Rule Commands</h1>
     <dl>
-      <dt>[<code>--may-exist</code>] <code>qos-add</code> <var>switch</var> <var>direction</var> <var>priority</var> <var>match</var> <var>rate</var> <var>burst</var> <var>dscp</var></dt>
+      <dt>[<code>--may-exist</code>] <code>qos-add</code> <var>switch</var> <var>direction</var> <var>priority</var> <var>match</var> [<code>dscp=</code><var>dscp</var>] [<code>rate=</code><var>rate</var> [<code>burst=</code><var>burst</var>]]</dt>
       <dd>
         <p>
-          Adds the specified QoS rule to <var>switch</var>.
+          Adds QoS marking and metering rules to <var>switch</var>.
           <var>direction</var> must be either <code>from-lport</code> or
           <code>to-lport</code>.  <var>priority</var> must be between
-          <code>0</code> and <code>32767</code>, inclusive. <var>dscp</var>
-          must be between <code>0</code> and <code>63</code>, inclusive.
-          <var>rate</var> and <var>burst</var> must be between <code>1</code>
-          and <code>4294967295</code>, inclusive. One of the rate or dscp
-          must be configured. A full description of the fields are in
-          <code>ovn-nb</code>(5). If <code>--may-exist</code> is specified,
-          adding a duplicated QoS rule succeeds but the QoS rule is not
-          really created. Without <code>--may-exist</code>, adding a
-          duplicated QoS rule results in error.
+          <code>0</code> and <code>32767</code>, inclusive.
+        </p>
+
+        <p>
+          If <code>dscp=</code><var>dscp</var> is specified, then
+          matching packets will have DSCP marking applied.
+          <var>dscp</var> must be between <code>0</code> and
+          <code>63</code>, inclusive.  If <code>rate=</code><var>rate</var>
+          is specified then matching packets will have metering applied
+          at <var>rate</var> kbps.  If metering is configured, then
+          <code>burst=</code><var>burst</var> specifies the burst rate
+          limit in kilobits.  <code>dscp</code> and/or <code>rate</code>
+          are required arguments.
+        </p>
+
+        <p>
+          If <code>--may-exist</code> is specified, adding a duplicated
+          QoS rule succeeds but the QoS rule is not really created.
+          Without <code>--may-exist</code>, adding a duplicated QoS rule
+          results in error.
         </p>
       </dd>
 
@@ -151,13 +164,66 @@
         <var>switch</var> is supplied, all the QoS rules from the logical
         switch are deleted.  If <var>direction</var> is also specified,
         then all the flows in that direction will be deleted from the
-        logical switch.  If all the fields are given, then a single flow
-        that matches all the fields will be deleted.
+        logical switch.  If all the fields are supplied, then a single
+        flow that matches the given fields will be deleted.
       </dd>
 
       <dt><code>qos-list</code> <var>switch</var></dt>
       <dd>
         Lists the QoS rules on <var>switch</var>.
+      </dd>
+    </dl>
+
+    <h1>Meter Commands</h1>
+    <dl>
+        <dt><code>meter-add</code> <var>name</var> <var>action</var> <var>rate</var> <var>unit</var> [<var>burst</var>]</dt>
+      <dd>
+        <p>
+          Adds the specified meter.  <var>name</var> must be a unique
+          name to identify this meter.  The <var>action</var> argument
+          specifies what should happen when this meter is exceeded.
+          The only supported action is <code>drop</code>.
+        </p>
+
+        <p>
+          The <var>unit</var> specifies the unit for the <var>rate</var>
+          argument; valid values are <code>kbps</code> and
+          <code>pktps</code> for kilobits per second and packets per
+          second, respectively.  The <var>burst</var> option
+          configures the maximum burst allowed for the band in kilobits
+          or packets depending on whether the <var>unit</var> chosen was
+          <code>kbps</code> or <code>pktps</code>, respectively.  If a
+          burst is not supplied, the switch is free to select some
+          reasonable value depending on its configuration.
+        </p>
+
+        <p>
+          <code>ovn-nbctl</code> only supports adding a meter with a
+          single band, but the other commands support meters with
+          multiple bands.
+        </p>
+
+        <p>
+          Names that start with "__" (two underscores) are reserved for
+          internal use by OVN, so <code>ovn-nbctl</code> does not allow
+          adding them.
+        </p>
+      </dd>
+
+      <dt><code>meter-del</code> [<var>name</var>]</dt>
+      <dd>
+        <p>
+          Deletes meters.  By default, all meters are deleted.  If
+          <var>name</var> is supplied, only the meter with that name
+          will be deleted.
+      </p>
+      </dd>
+
+      <dt><code>meter-list</code></dt>
+      <dd>
+        <p>
+          Lists all meters.
+        </p>
       </dd>
     </dl>
 
@@ -408,6 +474,11 @@
       <dt><code>lsp-get-dhcpv6-optoins</code> <var>port</var></dt>
       <dd>
         Get the configured DHCPv6 options for the logical port.
+      </dd>
+
+      <dt><code>lsp-get-ls</code> <var>port</var></dt>
+      <dd>
+        Get the logical switch which the <var>port</var> belongs to.
       </dd>
 
     </dl>
@@ -815,6 +886,28 @@
       </dd>
     </dl>
 
+    <h1>Port Group commands</h1>
+
+    <dl>
+      <dt><code>pg-add</code> <var>group</var> [<var>port</var>]...</dt>
+      <dd>
+        Creates a new port group in the <code>Port_Group</code> table named
+        <code>group</code> with optional <code>ports</code> added to the group.
+      </dd>
+
+      <dt><code>pg-set-ports</code> <var>group</var> <var>port</var>...</dt>
+      <dd>
+        Sets <code>ports</code> on the port group named <code>group</code>. It
+        is an error if <code>group</code> does not exist.
+      </dd>
+
+      <dt><code>pg-del</code> <var>group</var></dt>
+      <dd>
+        Deletes port group <code>group</code>. It is an error if
+        <code>group</code> does not exist.
+      </dd>
+    </dl>
+
     <h1>Database Commands</h1>
     <p>These commands query and modify the contents of <code>ovsdb</code> tables.
     They are a slight abstraction of the <code>ovsdb</code> interface and
@@ -902,6 +995,86 @@
       </dd>
     </dl>
 
+    <h1>Daemon Mode</h1>
+
+    <p>
+      When it is invoked in the most ordinary way, <code>ovn-nbctl</code>
+      connects to an OVSDB server that hosts the northbound database, retrieves
+      a partial copy of the database that is complete enough to do its work,
+      sends a transaction request to the server, and receives and processes the
+      server's reply.  In common interactive use, this is fine, but if the
+      database is large, the step in which <code>ovn-nbctl</code> retrieves a
+      partial copy of the database can take a long time, which yields poor
+      performance overall.
+    </p>
+
+    <p>
+      To improve performance in such a case, <code>ovn-nbctl</code> offers a
+      "daemon mode," in which the user first starts <code>ovn-nbctl</code>
+      running in the background and afterward uses the daemon to execute
+      operations.  Over several <code>ovn-nbctl</code> command invocations,
+      this performs better overall because it retrieves a copy of the database
+      only once at the beginning, not once per program run.
+    </p>
+
+    <p>
+      Use the <code>--detach</code> option to start an <code>ovn-nbctl</code>
+      daemon.  With this option, <code>ovn-nbctl</code> prints the name of a
+      control socket to stdout.  The client should save this name in
+      environment variable <env>OVN_NB_DAEMON</env>.  Under the Bourne shell
+      this might be done like this:
+    </p>
+
+    <pre fixed="yes">
+      export OVN_NB_DAEMON=$(ovn-nbctl --pidfile --detach)
+    </pre>
+
+    <p>
+      When <env>OVN_NB_DAEMON</env> is set, <code>ovn-nbctl</code>
+      automatically and transparently uses the daemon to execute its commands.
+    </p>
+
+    <p>
+      When the daemon is no longer needed, kill it and unset the environment
+      variable, e.g.:
+    </p>
+
+    <pre fixed="yes">
+      kill $(cat /var/run/ovn-nbctl.pid)
+      unset OVN_NB_DAEMON
+    </pre>
+
+    <p>
+      Daemon mode is experimental.
+    </p>
+
+    <h2>Daemon Commands</h2>
+
+    <p>
+      Daemon mode is internally implemented using the same mechanism used by
+      <code>ovs-appctl</code>.  One may also use <code>ovs-appctl</code>
+      directly with the following commands:
+    </p>
+
+    <dl>
+      <dt>
+        <code>run</code> [<var>options</var>] <var>command</var>
+        [<var>arg</var>...] [<code>--</code> [<var>options</var>]
+        <var>command</var> [<var>arg</var>...] ...]
+      </dt>
+      <dd>
+        Instructs the daemon process to run one or more <code>ovn-nbctl</code>
+        commands described above and reply with the results of running these
+        commands. Accepts the <code>--no-wait</code>, <code>--wait</code>,
+        <code>--timeout</code>, <code>--dry-run</code>, <code>--oneline</code>,
+        and the options described under <code>Table Formatting Options</code>
+        in addition to the the command-specific options.
+      </dd>
+
+      <dt><code>exit</code></dt>
+      <dd>Causes <code>ovn-nbctl</code> to gracefully terminate.</dd>
+    </dl>
+
     <h1>Options</h1>
 
     <dl>
@@ -970,6 +1143,9 @@
       for more information.
     </dd>
     </dl>
+
+    <h2>Daemon Options</h2>
+    <xi:include href="lib/daemon.xml" xmlns:xi="http://www.w3.org/2003/XInclude"/>
 
     <h1>Logging options</h1>
     <xi:include href="lib/vlog.xml" xmlns:xi="http://www.w3.org/2003/XInclude"/>

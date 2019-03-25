@@ -1,4 +1,4 @@
-# Copyright (C) 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017 Nicira, Inc.
+# Copyright (C) 2009-2018 Nicira, Inc.
 #
 # Copying and distribution of this file, with or without modification,
 # are permitted in any medium without royalty provided the copyright
@@ -100,6 +100,7 @@ lib_libopenvswitch_la_SOURCES = \
 	lib/guarded-list.h \
 	lib/hash.c \
 	lib/hash.h \
+	lib/hash-aarch64.h \
 	lib/hindex.c \
 	lib/hindex.h \
 	lib/hmap.c \
@@ -107,6 +108,8 @@ lib_libopenvswitch_la_SOURCES = \
 	lib/hmapx.h \
 	lib/id-pool.c \
 	lib/id-pool.h \
+	lib/ipf.c \
+	lib/ipf.h \
 	lib/jhash.c \
 	lib/jhash.h \
 	lib/json.c \
@@ -135,6 +138,7 @@ lib_libopenvswitch_la_SOURCES = \
 	lib/netdev-dpdk.h \
 	lib/netdev-dummy.c \
 	lib/netdev-provider.h \
+	lib/netdev-rte-offloads.h \
 	lib/netdev-vport.c \
 	lib/netdev-vport.h \
 	lib/netdev-vport-private.h \
@@ -280,6 +284,8 @@ lib_libopenvswitch_la_SOURCES = \
 	lib/syslog-direct.h \
 	lib/syslog-libc.c \
 	lib/syslog-libc.h \
+	lib/syslog-null.c \
+	lib/syslog-null.h \
 	lib/syslog-provider.h \
 	lib/table.c \
 	lib/table.h \
@@ -406,7 +412,8 @@ endif
 if DPDK_NETDEV
 lib_libopenvswitch_la_SOURCES += \
 	lib/dpdk.c \
-	lib/netdev-dpdk.c
+	lib/netdev-dpdk.c \
+	lib/netdev-rte-offloads.c
 else
 lib_libopenvswitch_la_SOURCES += \
 	lib/dpdk-stub.c
@@ -463,6 +470,13 @@ generate-dhparams-c:
 	mv lib/dhparams.c.tmp lib/dhparams.c
 else
 lib_libopenvswitch_la_SOURCES += lib/stream-nossl.c
+endif
+
+lib_libopenvswitch_la_SOURCES += lib/dns-resolve.h
+if HAVE_UNBOUND
+lib_libopenvswitch_la_SOURCES += lib/dns-resolve.c
+else
+lib_libopenvswitch_la_SOURCES += lib/dns-resolve-stub.c
 endif
 
 pkgconfig_DATA += \
@@ -548,9 +562,9 @@ CLEANFILES += lib/meta-flow.inc lib/nx-match.inc
 EXTRA_DIST += build-aux/extract-ofp-fields
 
 lib/ofp-actions.inc1: $(srcdir)/build-aux/extract-ofp-actions lib/ofp-actions.c
-	$(AM_V_GEN)$(run_python) $^ --prototypes > $@.tmp && mv $@.tmp $@
+	$(AM_V_GEN)$(run_python) $< prototypes $(srcdir)/lib/ofp-actions.c > $@.tmp && mv $@.tmp $@
 lib/ofp-actions.inc2: $(srcdir)/build-aux/extract-ofp-actions lib/ofp-actions.c
-	$(AM_V_GEN)$(run_python) $^ --definitions > $@.tmp && mv $@.tmp $@
+	$(AM_V_GEN)$(run_python) $< definitions $(srcdir)/lib/ofp-actions.c > $@.tmp && mv $@.tmp $@
 lib/ofp-actions.lo: lib/ofp-actions.inc1 lib/ofp-actions.inc2
 CLEANFILES += lib/ofp-actions.inc1 lib/ofp-actions.inc2
 EXTRA_DIST += build-aux/extract-ofp-actions
@@ -592,3 +606,12 @@ lib/ovs-fields.7: $(srcdir)/build-aux/extract-ofp-fields include/openvswitch/met
             $(srcdir)/lib/meta-flow.xml > $@.tmp
 	$(AM_V_at)mv $@.tmp $@
 EXTRA_DIST += lib/meta-flow.xml
+
+man_MANS += lib/ovs-actions.7
+CLEANFILES += lib/ovs-actions.7
+lib/ovs-actions.7: $(srcdir)/build-aux/extract-ofp-actions lib/ovs-actions.xml
+	$(AM_V_GEN)PYTHONIOENCODING=utf8 $(run_python) $< \
+            --ovs-version=$(VERSION) ovs-actions \
+            $(srcdir)/lib/ovs-actions.xml > $@.tmp
+	$(AM_V_at)mv $@.tmp $@
+EXTRA_DIST += lib/ovs-actions.xml

@@ -1234,9 +1234,16 @@ ovsdb_datum_from_json__(struct ovsdb_datum *datum,
 
         n = inner->array.n;
         if (n < type->n_min || n > type->n_max) {
-            return ovsdb_syntax_error(json, NULL, "%s must have %u to "
-                                      "%u members but %"PRIuSIZE" are present",
-                                      class, type->n_min, type->n_max, n);
+            if (type->n_min == 1 && type->n_max == 1) {
+                return ovsdb_syntax_error(json, NULL, "%s must have exactly "
+                                          "one member but %"PRIuSIZE" "
+                                          "are present", class, n);
+            } else {
+                return ovsdb_syntax_error(json, NULL, "%s must have %u to "
+                                          "%u members but %"PRIuSIZE" are "
+                                          "present",
+                                          class, type->n_min, type->n_max, n);
+            }
         }
 
         datum->n = 0;
@@ -2121,7 +2128,6 @@ ovsdb_datum_apply_diff(struct ovsdb_datum *new,
                        const struct ovsdb_datum *diff,
                        const struct ovsdb_type *type)
 {
-    ovsdb_datum_init_empty(new);
     ovsdb_datum_diff(new, old, diff, type);
 
     /* Make sure member size of 'new' conforms to type. */

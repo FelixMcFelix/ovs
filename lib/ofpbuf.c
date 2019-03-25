@@ -19,7 +19,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include "openvswitch/dynamic-string.h"
-#include "netdev-dpdk.h"
 #include "util.h"
 
 static void
@@ -469,9 +468,9 @@ void
 ofpbuf_insert(struct ofpbuf *b, size_t offset, const void *data, size_t n)
 {
     if (offset < b->size) {
-        ofpbuf_put_uninit(b, n);
+        ofpbuf_put_uninit(b, n); /* b->size gets increased. */
         memmove((char *) b->data + offset + n, (char *) b->data + offset,
-                b->size - offset);
+                b->size - offset - n);
         memcpy((char *) b->data + offset, data, n);
     } else {
         ovs_assert(offset == b->size);

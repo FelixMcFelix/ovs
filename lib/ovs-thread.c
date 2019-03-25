@@ -27,7 +27,6 @@
 #include "fatal-signal.h"
 #include "hash.h"
 #include "openvswitch/list.h"
-#include "netdev-dpdk.h"
 #include "ovs-rcu.h"
 #include "openvswitch/poll-loop.h"
 #include "seq.h"
@@ -155,8 +154,6 @@ UNLOCK_FUNCTION(rwlock, destroy, NULL);
         }                                               \
     }
 
-XPTHREAD_FUNC1(pthread_mutex_lock, pthread_mutex_t *);
-XPTHREAD_FUNC1(pthread_mutex_unlock, pthread_mutex_t *);
 XPTHREAD_FUNC1(pthread_mutexattr_init, pthread_mutexattr_t *);
 XPTHREAD_FUNC1(pthread_mutexattr_destroy, pthread_mutexattr_t *);
 XPTHREAD_FUNC2(pthread_mutexattr_settype, pthread_mutexattr_t *, int);
@@ -259,6 +256,7 @@ ovs_rwlock_init(const struct ovs_rwlock *l_)
  * call with calls to ovsrcu_quiesce_start() and ovsrcu_quiesce_end().  */
 void
 ovs_mutex_cond_wait(pthread_cond_t *cond, const struct ovs_mutex *mutex_)
+    OVS_NO_THREAD_SAFETY_ANALYSIS
 {
     struct ovs_mutex *mutex = CONST_CAST(struct ovs_mutex *, mutex_);
     int error;

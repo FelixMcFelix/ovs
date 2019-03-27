@@ -7512,8 +7512,8 @@ format_PROBDROP(const struct ofpact_probdrop *a,
 }
 
 static enum ofperr
-check_PROBDROP(const struct ofpact_probdrop *a,
-               const struct ofpact_check_params *cp)
+check_PROBDROP(const struct ofpact_probdrop *a OVS_UNUSED,
+               const struct ofpact_check_params *cp OVS_UNUSED)
 {
     return 0;
 }

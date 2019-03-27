@@ -1101,8 +1101,11 @@ struct ofpact_decap {
  *
  * Used for OFPAT_PROBDROP */
 struct ofpact_probdrop {
-    struct ofpact ofpact;
-    uint32_t prob;           /* Uint probability, "covers" 0->1 range. */
+    OFPACT_PADDED_MEMBERS(
+        struct ofpact ofpact;
+        uint32_t prob;           /* Uint probability, "covers" 0->1 range. */
+    );
+    uint8_t data[];
 };
 
 /* Converting OpenFlow to ofpacts. */
